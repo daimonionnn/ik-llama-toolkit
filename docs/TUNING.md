@@ -307,3 +307,36 @@ CPU-resident layers proportionally across GPUs rather than taking the first N.
 6. `./bench.sh batch` — confirm 4096/1024
 7. Write the winners into `config/models/step-3.7-flash-q4.env`
 8. `./bench.sh sweep` — verify it holds up as context fills
+
+
+## 6. CUDA toolkit and GPU architecture: neither matters here
+
+Mainline llama.cpp built with CUDA 13.x loses most of its throughput on
+Blackwell once the KV cache passes 8192 tokens - proven, with a container-based
+CUDA 12.8 workaround, in
+`~/development/multi-gpu-llm/doc/cuda-fa-blackwell.md`. The obvious worry was
+that this toolkit inherits the same problem.
+
+It does not. Measured on MXFP4, `--n-cpu-moe 16`, q8_0 KV, 24 threads,
+changing exactly one variable at a time (16k context):
+
+| CUDA | arch | pp | tg |
+|------|------|---:|---:|
+| 13.3 | 120a-real | 382.0 | 19.71 |
+| 12.8 | 120a-real | 384.6 | 19.47 |
+| 12.8 | 120-real  | 376.2 | 19.40 |
+
+All three sit inside the run-to-run spread. **Build with whatever CUDA is
+installed**; `build-cuda12.sh` exists for the comparison and as insurance, not
+because it is needed. The arch-specific `120a` suffix is likewise worth ~2% at
+most, which is noise at this sample size.
+
+Why ik_llama escapes a bug that costs mainline 5x: the mainline collapse comes
+from its flash-attention kernel selector falling into an MMA path that is slow
+on sm_120, and this fork's MLA implementation does not use those kernels.
+
+### What actually moved the number
+
+An earlier comparison appeared to show CUDA 12.8 winning by 10% on prefill.
+It did not - that run also went from 18 to 24 threads, and threads are the
+whole story (see section 2). Two variables, one conclusion, wrong conclusion.
