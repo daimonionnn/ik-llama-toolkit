@@ -141,6 +141,25 @@ otherwise** (`./bench.sh threads`, at the default `ncmoe=22`):
 | 18                   | **27.5** |
 | 6, pinned to P-cores | 24.3     |
 
+**Correction (2026-08-10): that table only measured `tg`, and `tg` is the
+metric threads do *not* affect.** Re-swept on MXFP4 / `--n-cpu-moe 16` /
+q8_0 KV, measuring both:
+
+| threads | pp512 | tg128 |
+|--------:|------:|------:|
+| 12      | 268.6 | 24.63 |
+| 16      | 316.7 | 25.03 |
+| 18      | 333.4 | 24.97 |
+| 20      | 350.8 | 25.07 |
+| 22      | 343.0 | 25.24 |
+| **24**  | **354.6** | 24.92 |
+
+Generation is flat from 12 upward (24.6-25.2, inside the ±0.35 run-to-run
+spread) because it is bound by memory bandwidth, not cores. Prefill keeps
+scaling: **+32% from 12 to 24 threads, +6% over the old 18 default.** All 24
+threads of an Arrow Lake-S part help here, E-cores included - the default is
+now 24.
+
 tg keeps rising to 18 cores, and pinning to the P-cores is *slower*, not faster.
 The reason is the split: with 22 expert layers on the CPU (the default for
 262 144 context), the per-token CPU work is large enough that it is compute- and
