@@ -36,6 +36,11 @@ Clone it with:
 # 1. Find a CUDA toolkit that can target sm_120
 # -----------------------------------------------------------------------------
 ARCH_NUM="${IK_CUDA_ARCH%%-*}"          # "120-real" -> "120"
+ARCH_NUM="${ARCH_NUM%[af]}"              # "120a-real" -> "120": nvcc --list-gpu-arch
+                                         # reports compute_120, never compute_120a,
+                                         # so the arch-specific suffix must come off
+                                         # before probing. It stays in IK_CUDA_ARCH,
+                                         # which is what gets passed to CMake.
 
 # Ask nvcc directly which architectures it knows. This is authoritative and,
 # unlike a test compile, cannot be confused by unrelated header problems --
