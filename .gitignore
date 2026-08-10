@@ -1,0 +1,10 @@
+# Upstream source -- cloned separately by build.sh (has its own git repo)
+ik_llama.cpp/
+
+# Build-generated
+compat/
+
+# Runtime / machine-specific output
+logs/
+results/
+*.log
