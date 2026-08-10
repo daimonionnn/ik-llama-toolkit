@@ -115,31 +115,33 @@ balance), and `--fit` / `-ncmoe` handle the rest.
 
 ### Is ik_llama.cpp actually faster than LM Studio / Ollama / standard llama.cpp?
 
-**Step-3.7-Flash (measured head-to-head, same config and prompts):** generation
-is identical (~27 tok/s both), and standard llama.cpp prefills **~2.4× faster**
-(~635 vs ~270 tok/s). Mainline llama.cpp — which LM Studio and Ollama bundle —
-already supports `step35` and runs it out of the box, with none of the CUDA-13
-build pain. For this plain-GQA MoE the ik_llama build did **not** buy a speed win.
+**It depends entirely on the model, and the first answer here was wrong.**
 
-**DeepSeek-V4-Flash (MLA + sparse attention, measured head-to-head, MXFP4, same
-split and prompts):** generation is again identical (~20 tok/s both), and on a
-long prompt **ik_llama CRASHES** while standard prefills fine at ~400 tok/s.
-ik_llama aborts with `GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)` — the
-DeepSeek Sparse Attention masks exceed the 32-input scheduler limit in hybrid
-CPU/GPU mode. Short prompts (chat) are fine; long prompts (RAG) abort. This is
-the model class ik_llama is *supposed* to own, and it lost — the expectation was
-wrong. (LM Studio's ~74 GiB VRAM fill is its coarse *GUI* slider, not a
-llama.cpp limit; raw `llama-server --n-cpu-moe` fills VRAM fully.) Full numbers
-in [RESULTS.md §3.1](RESULTS.md).
+**Step-3.7-Flash (GQA MoE):** no. Generation is identical (~27 tok/s both) and
+standard llama.cpp prefills **~2.4× faster** (~635 vs ~270 tok/s). Mainline
+already supports `step35` and runs it out of the box.
 
-**The honest rule:** on both models measured here, standard llama.cpp (bundled
-prebuilt in LM Studio / Ollama) is as fast on generation and either faster or
-more robust on prefill. ik_llama's remaining pluses are `--fit`'s automatic MoE
-offload (standard's `--fit` needs a manual `--n-cpu-moe`) and its SOTA `IQ*_K`
-quants / pure-CPU kernels — not raw speed. If you just want a model running fast
-with minimal fuss, LM Studio or Ollama (set `--n-cpu-moe` to fill VRAM) is the
-simpler and at least as fast path; reach for this toolkit for the tuning control
-and reproducible measurement, which is most of what it turned out to be worth.
+**DeepSeek-V4-Flash (MLA + sparse attention):** yes, clearly — but only once
+both sides are given a fair build. The original measurement here used an
+ik binary two weeks older than its own checkout, running f16 KV and default
+threads, and concluded ik was slower and crash-prone. Re-measured 2026-08-10
+with a current build, q8_0 KV and 24 threads:
+
+| MXFP4, `-ncmoe 16` | mainline (CUDA 12.8) | ik_llama |
+|---|---:|---:|
+| prefill @16k | ~305 | **385** |
+| generation @16k | 16.4 | **19.5** |
+
+**+26% prefill, +19% generation.** Part of that is capability rather than
+speed: ik runs the KV cache at q8_0, and mainline *segfaults* with `-ctk q8_0`
+on this model past ~4k context. The long-prefill crash that made the first
+verdict so damning (`GGML_SCHED_MAX_SPLIT_INPUTS`) is fixed in current ik —
+65k-token prefills now complete normally.
+
+**The honest rule:** run mainline for plain GQA MoE models, run this toolkit
+for DeepSeek-class MLA architectures — which is, in the end, exactly what
+ik_llama.cpp claims about itself. Full numbers in
+[RESULTS.md §5](RESULTS.md).
 
 ### Does the PCIe link speed affect inference? Would PCIe 5.0 x8 hurt?
 

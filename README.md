@@ -7,7 +7,12 @@ GPU/CPU split for the fastest inference the machine can give — so you can serv
 200B-parameter model from a single workstation instead of renting a multi-GPU
 node.
 
-Built on [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp). It ships
+Built on [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp). **Where it
+pays off is DeepSeek-class MLA models** — on DeepSeek-V4-Flash MXFP4 it beats
+mainline llama.cpp by ~26% on prefill and ~19% on generation, and runs a q8_0
+KV cache that mainline segfaults on. On plain GQA MoE models such as
+Step-3.7-Flash, mainline is as fast or faster; see
+[docs/RESULTS.md §5](docs/RESULTS.md). It ships
 **tuned for one specific machine** (an RTX PRO 6000 Blackwell, 96 GiB), but
 nothing here is tied to that card: it runs on any CUDA GPU — and, through
 ik_llama.cpp, on AMD/ROCm, Vulkan and Apple Metal too — with the split re-tuned
@@ -34,8 +39,8 @@ everything still works — you just re-run `./bench.sh` to re-pick the split
 | resource | reference configuration |
 |----------|-----|
 | GPU      | NVIDIA RTX PRO 6000 Blackwell Workstation — 96 GiB, `sm_120`, ~1.8 TB/s |
-| CPU      | Intel Core Ultra 5 250K Plus — 6 P-cores (`0-5`) + 12 E-cores (`6-17`), no SMT |
-| RAM      | 224 GiB DDR5-6333, dual channel — ~101 GB/s theoretical |
+| CPU      | Intel Core Ultra 7 270K Plus — 8 P-cores + 16 E-cores = **24 cores**, no SMT |
+| RAM      | 224 GiB DDR5 (2×48 + 2×64 GiB) at 6267 MT/s, dual channel — ~100 GB/s |
 | Storage  | NVMe, 1.8 TB free |
 
 The constraint that drives everything is the ratio between the two memory pools:
@@ -122,6 +127,12 @@ sudo apt install -y cuda-toolkit-13-1
 `sm_120`, and refuses to build against one that fails — so you will get a clear
 error rather than a binary that dies at load time.
 
+**Any CUDA ≥ 12.8 is fine, 12 or 13.** Mainline llama.cpp built with CUDA 13.x
+collapses on Blackwell past 8192 context, and `build-cuda12.sh` builds this
+engine with CUDA 12.8 in a container as insurance — but the two measure
+identically here, so it is a check that was run, not a step you need. Details
+in [docs/TUNING.md §9](docs/TUNING.md).
+
 ### 2. Build
 
 ```bash
@@ -164,6 +175,7 @@ VRAM at launch. Starting with 20 GiB free instead of 95 GiB silently pushes
 
 ```bash
 ./serve.sh                              # default: Step-3.7-Flash Q4_K_XL, ~26 tok/s
+./serve.sh mxfp4-tuned                  # DeepSeek-V4-Flash MXFP4, the tuned profile
 ./serve-deepseek.sh                     # DeepSeek-V4-Flash (MLA), port 8090, ~17 tok/s
 ./serve-step-3.7-flash-q8.sh            # Step-3.7-Flash Q8_K_XL quality reference, ~13 tok/s
 ./serve.sh --list                       # what profiles exist
@@ -242,8 +254,8 @@ permanent.
 | `IK_FIT_MARGIN`          | `2048`          | MiB of VRAM to leave free (only used by `--fit`) |
 | `IK_OT`                  | *(unset)*       | Full manual control via `-ot` regexes |
 | `IK_CTK` / `IK_CTV`      | `q8_0`          | KV cache precision (`q4_0` frees ~11 GiB at 262k) |
-| `IK_THREADS`             | `18`            | CPU threads for generation (all cores — measured; see TUNING §2) |
-| `IK_THREADS_BATCH`       | `18`            | CPU threads for prompt processing (= all cores) |
+| `IK_THREADS`             | `24`            | CPU threads for generation (all cores; generation is flat past 12 — see TUNING §2) |
+| `IK_THREADS_BATCH`       | `24`            | CPU threads for prompt processing — **worth +32% prefill over 12** |
 | `IK_BATCH` / `IK_UBATCH` | `4096` / `1024` | Prefill batch sizes |
 | `IK_RTR`                 | `0`             | Repack CPU experts — faster prefill, but disables mmap |
 | `IK_SER`                 | *(unset)*       | Use fewer than 8 experts. Faster, changes output |
@@ -264,6 +276,7 @@ server OOMs. The measured splits are tabulated in
 ```
 ik-llama-toolkit/
 ├── build.sh              compile ik_llama.cpp (CUDA + host compiler probing)
+├── build-cuda12.sh       same, with CUDA 12.8 in a container (optional; see TUNING §9)
 ├── serve.sh              one-command server launch
 ├── serve-deepseek.sh     wrapper: DeepSeek-V4-Flash (MLA), port 8090
 ├── serve-step-3.7-flash-q8.sh  wrapper: Step-3.7-Flash Q8 quality reference
@@ -271,7 +284,7 @@ ik-llama-toolkit/
 ├── bench.sh              benchmark harness
 ├── config/
 │   ├── default.env       global defaults, fully annotated
-│   └── models/*.env      per-model profiles (q4, q4-r4, q8, deepseek-v4)
+│   └── models/*.env      per-model profiles (q4, q4-r4, q8, deepseek-v4, mxfp4-tuned)
 ├── lib/common.sh         shared helpers: config, preflight, arg assembly
 ├── docs/
 │   ├── RESULTS.md        every measurement taken (Q4 + Q8)

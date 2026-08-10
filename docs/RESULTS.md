@@ -20,7 +20,8 @@ bytes-per-weight (the driver of the Q4-vs-Q8 speed gap in §2):
 | **Q8_K_XL** | ~195 GiB (6 shards) | quality reference      |
 
 A **second model, DeepSeek-V4-Flash** (`deepseek4`: MLA + sparse attention,
-~151 GiB Q8), is also covered — in the runtime comparison at [§3.1](#31-deepseek-v4-flash-deepseek4-mla--sparse-attention-151-gib-q8),
+~151 GiB Q8), is also covered — in the runtime comparison at [§3.1](#31-deepseek-v4-flash-deepseek4-mla--sparse-attention) and, after a fair
+re-match, at [§5](#5-re-measurement-2026-08-10),
 because it is the architecture class where ik_llama is expected to differ most.
 
 **Dates:** 2026-07-24 / 25.
@@ -185,6 +186,13 @@ Use it as a quality reference, not a daily driver.
 
 ## 3. ik_llama.cpp vs standard llama.cpp — was any of this worth it?
 
+> **Superseded for DeepSeek by [§5](#5-re-measurement-2026-08-10).** The
+> verdict below stands for Step-3.7-Flash, but the DeepSeek half of it
+> ([§3.1](#31-deepseek-v4-flash-deepseek4-mla--sparse-attention)) was measured
+> against an ik binary two weeks older than its own checkout, with f16 KV and
+> default threads. Re-measured fairly, ik wins that model by ~20-26% and no
+> longer crashes on long prefill.
+
 The honest head-to-head. **Standard llama.cpp** = the CUDA build LM Studio and
 Ollama bundle (LM Studio's `nvidia-cuda12-avx2-2.26.0`). Both runtimes ran the
 **same Q4_K_XL model**, **identical flags** (`-ngl 99 -c 262144 -fa on`, q8_0 KV,
@@ -336,3 +344,95 @@ Auto-saved `bench.sh` runs (tables + full hardware/git context) live in
 [`../results/`](../results/) as `*-<mode>-<timestamp>.md` and `.raw.log`. The
 numbers above that came from ad-hoc `llama-bench`/server runs during tuning are
 consolidated here because that is their only permanent home.
+
+---
+
+## 5. Re-measurement (2026-08-10)
+
+[§3.1](#31-deepseek-v4-flash-deepseek4-mla--sparse-attention) concluded that
+ik_llama loses to mainline on DeepSeek-V4-Flash, the model class it is built
+for. That conclusion was an artefact of an unfair comparison, and it reverses
+when the comparison is fixed.
+
+**What was wrong with it.** The ik binary on disk was built two weeks before
+the checkout it was measured from (binary `31018dc`, tree `bd342d6`), missing
+a burst of DS4-specific optimisations landed 2026-08-07/08 — one of them
+titled *"Allow Q8_0 cache in the CUDA DSA implementation"*. It also ran f16 KV
+and default threads while mainline ran its own tuned config.
+
+Everything in this section was measured back to back on the same day, so the
+numbers are internally consistent. (§1-§4 predate a RAM reconfiguration and a
+CUDA upgrade; do not compare across sections.)
+
+**Setup:** DeepSeek-V4-Flash-0731 MXFP4 (~146 GiB), `-ncmoe 16`, `-mla 3
+-fidx`, q8_0 KV, 24 threads, GPU otherwise idle. Measured over HTTP with
+`multi-gpu-llm/linux/scripts/benchmark-loaded-model.sh` so both engines are
+driven identically.
+
+### 5.1 Head-to-head, both at their best
+
+| | mainline (CUDA 12.8, f16 KV) | ik_llama (q8_0 KV, 24t) |
+|---|---:|---:|
+| prefill @4k / 16k / 65k | ~305 | **366 / 385 / 362** |
+| generation @4k / 16k / 65k | 16.4 | **19.8 / 19.5 / 17.7** |
+
+**+26% prefill, +19% generation.** Part of the margin is capability rather
+than speed: mainline **segfaults with `-ctk q8_0` on this model past ~4k
+context** (reproduced twice — 4k alone gives 335 pp / 18.9 tg, 16k kills the
+server), so it cannot run the configuration ik runs by default.
+
+The `GGML_SCHED_MAX_SPLIT_INPUTS` abort from §3.1 is also gone: 65 536-token
+prefills complete normally on the current build.
+
+### 5.2 Threads — prefill scales, generation does not
+
+| threads | pp512 | tg128 |
+|--------:|------:|------:|
+| 12 | 268.6 | 24.63 |
+| 16 | 316.7 | 25.03 |
+| 18 | 333.4 | 24.97 |
+| 20 | 350.8 | 25.07 |
+| 22 | 343.0 | 25.24 |
+| **24** | **354.6** | 24.92 |
+
+**+32% prefill from 12 to 24 threads; generation flat** (24.6-25.2, inside the
+±0.35 run-to-run spread) because it is bound by DDR5 bandwidth, not cores.
+This box has 24 cores, not the 18 assumed throughout §1 — an Arrow Lake-S
+Ultra 7 270K, 8 P + 16 E. The old §1.4 table stopped at 18 and measured only
+`tg`, the one metric threads do not move, so it read as "18 is enough".
+
+### 5.3 CUDA toolkit and GPU architecture — both noise
+
+One variable changed at a time, 16k context:
+
+| CUDA | arch | threads | pp | tg |
+|---|---|---:|---:|---:|
+| 13.3 | `120-real` | 18 | 349 | 19.8 |
+| 13.3 | `120a-real` | 24 | 382.0 | 19.71 |
+| 12.8 | `120a-real` | 24 | 384.6 | 19.47 |
+| 12.8 | `120-real` | 24 | 376.2 | 19.40 |
+
+Rows 2-4 sit inside the run-to-run spread. **The CUDA version does not matter
+and neither does the `a` architecture suffix** — the 349 → 385 improvement was
+the thread count, nothing else. An earlier reading of this data credited CUDA
+12.8 with ~10% of prefill; that comparison had changed threads at the same
+time and was wrong.
+
+This also means the **Blackwell CUDA 13.x collapse is mainline-specific**.
+Mainline llama.cpp loses ~5× past 8192 context under CUDA 13.3 on `sm_120`
+(documented in `~/development/multi-gpu-llm/doc/cuda-fa-blackwell.md`, with a
+container-based CUDA 12.8 workaround); ik_llama's MLA path does not route
+through the flash-attention kernels that misbehave, so it never sees it.
+`build-cuda12.sh` remains available as insurance and as the record of this
+check.
+
+### 5.4 Revised verdict
+
+| model class | winner |
+|---|---|
+| Step-3.7-Flash (plain GQA MoE) | **mainline** — 2.4× prefill, generation tied |
+| DeepSeek-V4-Flash (MLA + DSA) | **ik_llama** — +26% prefill, +19% tg, q8_0 KV |
+
+Which is, in the end, what ik_llama.cpp claims about itself: it is an
+MLA/DeepSeek specialist, not a general speedup. The §3 verdict was right about
+the model it tested and wrong to generalise from a stale binary.

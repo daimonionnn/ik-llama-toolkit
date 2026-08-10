@@ -122,8 +122,8 @@ This is why the RAM upgrade question has a clear answer — see §7.
 ## 2. Threads
 
 ```bash
-IK_THREADS=18         # generation
-IK_THREADS_BATCH=18   # prompt processing
+IK_THREADS=24         # generation
+IK_THREADS_BATCH=24   # prompt processing
 ```
 
 This is measured, and it overturned the obvious guess. The intuition was that
@@ -160,16 +160,14 @@ scaling: **+32% from 12 to 24 threads, +6% over the old 18 default.** All 24
 threads of an Arrow Lake-S part help here, E-cores included - the default is
 now 24.
 
-tg keeps rising to 18 cores, and pinning to the P-cores is *slower*, not faster.
-The reason is the split: with 22 expert layers on the CPU (the default for
-262 144 context), the per-token CPU work is large enough that it is compute- and
-latency-bound, not bandwidth-bound, so the 12 E-cores contribute real work. The
-"6 P-cores is enough" rule only holds when few layers are on the CPU — i.e. at
-small context / low `-ncmoe`. **Re-run `./bench.sh threads` if you change the
-context or split substantially**, because the optimum moves with the CPU load.
+The P-core pinning result survives the correction and is worth keeping: with
+many expert layers on the CPU, the E-cores contribute real work, so restricting
+to the 8 P-cores loses throughput. `IK_CPU_LIST` is deliberately empty — pinning
+measured slower than letting Intel Thread Director place all 24 threads itself.
 
-`IK_CPU_LIST` is deliberately empty: pinning measured slower than letting Intel
-Thread Director place all 18 threads itself.
+**Re-run `./bench.sh threads` if you change the model or split substantially.**
+The prefill optimum tracks how much work the CPU side is doing; the generation
+plateau does not move, because DDR5 bandwidth is fixed.
 
 ---
 
@@ -260,22 +258,23 @@ If a run dies during warmup with a CUDA OOM, halve `IK_UBATCH` first.
 
 ## 7. What to change if the hardware changes
 
-### The 128 GB / DDR5-7000 swap
+### The 128 GB / DDR5-7400 swap — tried, then reverted
 
-You mentioned possibly switching to 128 GiB at 7000 MT/s. For this workload
-that trade is **bad**, and it is worth being explicit about why:
+This was predicted to be a bad trade, the swap was made anyway, and the
+prediction held. Dropping to 2×64 GiB raised the configured speed from
+6267 to 7400 MT/s — **+18% of raw bandwidth, worth +2 to +4%** end to end on
+the RAM-offload configurations, and nothing at all on the all-VRAM ones.
+Measured across both engines in
+`~/development/multi-gpu-llm/doc/benchmarks.md`.
 
-- **Bandwidth gain is small.** 6333 → 7000 MT/s is +10.5%. It applies only to
-  the ~11 layers of experts on the CPU, which are maybe a third of total token
-  latency — so expect low single-digit percent end to end.
-- **Capacity loss is not small.** Q4_K_XL needs ~25–30 GiB of CPU-side expert
-  weights, which 128 GiB still holds. But `Q8_K_XL` needs ~145 GiB and would
-  **stop fitting entirely**, and you would lose the page-cache headroom that
-  makes restarts fast.
+Amdahl explains the whole gap: the CPU-resident experts are one term of the
+per-token latency, so a fifth more bandwidth on that term buys a few percent
+overall. Meanwhile 128 GiB stops holding `Q8_K_XL`'s ~145 GiB of CPU-side
+weights at all, and loses the page cache that makes restarts fast.
 
-Keep the 224 GiB. If you want more generation speed, the lever is getting more
-experts onto the GPU (context length, KV precision, `-ub`), not making the CPU
-path 10% quicker.
+The four modules are back in (2×48 + 2×64 GiB at 6267 MT/s). If you want more
+generation speed the lever is getting more experts **onto the GPU** — context
+length, KV precision, `-ub` — not making the CPU path a fifth quicker.
 
 ### A different model
 
@@ -309,7 +308,7 @@ CPU-resident layers proportionally across GPUs rather than taking the first N.
 8. `./bench.sh sweep` — verify it holds up as context fills
 
 
-## 6. CUDA toolkit and GPU architecture: neither matters here
+## 9. CUDA toolkit and GPU architecture: neither matters here
 
 Mainline llama.cpp built with CUDA 13.x loses most of its throughput on
 Blackwell once the KV cache passes 8192 tokens - proven, with a container-based
@@ -339,4 +338,4 @@ on sm_120, and this fork's MLA implementation does not use those kernels.
 
 An earlier comparison appeared to show CUDA 12.8 winning by 10% on prefill.
 It did not - that run also went from 18 to 24 threads, and threads are the
-whole story (see section 2). Two variables, one conclusion, wrong conclusion.
+whole story (see §2). Two variables, one conclusion, wrong conclusion.

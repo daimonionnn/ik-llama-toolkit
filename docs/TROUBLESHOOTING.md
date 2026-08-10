@@ -96,6 +96,21 @@ The binary was built for the wrong compute capability. Rebuild clean:
 ./build.sh --clean
 ```
 
+### `GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS) failed`
+
+Long prefills on DeepSeek-class models used to abort here: the sparse-attention
+masks produce more than 32 tensors crossing the CPU/GPU split. **Fixed
+upstream** — pull and rebuild (`./build.sh --update`). Verified with
+65 536-token prefills on MXFP4.
+
+### Should I worry about CUDA 13 on Blackwell?
+
+Not for this engine. Mainline llama.cpp built with CUDA 13.x loses most of its
+throughput on `sm_120` past 8192 context, and `build-cuda12.sh` exists as
+insurance against that — but measurement shows ik_llama is unaffected, because
+its MLA path does not use the flash-attention kernels involved. Build with the
+host toolkit; see [TUNING.md §9](TUNING.md).
+
 ### The build takes forever
 
 Normal: 15–30 minutes cold, almost all of it CUDA kernels. Installing `ccache`
