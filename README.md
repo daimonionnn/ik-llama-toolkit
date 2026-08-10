@@ -176,7 +176,7 @@ VRAM at launch. Starting with 20 GiB free instead of 95 GiB silently pushes
 ```bash
 ./serve.sh                              # default: Step-3.7-Flash Q4_K_XL, ~26 tok/s
 ./serve.sh mxfp4-tuned                  # DeepSeek-V4-Flash MXFP4, the tuned profile
-./serve-deepseek.sh                     # DeepSeek-V4-Flash (MLA), port 8090, ~17 tok/s
+./serve-deepseek-v4-flash.sh                     # DeepSeek-V4-Flash (MLA), port 8090, ~17 tok/s
 ./serve-step-3.7-flash-q8.sh            # Step-3.7-Flash Q8_K_XL quality reference, ~13 tok/s
 ./serve.sh --list                       # what profiles exist
 ./serve.sh --ctx 131072                 # override context length
@@ -195,7 +195,7 @@ evicts a GPU-resident LM Studio or Ollama model.
 The two `serve-*.sh` scripts are thin wrappers that free the GPU first and
 forward any `serve.sh` flag:
 
-- **`serve-deepseek.sh`** → `serve.sh deepseek-v4-flash`. Defaults to **port
+- **`serve-deepseek-v4-flash.sh`** → `serve.sh deepseek-v4-flash`. Defaults to **port
   8090** (LM Studio's API server usually holds 8080) and enables MLA + the fused
   DSA indexer. `--fit` fills VRAM to ~94 GiB where LM Studio only reached ~74.
 - **`serve-step-3.7-flash-q8.sh`** → `serve.sh step-3.7-flash-q8`, the ~195 GiB
@@ -278,7 +278,7 @@ ik-llama-toolkit/
 ├── build.sh              compile ik_llama.cpp (CUDA + host compiler probing)
 ├── build-cuda12.sh       same, with CUDA 12.8 in a container (optional; see TUNING §9)
 ├── serve.sh              one-command server launch
-├── serve-deepseek.sh     wrapper: DeepSeek-V4-Flash (MLA), port 8090
+├── serve-deepseek-v4-flash.sh     wrapper: DeepSeek-V4-Flash (MLA), port 8090
 ├── serve-step-3.7-flash-q8.sh  wrapper: Step-3.7-Flash Q8 quality reference
 ├── stop.sh               stop any running server (any profile/port)
 ├── bench.sh              benchmark harness

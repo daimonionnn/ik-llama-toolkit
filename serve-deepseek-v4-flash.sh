@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-# serve-deepseek.sh -- one-command launch of DeepSeek-V4-Flash (Q8_K_XL)
+# serve-deepseek-v4-flash.sh -- one-command launch of DeepSeek-V4-Flash (Q8_K_XL)
 # =============================================================================
 # Thin convenience wrapper around:  ./serve.sh deepseek-v4-flash
 #
-#   ./serve-deepseek.sh                start at the profile defaults (262144 ctx)
-#   ./serve-deepseek.sh --ctx 262144   raise context (MLA makes it cheap here)
-#   ./serve-deepseek.sh --port 9000    override the port
-#   ./serve-deepseek.sh --dry-run      print the command without running it
+#   ./serve-deepseek-v4-flash.sh                start at the profile defaults (262144 ctx)
+#   ./serve-deepseek-v4-flash.sh --ctx 262144   raise context (MLA makes it cheap here)
+#   ./serve-deepseek-v4-flash.sh --port 9000    override the port
+#   ./serve-deepseek-v4-flash.sh --dry-run      print the command without running it
 #
 # DeepSeek-V4-Flash is ~151 GiB (deepseek4: MLA + DeepSeek Sparse Attention).
 # This is the architecture ik_llama.cpp is built for -- `--fit` fills VRAM to
