@@ -121,23 +121,25 @@ is identical (~27 tok/s both), and standard llama.cpp prefills **~2.4× faster**
 already supports `step35` and runs it out of the box, with none of the CUDA-13
 build pain. For this plain-GQA MoE the ik_llama build did **not** buy a speed win.
 
-**DeepSeek-V4-Flash (MLA + sparse attention):** ik_llama runs it very well —
-`--fit` fills VRAM to ~92 GiB, MLA keeps the KV cache small, DSA works, 262144
-context loads. This is the model class ik_llama is famous for (MLA / FlashMLA).
-**But it is not yet measured against a raw standard `llama-server`**, and don't
-assume a win — recent mainline llama.cpp has **full feature parity here**:
-`deepseek4`, MLA, DSA/indexer, `--n-cpu-moe`, and its own `--fit`. The trouble
-you may hit in **LM Studio** (VRAM only ~74 GiB) is its *GUI's* coarse layer
-slider, not a llama.cpp limitation — the raw `llama-server --fit` would fill it
-too. See [RESULTS.md §3](RESULTS.md) for the measured Step numbers and the
-DeepSeek details.
+**DeepSeek-V4-Flash (MLA + sparse attention, measured head-to-head, MXFP4, same
+split and prompts):** generation is again identical (~20 tok/s both), and on a
+long prompt **ik_llama CRASHES** while standard prefills fine at ~400 tok/s.
+ik_llama aborts with `GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)` — the
+DeepSeek Sparse Attention masks exceed the 32-input scheduler limit in hybrid
+CPU/GPU mode. Short prompts (chat) are fine; long prompts (RAG) abort. This is
+the model class ik_llama is *supposed* to own, and it lost — the expectation was
+wrong. (LM Studio's ~74 GiB VRAM fill is its coarse *GUI* slider, not a
+llama.cpp limit; raw `llama-server --n-cpu-moe` fills VRAM fully.) Full numbers
+in [RESULTS.md §3.1](RESULTS.md).
 
-**The honest rule:** ik_llama's edge is architecture- and feature-specific
-(MLA/FlashMLA, its SOTA `IQ*_K` quants, pure-CPU kernels), not a universal
-"faster." Measure per model. If you just want a model running fast with minimal
-fuss, LM Studio or Ollama with `--n-cpu-moe` (or the raw `llama-server --fit`)
-is the simpler path; reach for this toolkit for the tuning control and the cases
-where ik_llama genuinely differs.
+**The honest rule:** on both models measured here, standard llama.cpp (bundled
+prebuilt in LM Studio / Ollama) is as fast on generation and either faster or
+more robust on prefill. ik_llama's remaining pluses are `--fit`'s automatic MoE
+offload (standard's `--fit` needs a manual `--n-cpu-moe`) and its SOTA `IQ*_K`
+quants / pure-CPU kernels — not raw speed. If you just want a model running fast
+with minimal fuss, LM Studio or Ollama (set `--n-cpu-moe` to fill VRAM) is the
+simpler and at least as fast path; reach for this toolkit for the tuning control
+and reproducible measurement, which is most of what it turned out to be worth.
 
 ### Does the PCIe link speed affect inference? Would PCIe 5.0 x8 hurt?
 

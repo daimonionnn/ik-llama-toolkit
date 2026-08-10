@@ -229,31 +229,52 @@ a plain GQA MoE, so none of those apply here — hence the tie/loss.
 *Caveat:* one model, one config. This is the verdict for **this** setup, not a
 universal ranking of the two projects.
 
-### 3.1 DeepSeek-V4-Flash (deepseek4: MLA + sparse attention), ~151 GiB Q8
+### 3.1 DeepSeek-V4-Flash (deepseek4: MLA + sparse attention)
 
-The other model tested, and the architecture ik_llama is famous for. Measured on
-ik_llama (Q8_K_XL, `-fa on`, f16 MLA cache, `-mla 3 -fidx`, `--fit`):
+The other model tested, and the architecture ik_llama is *supposed* to be best
+at (MLA / FlashMLA). It is not — the measurement reversed the expectation.
 
-| context | KV cache | ubatch / margin | VRAM filled | generation |
-|---------|----------|-----------------|-------------|------------|
-| 65 536  | 2.75 GiB | 1024 / 2048 MiB | 93.7 GiB    | ~17 tok/s  |
-| 262 144 | 11 GiB   | 512 / 8192 MiB  | 91.7 GiB    | ~13 tok/s  |
+**ik_llama, `--fit`, f16 MLA cache, `-mla 3 -fidx`** (Q8_K_XL ~151 GiB, later
+deleted; MXFP4 ~146 GiB):
 
-- MLA compresses the KV cache hard (2.75 GiB at 65k vs 6 GiB for step35), which
-  is what makes long context feasible.
-- `--fit` fills VRAM to ~92-94 GiB. In **LM Studio** the same model only reached
-  ~74 GiB — but that is LM Studio's coarse *GUI* layer slider, **not** a
-  llama.cpp limit (see below), so the extra VRAM here is credited to `--fit`, not
-  to ik_llama specifically.
-- 262144 needs a smaller `-ub` (halves the compute buffer) and a bigger fit
-  margin, because `--fit` accounts for the MLA KV cache but not the ~1.7 GiB DSA
-  indexer caches nor the compute buffer.
+| quant / ctx      | KV cache | VRAM filled | generation |
+|------------------|----------|-------------|------------|
+| Q8 / 65 536      | 2.75 GiB | 93.7 GiB    | ~17 tok/s  |
+| Q8 / 262 144     | 11 GiB   | 91.7 GiB    | ~13 tok/s  |
+| MXFP4 / 65 536   | 2.75 GiB | 95.0 GiB    | ~20 tok/s  |
 
-**Not yet measured: ik_llama vs a raw standard `llama-server` on DeepSeek.**
-Don't assume ik_llama wins — recent mainline llama.cpp (as bundled by LM Studio
-2.26) has **full feature parity** for this model: `deepseek4`, MLA, DSA/indexer,
-`--n-cpu-moe`, and its own `--fit`/`--fit-target`. The Step-3.7 result should
-make us cautious about assuming a DeepSeek win without the measurement.
+MLA compresses the KV cache hard (2.75 GiB at 65k vs 6 GiB for step35). `--fit`
+fills VRAM to ~92-95 GiB — LM Studio only reached ~74 GiB, but that is LM
+Studio's coarse *GUI* slider, **not** a llama.cpp limit, so credit `--fit`, not
+ik_llama specifically.
+
+**Head-to-head, MXFP4, identical split (`--n-cpu-moe 18`), 65536, same prompts:**
+
+| | ik_llama.cpp | standard llama.cpp (2.26) |
+|-------------------------|--------------|---------------------------|
+| VRAM used               | 95.0 GiB     | 92.0 GiB                  |
+| generation              | ~20.2 tok/s  | ~20.3 tok/s               |
+| long prefill (5263 tok) | **CRASHES**  | **~400 tok/s**            |
+
+- **Generation is identical** (~20 tok/s), same as the step35 result — it is
+  bandwidth-bound.
+- **ik_llama CRASHES on long prefill** every time:
+  `GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS) failed` — the DeepSeek
+  Sparse Attention masks produce >32 tensors crossing the CPU/GPU split. Short
+  prompts (chat) work; long prompts (RAG, docs) abort. Standard llama.cpp
+  handles the same prefill fine at ~400 tok/s.
+- Two genuine ik_llama conveniences remain: `--fit` auto-offloads MoE experts to
+  hit ~95 GiB (standard's `--fit` does **not** — it tries to put everything on
+  the GPU and OOMs, so standard needs a manual `--n-cpu-moe`); and MLA is on by
+  default. But neither makes ik_llama faster, and the prefill crash makes it
+  *less* reliable here.
+
+**Verdict, both models:** for Step-3.7-Flash (GQA MoE) **and** DeepSeek-V4-Flash
+(MLA + DSA), standard llama.cpp — bundled prebuilt in LM Studio / Ollama — is as
+fast on generation and either faster (step35 prefill) or more robust (DeepSeek
+prefill doesn't crash). The expectation that ik_llama would win on DeepSeek was
+wrong. This toolkit's value is the tuning knowledge, the automation, and
+`--fit`'s MoE convenience — not raw speed or reliability on these two models.
 
 ---
 
