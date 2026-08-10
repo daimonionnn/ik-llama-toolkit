@@ -55,8 +55,10 @@ if [[ -n ${IK_OT:-} ]]; then
     log "experts     manual -ot placement"
 elif [[ -n ${IK_NCMOE:-} ]]; then
     log "experts     first $IK_NCMOE layers on CPU (fixed)"
-else
+elif [[ ${IK_FIT:-1} == 1 ]]; then
     log "experts     auto-fit, leaving ${IK_FIT_MARGIN} MiB VRAM headroom"
+else
+    log "experts     all on GPU (-ngl ${IK_NGL:-99}, no --fit)"
 fi
 
 build_common_args

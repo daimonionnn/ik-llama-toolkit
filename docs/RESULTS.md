@@ -21,7 +21,7 @@ bytes-per-weight (the driver of the Q4-vs-Q8 speed gap in §2):
 
 A **second model, DeepSeek-V4-Flash** (`deepseek4`: MLA + sparse attention,
 ~151 GiB Q8), is also covered — in the runtime comparison at [§3.1](#31-deepseek-v4-flash-deepseek4-mla--sparse-attention) and, after a fair
-re-match, at [§5](#5-re-measurement-2026-08-10),
+re-match, at [§6](#6-re-measurement-2026-08-10),
 because it is the architecture class where ik_llama is expected to differ most.
 
 **Dates:** 2026-07-24 / 25.
@@ -186,7 +186,7 @@ Use it as a quality reference, not a daily driver.
 
 ## 3. ik_llama.cpp vs standard llama.cpp — was any of this worth it?
 
-> **Superseded for DeepSeek by [§5](#5-re-measurement-2026-08-10).** The
+> **Superseded for DeepSeek by [§6](#6-re-measurement-2026-08-10).** The
 > verdict below stands for Step-3.7-Flash, but the DeepSeek half of it
 > ([§3.1](#31-deepseek-v4-flash-deepseek4-mla--sparse-attention)) was measured
 > against an ik binary two weeks older than its own checkout, with f16 KV and
@@ -239,50 +239,27 @@ universal ranking of the two projects.
 
 ### 3.1 DeepSeek-V4-Flash (deepseek4: MLA + sparse attention)
 
-The other model tested, and the architecture ik_llama is *supposed* to be best
-at (MLA / FlashMLA). It is not — the measurement reversed the expectation.
+> **The runtime verdict here is superseded by [§6](#6-re-measurement-2026-08-10).**
+> This section was measured against an ik_llama binary two weeks older than its
+> own checkout (missing the DS4 fixes of 2026-08-07/08), with f16 KV and default
+> threads while mainline ran its own tuned config. Re-measured fairly on the
+> current build, **ik_llama wins this model** (+26% prefill, +19% generation)
+> and the long-prefill crash is gone. Only the VRAM-fill / MLA facts below still
+> hold — kept because they are runtime-independent.
 
-**ik_llama, `--fit`, f16 MLA cache, `-mla 3 -fidx`** (Q8_K_XL ~151 GiB, later
-deleted; MXFP4 ~146 GiB):
+MLA compresses the KV cache hard (2.75 GiB at 65k vs 6 GiB for step35), and
+`--fit` fills VRAM to ~92-95 GiB across quants:
 
-| quant / ctx      | KV cache | VRAM filled | generation |
-|------------------|----------|-------------|------------|
-| Q8 / 65 536      | 2.75 GiB | 93.7 GiB    | ~17 tok/s  |
-| Q8 / 262 144     | 11 GiB   | 91.7 GiB    | ~13 tok/s  |
-| MXFP4 / 65 536   | 2.75 GiB | 95.0 GiB    | ~20 tok/s  |
+| quant / ctx    | KV cache | VRAM filled | generation |
+|----------------|----------|-------------|------------|
+| Q8 / 65 536    | 2.75 GiB | 93.7 GiB    | ~17 tok/s  |
+| Q8 / 262 144   | 11 GiB   | 91.7 GiB    | ~13 tok/s  |
+| MXFP4 / 65 536 | 2.75 GiB | 95.0 GiB    | ~20 tok/s  |
 
-MLA compresses the KV cache hard (2.75 GiB at 65k vs 6 GiB for step35). `--fit`
-fills VRAM to ~92-95 GiB — LM Studio only reached ~74 GiB, but that is LM
-Studio's coarse *GUI* slider, **not** a llama.cpp limit, so credit `--fit`, not
-ik_llama specifically.
-
-**Head-to-head, MXFP4, identical split (`--n-cpu-moe 18`), 65536, same prompts:**
-
-| | ik_llama.cpp | standard llama.cpp (2.26) |
-|-------------------------|--------------|---------------------------|
-| VRAM used               | 95.0 GiB     | 92.0 GiB                  |
-| generation              | ~20.2 tok/s  | ~20.3 tok/s               |
-| long prefill (5263 tok) | **CRASHES**  | **~400 tok/s**            |
-
-- **Generation is identical** (~20 tok/s), same as the step35 result — it is
-  bandwidth-bound.
-- **ik_llama CRASHES on long prefill** every time:
-  `GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS) failed` — the DeepSeek
-  Sparse Attention masks produce >32 tensors crossing the CPU/GPU split. Short
-  prompts (chat) work; long prompts (RAG, docs) abort. Standard llama.cpp
-  handles the same prefill fine at ~400 tok/s.
-- Two genuine ik_llama conveniences remain: `--fit` auto-offloads MoE experts to
-  hit ~95 GiB (standard's `--fit` does **not** — it tries to put everything on
-  the GPU and OOMs, so standard needs a manual `--n-cpu-moe`); and MLA is on by
-  default. But neither makes ik_llama faster, and the prefill crash makes it
-  *less* reliable here.
-
-**Verdict, both models:** for Step-3.7-Flash (GQA MoE) **and** DeepSeek-V4-Flash
-(MLA + DSA), standard llama.cpp — bundled prebuilt in LM Studio / Ollama — is as
-fast on generation and either faster (step35 prefill) or more robust (DeepSeek
-prefill doesn't crash). The expectation that ik_llama would win on DeepSeek was
-wrong. This toolkit's value is the tuning knowledge, the automation, and
-`--fit`'s MoE convenience — not raw speed or reliability on these two models.
+`--fit` filling VRAM to ~95 GiB is a genuine ik_llama convenience: LM Studio only
+reached ~74 GiB (its coarse *GUI* slider, not a llama.cpp limit), and standard
+`llama-server` needs a manual `--n-cpu-moe` because its own `--fit` tries to put
+everything on the GPU and OOMs. The **speed / robustness verdict is in §6.**
 
 ---
 
@@ -347,7 +324,7 @@ consolidated here because that is their only permanent home.
 
 ---
 
-## 5. Re-measurement (2026-08-10)
+## 6. Re-measurement (2026-08-10)
 
 [§3.1](#31-deepseek-v4-flash-deepseek4-mla--sparse-attention) concluded that
 ik_llama loses to mainline on DeepSeek-V4-Flash, the model class it is built
@@ -369,7 +346,7 @@ CUDA upgrade; do not compare across sections.)
 `multi-gpu-llm/linux/scripts/benchmark-loaded-model.sh` so both engines are
 driven identically.
 
-### 5.1 Head-to-head, both at their best
+### 6.1 Head-to-head, both at their best
 
 | | mainline (CUDA 12.8, f16 KV) | ik_llama (q8_0 KV, 24t) |
 |---|---:|---:|
@@ -384,7 +361,7 @@ server), so it cannot run the configuration ik runs by default.
 The `GGML_SCHED_MAX_SPLIT_INPUTS` abort from §3.1 is also gone: 65 536-token
 prefills complete normally on the current build.
 
-### 5.2 Threads — prefill scales, generation does not
+### 6.2 Threads — prefill scales, generation does not
 
 | threads | pp512 | tg128 |
 |--------:|------:|------:|
@@ -401,7 +378,7 @@ This box has 24 cores, not the 18 assumed throughout §1 — an Arrow Lake-S
 Ultra 7 270K, 8 P + 16 E. The old §1.4 table stopped at 18 and measured only
 `tg`, the one metric threads do not move, so it read as "18 is enough".
 
-### 5.3 CUDA toolkit and GPU architecture — both noise
+### 6.3 CUDA toolkit and GPU architecture — both noise
 
 One variable changed at a time, 16k context:
 
@@ -426,7 +403,7 @@ through the flash-attention kernels that misbehave, so it never sees it.
 `build-cuda12.sh` remains available as insurance and as the record of this
 check.
 
-### 5.4 Revised verdict
+### 6.4 Revised verdict
 
 | model class | winner |
 |---|---|
@@ -436,3 +413,61 @@ check.
 Which is, in the end, what ik_llama.cpp claims about itself: it is an
 MLA/DeepSeek specialist, not a general speedup. The §3 verdict was right about
 the model it tested and wrong to generalise from a stale binary.
+
+---
+
+## 7. DeepSeek-V4-Flash — the two real levers: fit-in-VRAM and MTP (2026-08-10)
+
+§3.1 measured the two DeepSeek quants that *spill* to system RAM (MXFP4 145 GiB,
+Q8 195 GiB), where generation is pinned by DDR5 bandwidth to ~20 tok/s. That is
+the wrong quant class for this GPU. The 96 GiB of VRAM is 18× the bandwidth of
+the DDR5 spill path, so the single biggest lever is **picking a quant that fits
+entirely in VRAM** — and the second is **MTP** on top of it.
+
+### 7.1 Fit-in-VRAM quants beat the spilling ones ~3.4×
+
+Measured on the current build, `-mla 3 -fidx -fa on -ctk/-ctv q8_0`:
+
+| quant                              | size    | VRAM used | gen @128k | gen @32k |
+|------------------------------------|---------|-----------|-----------|----------|
+| MXFP4 (spills to RAM)              | 145 GiB | ~91 GiB   | 20.4 t/s  | 22.4 t/s |
+| antirez **IQ2XXS** (fits)          |  81 GiB | 84–90 GiB | **69 t/s**| **75 t/s** |
+| antirez **L37-42-Q4K mix** (fits)  |  91 GiB | 93 GiB    | **52 t/s**| —        |
+
+Fitting the whole model in VRAM is worth **~3.4×** over the bandwidth-bound
+MXFP4. Both fit-in-VRAM quants stay coherent — 17×23=391 with working, a correct
+one-line Rayleigh-scattering answer, valid Fibonacci code. The "higher quality"
+91 GiB mix is **25 % slower** and did **not** visibly win coherence on these
+prompts (it once drifted into Polish mid-answer), so **IQ2XXS 81 GiB is the sweet
+spot**: fastest, most VRAM headroom, stable language. For comparison, 2× DGX
+Spark on this model is 37–40 tok/s — this single GPU beats it on a fitting quant
+**without** MTP.
+
+### 7.2 MTP adds another ~25–30 % — with a `--fit` caveat
+
+MTP (Multi-Token Prediction / NextN speculative decoding) is **not baked into any
+quant** — every DeepSeek-V4 GGUF strips the predictor tail (`--spec-type mtp`
+alone fails: *"target GGUF contains no MTP tail, provide a matching predictor-only
+companion with -md"*). The predictor is a separate 5.5 GiB companion:
+**`philpax/DeepSeek-V4-Flash-MTP-bf16.gguf`**, loaded with
+`-md <file> -ngld 99 --spec-type mtp:n_max=1,p_min=0.0`.
+
+Measured at 32 768 ctx, same placement OFF vs ON, drafts accepted both times:
+
+| model (placement)          | MTP OFF | MTP ON  | speedup |
+|----------------------------|---------|---------|---------|
+| antirez IQ2XXS (`-ngl 99`) | 75 t/s  | **94 t/s** | **+25 %** |
+| MXFP4 (`--n-cpu-moe 24`)   | 18.4 t/s| **24.0 t/s** | **+30 %** |
+
+**Caveat that cost several failed loads:** `--fit` cannot co-account for the
+draft model — with the target filling VRAM, the draft's own auto-fit fails with
+*"Unable to auto-fit model"* no matter how large `--fit-margin` is. You must place
+the target **manually** and leave the draft ~6 GiB: `-ngl 99` (no `--fit`) for a
+quant that already fits, or an explicit `--n-cpu-moe N` for a spilling one.
+
+### 7.3 Bottom line for this box
+
+The fastest coherent DeepSeek-V4 setup measured here is **antirez IQ2XXS 81 GiB +
+MTP = 94 tok/s** at 32k — ~2.4× a dual DGX Spark and ~4.6× the MXFP4-spill
+baseline. Order of impact: **fit-in-VRAM (3.4×) ≫ MTP (1.25–1.30×) ≫ everything
+else.**
