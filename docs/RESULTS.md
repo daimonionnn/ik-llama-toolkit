@@ -997,3 +997,69 @@ the same file.
 **Why it stays interesting** beyond the prefill number: a 1.2 GiB compressed KV
 where ik's MLA cache needs 2.75 GiB at 65k, KV persisted to disk across
 restarts, and 1M context.
+
+---
+
+## 14. MXFP4: what is left after §11 — MTP is, the rest is not (2026-08-13)
+
+The lossless path had four untried levers. Measured at 131072 / 32k prompt /
+caches on, against the shipped `deepseek-v4-flash-128k-kvram` default:
+
+| config                         | prefill | generation |
+|--------------------------------|--------:|-----------:|
+| default (`--n-cpu-moe 17`)     | **499.2** | 21.26 |
+| `-mqkv`                        | 494.0   | 21.30 |
+| `-muge`                        | — crashes | — |
+| n19, no MTP                    | 450.4   | 20.03 |
+| **n19 + MTP**                  | 434.5   | **24.12** |
+| n20 + MTP                      | 416.5   | 23.71 |
+
+### 14.1 MTP is worth +20 %, and +13.5 % after paying for it
+
+The 5.5 GiB predictor needs VRAM the n17 placement does not have (1.6 GiB
+free), so it costs two placement steps. Isolating the two effects:
+
+* placement n17 → n19 alone: **20.03** tok/s (−1.23 from the default)
+* adding MTP at n19: **24.12** tok/s — **+20.4 %** over the same placement
+
+Net against the shipped default: **+13.5 % generation for −13 % prefill.**
+`--n-cpu-moe 20` is worse on both axes, so 19 is the optimum. Verified from the
+load log that the target split is byte-identical with and without the draft
+(86 102.93 / 63 026.00 MiB); the draft adds 4 597 MiB on the GPU and 1 010 MiB
+on the host, so the comparison isolates MTP cleanly.
+
+This is not a quality trade — speculative decoding verifies every drafted token
+against the target — which is why it is worth having on the lossless path at
+all. Shipped as `deepseek-v4-flash-128k-kvram-mtp` +
+`serve-deepseek-v4-flash-mxfp4-kvram-mtp-128k.sh`, **not** as the default: §11
+bought +69 % prefill and this hands 13 % of it back, so which one wins depends
+on whether the workload reads or writes more.
+
+For comparison, §7.2 measured MTP on MXFP4 at +30 % (18.4 → 24.0) with the old
+`--n-cpu-moe 24` placement. The *absolute* ceiling barely moved (24.0 → 24.12);
+what the kvram work bought was the same generation speed with far better
+prefill.
+
+### 14.2 `-mqkv` is a no-op here, `-muge` crashes the server
+
+**`-mqkv`** (merge Q, K, V) lands inside noise: 494.0 / 21.30 against 499.2 /
+21.26, with an identical memory split. Expected in hindsight — DeepSeek's MLA
+attention projects through q/kv LoRA ranks rather than three parallel
+projections, so there is nothing to merge.
+
+**`-muge`** (merge up/gate expert projections) **aborts the server** after
+walking all 43 layers:
+
+```
+merge_up_gate_exps: merging up/gate in layer 42
+llama.cpp:7854: GGML_ASSERT(other_type == l.ffn_up_exps->type) failed
+```
+
+The assert requires `ffn_gate_exps` and `ffn_up_exps` to share a type, and this
+quant mixes them by design (MXFP4 routed experts, but `w2`/down at other types).
+It is a legitimate incompatibility rather than a misconfiguration, and the
+failure mode is a core dump rather than a refusal — worth an upstream issue if
+anyone wants `-muge` on mixed-type quants.
+
+`-amb` was not reached; with the compute buffer already at 440 MiB under
+`-nkvo` (§11.1) there is nothing left for it to cap.

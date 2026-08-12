@@ -180,6 +180,7 @@ VRAM at launch. Starting with 20 GiB free instead of 95 GiB silently pushes
 ./serve-deepseek-v4-flash-antirez-IQ2XXS-gpu-mtp-65k.sh   # fastest DeepSeek: all in VRAM + MTP, ~87 tok/s
 ./serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh           # lossless DeepSeek, experts in DDR5, ~21 tok/s
 ./serve-deepseek-v4-flash-mxfp4-kvram-128k.sh             # fast-prefill variant: 484 tok/s pp (+69 %)
+./serve-deepseek-v4-flash-mxfp4-kvram-mtp-128k.sh         # same, MTP: 24 tok/s tg, less prefill
 ./serve-deepseek-v4-flash-mxfp4-kvram-256k.sh             # same treatment at 256k: 402 pp (+73 %)
 ./serve-deepseek-v4-flash-mxfp4-gpu-cpu-512k.sh           # half-million ctx, KV in RAM, ~16 tok/s
 ./serve-step-3.7-flash-q8.sh            # Step-3.7-Flash Q8_K_XL quality reference, ~13 tok/s
@@ -218,6 +219,11 @@ any `serve.sh` flag. Their names spell out quant, placement and context:
   wrapper, prompt cache intact (RESULTS §11). The trade is robustness: manual
   placement, ~1.6 GiB VRAM headroom, and `-rtr` re-reads the model each start.
   Prefer the `--fit` wrapper for anything that must come up unattended.
+- **`serve-deepseek-v4-flash-mxfp4-kvram-mtp-128k.sh`** → the same with MTP
+  speculative decoding: **24.1 tok/s generation against 434 prefill**, versus
+  21.3 / 499 without (RESULTS §14). A straight prefill-for-generation swap on
+  identical weights — long prompts want the wrapper above, long answers want
+  this one.
 - **`serve-deepseek-v4-flash-mxfp4-gpu-cpu-512k.sh`** → `serve.sh deepseek-v4-flash-512k`.
   The same quant at **524288 context**, with the placement inverted: the KV goes
   to RAM (`-nkvo`) and the VRAM it frees goes to experts (`--n-cpu-moe 19`,
