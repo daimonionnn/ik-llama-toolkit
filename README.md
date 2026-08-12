@@ -174,7 +174,8 @@ VRAM at launch. Starting with 20 GiB free instead of 95 GiB silently pushes
 ## Usage
 
 ```bash
-./serve.sh                              # default: Step-3.7-Flash Q4_K_XL, ~26 tok/s
+./serve.sh                              # default: DeepSeek fast-prefill 128k (484 pp / ~21 tg)
+./serve.sh step-3.7-flash-q4            # the old default: Step-3.7-Flash Q4_K_XL, ~26 tok/s
 ./serve.sh mxfp4-tuned                  # DeepSeek-V4-Flash MXFP4, the tuned profile
 ./serve-deepseek-v4-flash-antirez-IQ2XXS-gpu-mtp-65k.sh   # fastest DeepSeek: all in VRAM + MTP, ~87 tok/s
 ./serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh           # lossless DeepSeek, experts in DDR5, ~21 tok/s
