@@ -36,21 +36,29 @@ buffer size` / `KV self size`) rather than trusting the flags — that is how th
 
 ---
 
-## 2. Is `-b` the lever on the compute buffer?
+## 2. ~~Is `-b` the lever on the compute buffer?~~ — RESOLVED 2026-08-12, no
 
-**Why.** At 512k the CUDA compute buffer is 13.2 GiB, and it is what stops
-`--n-cpu-moe 17` from loading — i.e. it directly costs ~3 GiB of experts that
-would otherwise leave DDR5. §10.3 ruled out `-ub`: halving it to 256 freed only
-668 MiB and cost 21 % prefill. `-b` (4096) is the remaining candidate, untested.
+Answered by the §11 sweeps at 131072, no separate 512k run needed:
 
-**What to run.** At `-c 524288`, `-nkvo --n-cpu-moe 19`, compare `-b 4096` (the
-default) against `-b 2048` and `-b 1024`, watching VRAM at load. If the buffer
-shrinks by ~3 GiB, retry `--n-cpu-moe 17` and 15.
-
-**Caveat.** `-b` is expected to cost prefill like `-ub` did. At 512k prefill is
-already 52 minutes for a full context, so a further loss there is not free.
+* **`-b` does not touch the compute buffer.** `-b 8192` vs `-b 4096` at the same
+  `-ub`: identical 3 624 MiB buffer, identical prefill (364.2 vs 366.8).
+* **The buffer tracks `-ub`, linearly** (512→3 624, 1024→7 248 under `--fit`),
+  and the real lever is `-nkvo`: the attention scratch follows the KV to host
+  memory and the buffer collapses to 440 MiB.
+* The original goal — freeing `--n-cpu-moe 17` at 512k — is dead anyway: the
+  §10.2 walk already ran **with** `-nkvo` and n17 still CUDA-OOMs there on
+  weights + DSA caches. 19 stays the 512k ceiling.
 
 ---
+
+## 3. ~~Checkpoints or prompt cache — which one is the 26 %?~~ — RESOLVED 2026-08-12
+
+Measured in §11.3, and the §10.4 guess was backwards: the **context checkpoints**
+are what make a re-send free, not `--cache-ram`. `-ctx-ckpt 0` alone loses the
+reuse entirely while saving ~1.5 % prefill. Both stay ON in the shipped
+profiles; the caches cost only 3.5 % at 32k depth (the 26 % figure was at 256k).
+
+<details><summary>original item</summary>
 
 ## 3. Checkpoints or prompt cache — which one is the 26 %?
 
@@ -67,6 +75,8 @@ trade and the wrappers should keep it on.
 
 **What to run.** Three servers at `-c 131072`, ~120k depth: stock,
 `-ctx-ckpt 0` only, `--cache-ram 0` only. ~30 min.
+
+</details>
 
 ---
 
