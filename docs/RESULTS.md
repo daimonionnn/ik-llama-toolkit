@@ -500,3 +500,86 @@ accounted for by the fit decision, and 4 GiB of headroom is comfortable.
 Applied in `serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh`, gated on context —
 at 262 144 the profile's 8192 still applies, since the DSA caches and compute
 buffer are allocated *after* the fit decision and 4096 does not cover them there.
+
+---
+
+## 9. MXFP4 GPU+CPU — prefill and generation vs context depth (2026-08-12)
+
+The depth numbers for the spilling MXFP4 quant were scattered across §3.1, §6.1
+and §7.1 in three mutually incomparable configurations (q8_0 vs f16 KV,
+`-ncmoe 16` vs `--fit`), and nothing existed at 256k. This is one consistent
+sweep: f16 KV, `-mla 3 -fidx`, `--fit`, driven over HTTP against the real
+`llama-server` so the measured configuration is exactly what the toolkit serves
+(`llama-bench` cannot set `-fidx`). Raw data in
+`results/deepseek-v4-flash-mxfp4-{depth,repeat,256k}-20260812.csv`.
+
+Every prompt carries a unique prefix, so no deep measurement can silently reuse
+the KV of a shallower one.
+
+### 9.1 The wrapper's config — `-c 131072`, `--fit-margin 4096`
+
+| depth (actual)  | prefill  | generation, 1st request | generation, steady |
+|-----------------|---------:|------------------------:|-------------------:|
+| 463             | 186–202  | 21.0 / 23.3             | **23.3** |
+| 4 061           | 264–288  | 14.2 / 15.0             | **21.5** |
+| 33 079          | 283–287  | 19.9 / 20.0             | **20.0** |
+| 127 904         | 262–263  | 12.7 / 14.9             | **13.1** |
+
+Two columns because they answer different questions. "1st request" is what you
+feel when you paste a long prompt into an empty session (both runs shown);
+"steady" is the median of three generations at that depth, the later two hitting
+the prompt cache so only generation is timed.
+
+**Prefill is remarkably flat** — 262–288 tok/s from 4k all the way to 128k. MLA
+plus the DSA indexer mean depth costs almost nothing on the prefill side.
+Generation is the part that decays, and it is DDR5-bound throughout.
+
+**The 4k row is a real artefact, not noise, and it is not about depth.** The
+first, uncached request at ~4k came in low three times out of three (14.2 in the
+128k config, 10.5 in the 256k config, 15.0 in the repeat pass) and recovered to
+21.5 on re-send. At 32k — a *larger* prefill — all three samples land within 2 %
+of each other, so "generation right after a big prefill is slow" does not
+explain it. What is suspicious is that 4096 is exactly `-b`: the prompt fits in
+a single full batch, while every deeper prompt ends on a partial one. Untested
+hypothesis, recorded so the next person does not re-derive it.
+
+**Noise floor:** the same 128k point measured on two fresh servers gave 14.9 and
+13.1 tok/s — ~12 % apart with identical settings. The model is 145.6 GiB and
+does not fit RAM+VRAM, so how much of it happens to be in page cache varies
+between runs. Do not read these tables to the decimal.
+
+### 9.2 Configuring for 256k costs ~10–17 % everywhere
+
+| depth (actual) | `-c 131072` (margin 4096) | `-c 262144` (margin 8192) |
+|----------------|--------------------------:|--------------------------:|
+| 463            | 186 pp / 21.0 tg          | 155 pp / 19.8 tg |
+| 4 061          | 264 pp / 14.2 tg          | 250 pp / 10.5 tg |
+| 33 079         | 283 pp / 19.9 tg          | 250 pp / 18.0 tg |
+| 129 931        | 263 pp / 14.9 tg          | 233 pp / 12.4 tg |
+| 259 837        | — (over window)           | 211 pp / 10.8 tg |
+
+VRAM used is the same either way (93.8 vs 93.9 GiB) — the 262144 KV is ~8 GiB
+larger, so that much *more* of the expert weights sits in DDR5 instead. You pay
+for the big window at every depth, including shallow ones.
+
+### 9.3 Context checkpoints and the prompt cache cost 54 GiB and 26 % at 256k
+
+A 250k-token prefill at `-c 262144` was **OOM-killed by the kernel** on the first
+attempt: `anon-rss 203 GiB` on a 215 GiB box (the server had served the 512 / 4k
+/ 32k / 130k depths first, so the caches had accumulated across requests). Re-run
+alone in a `systemd-run --scope -p MemoryMax=170G` cage:
+
+| config at 259 837 tokens          | peak RSS | prefill | generation |
+|-----------------------------------|---------:|--------:|-----------:|
+| stock                             | 130.2 GiB| 210.5   | 10.82 |
+| `-ctx-ckpt 0 --cache-ram 0`       | **76.0 GiB** | 217.4 | **13.68** |
+
+Turning off the 32 per-slot context checkpoints and the 8 GiB prompt cache is a
+**double win at this context: 54 GiB less RAM and 26 % more generation**. They
+are worth keeping at ordinary depths (that is what makes the re-send in §9.1
+free), but at 256k they are pure overhead on this box.
+
+**Operational consequence:** a long-lived server at `-c 262144` accumulates that
+state across requests — one prefill peaked at 130 GiB, the accumulated case died
+at 203 GiB. If you run the 262144 config as a service, pass `-ctx-ckpt 0
+--cache-ram 0` or cap it in a cgroup.
