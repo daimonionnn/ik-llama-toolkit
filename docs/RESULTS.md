@@ -583,3 +583,79 @@ free), but at 256k they are pure overhead on this box.
 state across requests — one prefill peaked at 130 GiB, the accumulated case died
 at 203 GiB. If you run the 262144 config as a service, pass `-ctx-ckpt 0
 --cache-ram 0` or cap it in a cgroup.
+
+---
+
+## 10. 512k context, and the KV/expert trade that comes with it (2026-08-12)
+
+The model is trained to 1 048 576 (yarn x16 over 65 536), so 512k is in range on
+paper. It works, and getting there exposed a placement mistake that costs 22 %.
+
+### 10.1 It runs — and `--fit` needs a bigger margin every time context doubles
+
+`-c 524288` CUDA-OOMs at `--fit-margin 8192`; 12288 loads. The reason is visible
+in the log: at 512k the compute buffer alone is **13.2 GiB** and the DSA caches
+another **2.1 GiB** (`CSA K 1428 MiB`, `HCA K 42.5 MiB`, `LID K 672 MiB`), and
+`--fit` accounts for neither. Measured with `-ctx-ckpt 0 --cache-ram 0`:
+
+| depth   | prefill | generation | VRAM      | peak RSS |
+|---------|--------:|-----------:|----------:|---------:|
+| 400     | 121.5   | 16.74      | 93 920 MiB| 92.0 GiB |
+| 499 909 | 161.8   | 10.08      | 94 208 MiB| 92.4 GiB |
+
+The 500k prefill took 52 minutes. Prefill stays flat only to ~128k and then
+bends: 288 (32k) → 262 (128k) → 210 (260k) → **162 (500k)**.
+
+### 10.2 The KV does not have to live in VRAM — the experts should
+
+At 512k the MLA KV is 21.5 GiB of VRAM, and every GiB of it is a GiB of experts
+pushed into DDR5. So: move the KV to RAM and give the VRAM to the experts.
+
+The bandwidth argument says this should lose badly — expert weights are read
+sparsely (6+1 of 256 per token, ~2.7 % of ~132 GiB), while the KV is touched on
+every token. **That argument is wrong for this model**, because DeepSeek Sparse
+Attention only attends ~512 positions regardless of depth. Measured at 512k,
+130k depth, all with `-ctx-ckpt 0 --cache-ram 0`:
+
+| variant                          | GPU wt | DDR5 wt | KV        | prefill | generation |
+|----------------------------------|-------:|--------:|-----------|--------:|-----------:|
+| `--fit` baseline                 | 55.4   | 90.2    | 21.5 GPU  | 205.5   | 13.33 |
+| `-nkvo` alone                    | 55.4   | 90.2    | 21.5 RAM  | 204.0   | 13.05 |
+| `-ictk q8_0`                     | 55.4   | 90.2    | 21.5 GPU  | 197.3   | 12.35 |
+| `-ctk/-ctv q8_0`, margin 20480   | 58.6   | 87.0    | 11.4 GPU  | 211.6   | 13.63 |
+| `-nkvo --n-cpu-moe 21`           | 77.7   | 67.9    | 21.5 RAM  | 258.2   | 15.48 |
+| same, repeated                   | 77.7   | 67.9    | 21.5 RAM  | 257.4   | 15.42 |
+| **`-nkvo --n-cpu-moe 19`**       | **84.1**| **61.6**| 21.5 RAM | **277.9**| **16.30** |
+| `-nkvo --n-cpu-moe 17`           | 90.5   | 55.2    | —         | CUDA OOM | — |
+
+**+22 % generation and +35 % prefill** over the `--fit` baseline, and the RAM
+bill does not move: 21.5 GiB of KV arrives while 22–29 GiB of experts leave.
+
+Every row tracks one number — how much weight is left in DDR5 — which is what
+you would expect if generation is DDR5-bandwidth-bound, and it explains the two
+failures too:
+
+* **`-nkvo` alone does nothing** (13.05 vs 13.33) because `--fit` does not hand
+  the freed VRAM to anyone: the weight split was byte-identical with and without
+  it (92 402 MiB CPU / 56 726 MiB GPU), leaving **31 GiB of VRAM idle**. The KV
+  moved out for free — 2 % — but nothing moved in. `-nkvo` is only useful
+  together with manual `--n-cpu-moe`.
+* **q8_0 KV nearly cancels itself.** It halves the KV to 11.4 GiB and `--fit`
+  does move 13 GiB of experts onto the GPU — but then the load OOMs on the
+  13.2 GiB compute buffer, and the bigger margin needed to survive takes back
+  8 GiB of exactly what was gained. Net +2 %.
+* **`-ictk q8_0` is a dead end**: it touches only the 672 MiB `LID K` cache,
+  saves 294 MiB, and costs 7 % to dequantise.
+
+`--n-cpu-moe 17` fails on the compute buffer, so 19 is the ceiling at `-ub 512`.
+A smaller micro-batch would shrink that 13.2 GiB buffer and might allow 17 or
+15 — untested, and the obvious next thing to try.
+
+**Noise:** the repeat of `--n-cpu-moe 21` on a fresh server landed within 0.4 %
+(15.48 vs 15.42), so same-config repeats are tight. The ~12 % spread noted in
+§9.1 comes from comparing across separate sessions with different page-cache
+states, not from the measurement itself.
+
+**Not yet tested at 131072**, where the KV is only 5.5 GiB and the prize is
+correspondingly smaller — but `--fit` leaving VRAM on the table is a property of
+`--fit`, not of 512k, so it is worth checking there too.
