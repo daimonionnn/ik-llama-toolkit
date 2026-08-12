@@ -85,3 +85,67 @@ the §9.1 row can be explained instead of merely flagged.
 
 **Low priority** — it is a measurement artefact, not something that costs real
 work, unless it turns out to affect ordinary short-prompt turns too.
+
+---
+
+## 5. Benchmark `antirez/ds4` against ik_llama
+
+**Why.** [ds4](https://github.com/antirez/ds4) ("DwarfStar") is a purpose-built
+engine for exactly the model this box runs, written by the author of **the quant
+already in use here** — `antirez/deepseek-v4-gguf`. It started Metal-only but now
+lists Metal, CUDA and ROCm. Two features have no equivalent in ik_llama and both
+target pain this repo measured:
+
+* a **KV cache persisted to disk across restarts**, where §10 measured a 500k
+  prefill costing 52 minutes and §9.3/§10.4 showed the in-RAM prompt cache is
+  the only thing making a second turn bearable;
+* **1M context**, against the 524288 that fits here today.
+
+It also ships **DSpark**, its own speculative decoding — worth noting because a
+widely-copied AI-written summary misattributes DSpark to SGLang. It is ds4's.
+
+**The bar is high.** ik_llama does **87–94 tok/s** on this box with the antirez
+IQ2XXS quant plus MTP (§7). ds4 publishes 39.35 tok/s on an M5 Max and 18.05 on
+a DGX Spark GB10; no RTX PRO 6000 numbers exist. DGX Spark is memory-bandwidth
+poor, so it is a weak predictor for this card — but nothing suggests a walkover.
+
+**What to run.** Clone to `~/development/ds4` (its own upstream checkout, the way
+`ik_llama.cpp/` is here), build the CUDA backend, serve the **same** IQ2XXS
+chat-v2 file. Then measure with the §9/§10 method — HTTP against the live server,
+the same depths, unique prompt prefixes — so the numbers drop straight into the
+same tables rather than being "roughly comparable". Compare against both
+baselines: 87–94 tok/s (IQ2XXS + MTP) and ~21 tok/s (MXFP4 GPU+CPU).
+
+**Decision rule.** Numbers go into RESULTS §11 either way. ds4 gets its own
+`ds4-toolkit` repo **only if** it wins on speed, or if the persistent disk KV
+proves valuable enough on its own — `serve.sh`'s `IK_*` abstraction (`--fit`,
+`-ncmoe`, margins) has nothing in common with ds4 and should not be bent to hold
+a second engine.
+
+**Caveats:** beta quality by the author's own statement, heavily AI-assisted
+code, deliberately narrow, and it loads only the author's own GGUF files.
+
+---
+
+## Evaluated and rejected
+
+**KTransformers** — wrong hardware profile for this box, decided 2026-08-12.
+
+Its validated DeepSeek-V4-Flash configuration is a single RTX 5090 (32 GiB) with
+≥200 GiB of RAM, reporting 20+ tok/s decode; the famous ~27× over llama.cpp comes
+from **AMX** MoE kernels on dual 32-core Xeons. Two facts about this machine kill
+it:
+
+* the CPU is a **Core Ultra 7 270K Plus — AVX2 and AVX_VNNI only, no AVX512, no
+  AMX**, so it would land on the slowest fallback kernels, and
+* its entire premise is offloading experts to RAM, which this box does not need:
+  96 GiB of VRAM holds the whole 81 GiB antirez quant, and that is exactly where
+  the 87–94 tok/s comes from.
+
+Its single-GPU figure (20+ tok/s) also matches what ik_llama already does on the
+MXFP4 path (~21 tok/s), and §10 showed generation here tracks one variable —
+GiB of weights left in DDR5. A faster CPU kernel does not add memory bandwidth.
+
+**SGLang / vLLM with `flashinfer_mxfp4`** — same root problem. They target
+fully-resident GPU serving; MXFP4 is 145.6 GiB against 96 GiB of VRAM, so it
+would need the offload path that is not their strength.
