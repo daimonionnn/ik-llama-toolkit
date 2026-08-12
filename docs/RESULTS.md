@@ -1118,3 +1118,71 @@ unaffected (406.1 vs 402.5 — within noise).
 
 Affected: §12.1 (64 tokens) reads low against §11 and §14–§15 (160 tokens).
 Within any one section the comparison is sound.
+
+---
+
+## 16. Prefill is exhausted; threads split into two independent laws (2026-08-13)
+
+Prefill is the metric this box is optimised for, so §11's 499 tok/s got a
+dedicated sweep at 131072 / 32k prompt / n17 kvram. **Nothing moved it**, and
+the sweep found something else instead.
+
+### 16.1 Every remaining prefill lever is spent
+
+| config                  | prefill | generation |
+|-------------------------|--------:|-----------:|
+| **`-tb 24` (shipped)**  | **491.8** | 21.66 |
+| `-tb 20`                | 469.8   | 21.41 |
+| `-tb 16`                | 428.8   | 21.42 |
+| `-tb 12`                | 380.7   | 21.50 |
+| `-tb 8`                 | 332.9   | 21.36 |
+| `-no-ooae`              | 490.3   | 20.73 |
+| `-ub 3072`              | loads, then **CUDA OOM mid-prefill** | — |
+
+* **Prefill threads are already maxed.** The curve is monotonic and still
+  climbing at the top — 20 → 24 is worth 4.5 %, so prefill is not saturated even
+  at all 24 cores. There are no more cores to give it.
+* **`-no-ooae` is noise** (490.3 vs 491.8), which kills the TUNING note that it
+  should lose at large batches: this is `-ub 2048`, four times the batch where it
+  was last tested, and it still does not matter.
+* **`-ub 3072` is over the line.** It loads at 97 118 of 97 887 MiB — 769 MiB
+  free — and then dies mid-prefill with `CUDA error: out of memory` and a core
+  dump. `-ub 2048` is a hard ceiling at n17.
+
+So 491–499 tok/s is the ceiling for MXFP4 here. Beating it means fewer experts
+in DDR5, and n17 is VRAM-bound. The remaining options are a smaller quant
+(IQ2XXS does 1 270 tok/s, but at 2-bit) or a different engine (ds4 does ~2 100
+on that same 2-bit file, §13).
+
+### 16.2 Prefill follows cores; generation follows the thread-to-core ratio
+
+Chasing an accidental result — pinning to the P-cores had left prefill alone but
+lifted generation 20 % — separated two effects that had been conflated:
+
+| threads | cores | prefill | generation |
+|--------:|------:|--------:|-----------:|
+| 24      | 24    | 494.3   | 21.21 |
+| 16      | 22    | 491.8   | 21.44 |
+| **8**   | **24**| **492.8** | **22.78** |
+| 8       | 8     | 302.3   | 21.56 |
+| 12      | 8     | 303.1   | 23.29 |
+| 24      | 8     | 302.9   | **25.15** |
+
+**Prefill tracks the core count alone** — 24 cores gives 492–494 whatever `-t`
+is, 8 cores gives 302–303 — because `-t` and `-tb` are independent knobs.
+
+**Generation tracks the ratio, not the count.** One thread per core lands at
+~21.2–21.6 whether that is 8/8 or 24/24. Oversubscription is what helps:
+1.5:1 → 23.29, 3:1 → 25.15. The reading that fits is latency, not bandwidth —
+expert access is scattered, so a thread stalls and its core idles unless another
+runnable thread is queued behind it.
+
+**This corrects `default.env`,** which called generation "flat, bandwidth-bound"
+from 12 to 24 threads. That was measured at the old `-ncmoe 16` placement with
+~90 GiB of experts on the CPU; kvram leaves 56 GiB there and the behaviour
+changed.
+
+The free win: **`-t 8` with `-tb 24` gives +7.4 % generation and leaves prefill
+untouched** (492.8 / 22.78 against 494.3 / 21.21). Pinning to 8 P-cores buys
+more generation still (25.15) but costs 39 % of prefill, so it is a trade rather
+than a win — wrong way round for this box.
