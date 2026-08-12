@@ -6,6 +6,19 @@ Numbers and method live in [docs/RESULTS.md](docs/RESULTS.md) §8–§10.
 
 ---
 
+## 1. ~~Apply the 512k findings to 262144~~ — RESOLVED & SHIPPED 2026-08-12
+
+Measured in §12.1 and the interpolation undersold it: the kvram treatment at
+262144 is worth **+73 % prefill / +8 % generation** over stock (402.5 / 13.38 vs
+232.6 / 12.36 at 130k depth, caches on) — bigger than at 128k, because `--fit`
+at margin 8192 leaves only 73 GiB of weights on the GPU there. Margin 4096 does
+not load at this context (7.1 GiB compute buffer), so the §8 wrapper gating was
+right. Shipped as `deepseek-v4-flash-256k-kvram` +
+`serve-deepseek-v4-flash-mxfp4-kvram-256k.sh`. One cost worth knowing: the
+checkpoints cost 24 % generation at this KV size (§12.1) — kept on regardless.
+
+<details><summary>original item</summary>
+
 ## 1. Apply the 512k findings to 262144 — the forgotten middle
 
 **Why.** 256k is the one context where none of today's work landed. The
@@ -33,6 +46,8 @@ buffer size` / `KV self size`) rather than trusting the flags — that is how th
 
 **If it pays:** ship `config/models/deepseek-v4-flash-256k.env` +
 `serve-deepseek-v4-flash-mxfp4-gpu-cpu-256k.sh`, modelled on the 512k pair.
+
+</details>
 
 ---
 
@@ -80,21 +95,23 @@ trade and the wrappers should keep it on.
 
 ---
 
-## 4. The ~4k generation artefact
+## 4. The uncached-request dip — band mapped, mechanism still open
 
-**Why.** A first, uncached request at ~4k depth generates far slower than the
-same request re-sent (14.2 / 10.5 / 15.0 across three runs, recovering to 21.5),
-and it is *not* a "generation after a big prefill" effect — 32k has a larger
-prefill and is stable to within 2 % (§9.1). The only suspicious coincidence is
-that 4096 is exactly `-b`: that prompt fits in a single full batch, while every
-deeper one ends on a partial batch.
+**Status 2026-08-12 (§12.2).** Both hypotheses died under measurement: the dip
+is indifferent to `-b` (2048 / 4096 / 8192 all dip identically at 4k), and
+"last logical batch nearly full" fails too (b 8192 at 2k depth = 24 % full,
+dips hard). What the data says instead: **any uncached request at ~1k–16k depth
+generates 15–35 % slower than its re-send**, under `--fit` and kvram alike —
+including the shipped default. Clean at ≥32k. Upper edge between 16 327 and
+33 079; lower edge below 1k.
 
-**What to run.** Measure the first uncached request at ~4k with `-b 2048` and
-`-b 8192`. If the dip follows the batch size, the hypothesis is confirmed and
-the §9.1 row can be explained instead of merely flagged.
-
-**Low priority** — it is a measurement artefact, not something that costs real
-work, unless it turns out to affect ordinary short-prompt turns too.
+**Still open: the mechanism.** The re-send restores the same depth from a
+context checkpoint and is fast, so it is not the attention cost of the depth —
+a fresh prefill leaves different state behind than a restore. Suspects worth
+chasing in engine code: the DSA compressed-cache tiers (CSA/HCA/LID), or graph
+scheduling right after prefill. Next step would be an upstream ik_llama.cpp
+issue with the §12.2 table; the impact is bounded (first response of a session
+in that band runs at ~80 % generation, once).
 
 ---
 

@@ -811,3 +811,70 @@ was the valuable half. **Measured, that is backwards:**
 Turning the checkpoints off is what loses the reuse. They cost ~1.5 % prefill
 and ~3 % generation and buy back a full re-prefill — 33 000 tokens, i.e. ~66 s
 per follow-up turn at 500 tok/s. Keep them on for anything conversational.
+
+---
+
+## 12. 262144 catches up, and the "4k artefact" is really a 1k–16k band (2026-08-12)
+
+### 12.1 The kvram treatment pays even more at 256k
+
+256k was the one context none of the tuning had reached (TODO item 1). Applied
+and measured at 130k depth, same corpus as §10/§11:
+
+| config at 262144                          | caches | GPU wt | DDR5 wt | prefill | generation |
+|-------------------------------------------|--------|-------:|--------:|--------:|-----------:|
+| `--fit` margin 8192, ub 512               | off    | 73.0   | 76.1    | 241.4   | 15.31 |
+| `--fit` margin 4096                       | —      | —      | —       | **does not load** | — |
+| `-rtr -nkvo --n-cpu-moe 18 -ub 2048`      | off    | 89.4   | 59.8    | **429.2** | **17.55** |
+| same, `--n-cpu-moe 17`                    | —      | —      | —       | CUDA OOM | — |
+| same n18, **caches on**                   | on     | 89.4   | 59.8    | **402.5** | 13.38 |
+
+Against the stock §9.2 reference at this depth (232.6 pp / 12.36 tg):
+**+73 % prefill, +8 % generation**, caches on. Shipped as
+`deepseek-v4-flash-256k-kvram` + `serve-deepseek-v4-flash-mxfp4-kvram-256k.sh`.
+
+Three structural notes:
+
+* **Margin 4096 does not load at 262144** — the §8 wrapper gating at
+  `ctx <= 131072` was correct. The compute buffer scales with context as well as
+  `-ub`: 3.6 GiB @128k, 7.1 GiB @256k, 13.2 GiB @512k (all ub 512, `--fit`).
+* **The gain is bigger than at 128k because `--fit` is worse here**: at margin
+  8192 it leaves only 73.0 GiB of weights on the GPU. The manual split moves
+  16.3 GiB of experts out of DDR5.
+* **The caches cost real money at this context: −24 % generation** (17.55 →
+  13.38; at 128k it was ~2 %). Checkpoint overhead scales with KV size (11 GiB
+  here). Still shipped ON — a re-send at 130k depth would otherwise re-prefill
+  for ~5 minutes — but for single-shot batch work over huge prompts, run the
+  profile with `-ctx-ckpt 0 --cache-ram 0`.
+
+### 12.2 The dip: not `-b`, not batch fullness — a depth band
+
+TODO item 4 hypothesised the ~4k first-request dip was `4096 == -b`. Moving `-b`
+killed that in one sweep, and the follow-ups killed its successor too:
+
+| depth  | `-b` 2048 | `-b` 4096 (§9.1) | `-b` 8192 | kvram default (ub 2048) |
+|-------:|-----------|------------------|-----------|--------------------------|
+| ~0.5k  | —         | 21.0 vs 23.3     | —         | — |
+| ~1k    | —         | —                | —         | **15.3 vs 23.9 DIP** |
+| ~2k    | **14.7 vs 22.4 DIP** | —     | **14.4 vs 21.9 DIP** | — |
+| ~4k    | **17.8 vs 21.6 DIP** | **14.2 vs 21.5 DIP** | **14.5 vs 21.4 DIP** | **19.0 vs 23.0 DIP** |
+| ~8k    | **13.9 vs 22.3 DIP** | —     | **14.5 vs 21.6 DIP** | — |
+| ~16k   | —         | —                | —         | **18.6 vs 22.5 DIP** |
+| ~32k   | —         | 19.9 vs 20.0     | —         | — |
+| ~130k  | —         | 12.7 vs 13.1     | —         | — |
+
+(each cell: first uncached request vs re-send of the identical prompt)
+
+What survives the data: **an uncached request at roughly 1k–16k depth generates
+15–35 % slower than the same request re-sent**, at every `-b` tried, under both
+`--fit` and the kvram config — including the shipped default. Clean at ≥32k.
+The lower edge is below 1k (the old ~0.5k row gapped ~10 %, previously read as
+noise); the upper edge is between 16 327 and 33 079.
+
+Killed hypotheses, so nobody re-walks them: `4096 == -b` (dip indifferent to
+`-b`), and "last logical batch nearly full" (b 8192 @ 2k = 24 % full, dips
+hard). Mechanism unknown — the re-send restoring the same depth from a context
+checkpoint is fast, so it is not the attention cost of that depth; something
+about the state a fresh prefill leaves behind differs from a restored one.
+Practical impact: the first response of a session whose prompt lands in that
+band runs at ~80 % generation speed, once.
