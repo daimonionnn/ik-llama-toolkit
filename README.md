@@ -304,6 +304,7 @@ ik-llama-toolkit/
 │                         wrapper: DeepSeek MXFP4 at 512k, KV in RAM, ~16 tok/s
 ├── serve-step-3.7-flash-q8.sh  wrapper: Step-3.7-Flash Q8 quality reference
 ├── stop.sh               stop any running server (any profile/port)
+├── TODO.md               open measurement threads (see RESULTS §8-§10)
 ├── bench.sh              benchmark harness
 ├── config/
 │   ├── default.env       global defaults, fully annotated
