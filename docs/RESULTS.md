@@ -878,3 +878,38 @@ checkpoint is fast, so it is not the attention cost of that depth; something
 about the state a fresh prefill leaves behind differs from a restored one.
 Practical impact: the first response of a session whose prompt lands in that
 band runs at ~80 % generation speed, once.
+
+---
+
+## 13. ds4 (DwarfStar) on this box: builds clean, cannot run yet (2026-08-12)
+
+TODO item 5 — benchmark antirez's [ds4](https://github.com/antirez/ds4) against
+ik_llama on the same IQ2XXS file. Outcome: **blocked by an upstream bug**, with
+the repro fully characterised.
+
+**The build is fine.** `make cuda CUDA_ARCH=sm_120a CUDA_HOME=/usr/local/cuda-13.3`
+compiles first try, zero warnings, `DS4_CUDA_HAVE_MXF4=1` (native FP4 tensor-core
+path for Blackwell) — none of the glibc/cudart fixes ik_llama needed.
+
+**The session cannot be created.** With the 81 GiB IQ2XXS file:
+
+* the model device-cache loads (`80.76 GiB of tensor spans in 13.7 s`, warm),
+  and ds4 plans 82.5 GiB total against 96 — yet **every session `cudaMalloc`
+  fails with `out of memory`**, including a 230 MiB buffer for a 2k context;
+* `nvidia-smi` never shows more than **75.9 GiB** used, so ~5 GiB of the
+  "device cache" is not actually device-resident — an earlier
+  `CUDA (no-copy) host registration skipped: operation not supported` suggests
+  the no-copy mapping path fell back somewhere unaccounted;
+* smaller budgets don't help: `--gpu-vram 70` forces CPU spill, and ds4 prints
+  that CPU-tier execution on CUDA is an unimplemented follow-up
+  (`wave-3b mgpu-graph-session-cpu-spill`) and exits. Full residency is the
+  only CUDA path, and full residency is what breaks.
+
+Environment: RTX PRO 6000 Blackwell 96 GiB (sm_120), driver for CUDA 13.x,
+built with CUDA 13.3, ds4 @ HEAD 2026-08-12. Checkout kept at
+`~/development/ds4` for a retry after upstream movement.
+
+**Why it stays interesting** despite this: its published DGX Spark numbers show
+**823–872 tok/s prefill** flat to 65k on far weaker hardware, its compressed KV
+is 1.2 GiB where ik's MLA cache is 2.75 GiB at 65k, and it persists KV to disk
+across restarts — all aimed at exactly the pain measured in §10–§12.

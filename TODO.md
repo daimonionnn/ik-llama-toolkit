@@ -115,6 +115,24 @@ in that band runs at ~80 % generation, once).
 
 ---
 
+## 5. Benchmark `antirez/ds4` against ik_llama — ATTEMPTED 2026-08-12, blocked upstream
+
+Full account in RESULTS §13. Short version: builds clean first try
+(`make cuda CUDA_ARCH=sm_120a CUDA_HOME=/usr/local/cuda-13.3`, sm_120a MXF4
+path on), the 81 GiB IQ2XXS loads, but **every session `cudaMalloc` fails with
+a spurious OOM** — even 230 MiB for a 2k context, with ~18 GiB of VRAM free.
+`nvidia-smi` peaks at 75.9 GiB while ds4 claims an 80.76 GiB device cache, so
+part of the model silently isn't device-resident (`no-copy host registration
+skipped: operation not supported` earlier in the log). No workaround exists:
+CPU spill on CUDA is an unimplemented follow-up in ds4 itself, so full
+residency is the only path and it is the broken one.
+
+**Next actions:** file the repro upstream (antirez/ds4) and retry on their next
+wave; the checkout is kept at `~/development/ds4`. The comparison plan below
+still stands once a session can be created.
+
+<details><summary>original item</summary>
+
 ## 5. Benchmark `antirez/ds4` against ik_llama
 
 **Why.** [ds4](https://github.com/antirez/ds4) ("DwarfStar") is a purpose-built
@@ -151,6 +169,8 @@ a second engine.
 
 **Caveats:** beta quality by the author's own statement, heavily AI-assisted
 code, deliberately narrow, and it loads only the author's own GGUF files.
+
+</details>
 
 ---
 
