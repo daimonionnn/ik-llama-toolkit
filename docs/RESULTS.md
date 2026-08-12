@@ -471,3 +471,32 @@ The fastest coherent DeepSeek-V4 setup measured here is **antirez IQ2XXS 81 GiB 
 MTP = 94 tok/s** at 32k — ~2.4× a dual DGX Spark and ~4.6× the MXFP4-spill
 baseline. Order of impact: **fit-in-VRAM (3.4×) ≫ MTP (1.25–1.30×) ≫ everything
 else.**
+
+---
+
+## 8. `--fit-margin` at 128k — the margin was costing 7 % (2026-08-12)
+
+The `deepseek-v4-flash` profile carries `IK_FIT_MARGIN=8192`, sized back when the
+profile defaulted to 262 144 ctx. At 131 072 the MLA KV is ~5.5 GiB smaller, so
+that margin just leaves VRAM empty — and every MiB of empty VRAM is a MiB of
+routed experts pushed out to DDR5, which is exactly what caps generation here.
+
+MXFP4 145.6 GiB, `-c 131072`, f16 KV, `--fit`, one 256-token generation each:
+
+| `--fit-margin` | VRAM used | free    | generation |
+|----------------|-----------|---------|------------|
+| 8192 (old)     | 90 556 MiB| 7.3 GiB | 19.66 t/s  |
+| **4096**       | 93 814 MiB| 4.0 GiB | **21.09 t/s** (+7 %) |
+| 2048           | 97 074 MiB| 813 MiB | 21.53 t/s (+9 %)     |
+
+2048 is rejected despite being fastest: 813 MiB free is not enough to absorb
+allocator fragmentation or anything else touching the card.
+
+**Verified at depth**, margin 4096: a **94 015-token prefill** ran at 282 t/s and
+grew VRAM by only **278 MiB** (93 814 → 94 092), no OOM, then generated at
+16.5 t/s from that depth. So the compute buffer at full batch is already
+accounted for by the fit decision, and 4 GiB of headroom is comfortable.
+
+Applied in `serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh`, gated on context —
+at 262 144 the profile's 8192 still applies, since the DSA caches and compute
+buffer are allocated *after* the fit decision and 4096 does not cover them there.
