@@ -714,3 +714,100 @@ turn against re-prefilling the whole conversation on the next one.
 Untested split: checkpoints and prompt cache were always turned off together, so
 which of the two the speed belongs to is unknown. Worth separating before
 anything acts on this.
+
+> **Since measured — and the guess above is wrong.** §11.3 separated them: the
+> **context checkpoints** are what make a re-send free, not the prompt cache.
+> Turning `-ctx-ckpt 0` on its own loses the reuse entirely. They cost ~1.5 %
+> prefill and ~3 % generation, which is a bargain against re-prefilling the
+> conversation. §11.2 also shows the caches cost only 3.5 % at 32k depth — the
+> 26 % in §9.3 is a 256k figure, and that cost scales with context.
+
+---
+
+## 11. Prefill: +69 % on MXFP4, with nothing given up (2026-08-12)
+
+Constraint for this whole section: **MXFP4 stays**. That rules out the IQ2XXS
+quant (fits entirely in VRAM, no CPU experts at all — almost certainly the
+fastest thing this box can do, but 2-bit) and `-ser` (changes output). Every
+lever below is a placement or scheduling change; the arithmetic is untouched.
+
+All runs at `-c 131072` with a 32k prompt.
+
+### 11.1 What moved the needle
+
+| config                                   | prefill | generation |
+|------------------------------------------|--------:|-----------:|
+| wrapper default (`--fit` 4096, ub 512)   | 293.1   | 20.09 |
+| `-b 8192`                                | ~equal  | ~equal |
+| `-no-ooae`                               | 296.2   | 20.21 |
+| **`-rtr`**                               | **366.8** | 20.22 |
+| `-rtr -nkvo --n-cpu-moe 18`              | 396.6   | 20.71 |
+| `-rtr -nkvo --n-cpu-moe 17`              | 413.4   | 21.33 |
+| `-rtr -nkvo` n18 `-ub 1024 / 2048 / 4096`| 455 / 485 / 497 | ~20.7 |
+| **`-rtr -nkvo` n17 `-ub 2048`**          | **507.8 / 500.9 / 501.6** | **21.31 / 21.68 / 21.40** |
+
+Three mechanisms, and they stack because they fix different things:
+
+**`-rtr` (+25 % on its own).** Repacks the CPU-resident experts into the
+row-interleaved layout the AVX2/VNNI kernels want — `Repacked 60 tensors`, so
+MXFP4 does have an interleaved variant. §1.6 measured +16 % from this on
+step-3.7; DeepSeek gains more, which fits, since far more weight sits on the CPU
+here. It is a memory layout change over the same quantized values: output is
+unaffected. Cost: it forces `--no-mmap`, so every start re-reads the model.
+
+**`-nkvo` + manual `--n-cpu-moe` (+9 % more).** Same trade as §10.2 — the KV
+leaves VRAM, the experts move in. `--n-cpu-moe 17` fits here (§10.3 jumped 18 →
+16 and never tried it) and beats 18 on both axes.
+
+**A bigger `-ub`, which `-nkvo` unlocks (+20 % more).** This is the part that
+was hidden. Under `--fit`, `-ub 1024` does not merely miss — it **aborts** with
+`CUDA error: the resource allocation failed` in `cublas_handle`, because the
+compute buffer doubles from 3624 MiB to 7248 MiB. With `-nkvo` the attention
+scratch follows the KV to host memory and that buffer collapses to **440 MiB**,
+so doubling the micro-batch costs 440 MiB instead of 3.6 GiB and evicts no
+experts at all. Gains flatten after 2048 (455 → 485 → 497).
+
+Dead ends, recorded so they are not retried: **`-b` does nothing** for prefill
+(the compute buffer tracks `-ub`, not `-b`) and `-ub` above `-b` is silently
+clamped; **`-no-ooae` is noise** (+1 %); and **`-ictk q8_0` costs 7 %** (§10.2).
+
+### 11.2 It survives with the prompt cache on — so it is shippable
+
+Every sweep above ran with `-ctx-ckpt 0 --cache-ram 0`, baseline included, so
+they compare cleanly against each other but not against what the wrapper ships.
+Re-measured with the caches in their default state:
+
+| config                        | prefill | generation | re-send |
+|-------------------------------|--------:|-----------:|---------|
+| wrapper as shipped            | 287.1   | 19.75      | cache hit |
+| **winner, caches on**         | **484.1** | **20.98** | **cache hit** |
+| winner, caches off            | 501.6   | 21.40      | full re-prefill |
+
+**+69 % prefill and +6 % generation over what the wrapper does today, keeping
+the free re-send.** The caches cost only 3.5 % of prefill at this depth — the
+26 % measured in §9.3 was at 256k, where their cost scales with context.
+
+Two extras worth naming: with the KV in host memory, **VRAM no longer grows with
+context depth** (the `--fit` config crept 93 814 → 94 102 MiB between 512 and
+130k tokens), and host RAM is unchanged, since the KV arriving is offset by the
+experts leaving.
+
+The price is robustness. Manual placement means no `--fit` adaptivity, and the
+winner leaves only **1.6 GiB of VRAM free** — anything else touching the card
+will break it. `-rtr` also forces `--no-mmap`: 30 s to start from a warm page
+cache here, minutes from cold.
+
+### 11.3 Correction to §10.4: the checkpoints are what make a re-send free
+
+§10.4 guessed that context checkpoints were pure overhead and the prompt cache
+was the valuable half. **Measured, that is backwards:**
+
+| winner with…                          | prefill | generation | re-send |
+|---------------------------------------|--------:|-----------:|---------|
+| checkpoints + cache on                | 484.1   | 20.98      | **cache hit** |
+| `-ctx-ckpt 0`, `--cache-ram` default  | 491.3   | 21.60      | **no reuse** |
+| both off                              | 501.6   | 21.40      | no reuse |
+
+Turning the checkpoints off is what loses the reuse. They cost ~1.5 % prefill
+and ~3 % generation and buy back a full re-prefill — 33 000 tokens, i.e. ~66 s
+per follow-up turn at 500 tok/s. Keep them on for anything conversational.
