@@ -1,8 +1,11 @@
 # TODO
 
-Open threads left by the 2026-08-12 measurement session. Each one is a question
-the data raised but did not answer, with enough context to pick it up cold.
-Numbers and method live in [docs/RESULTS.md](docs/RESULTS.md) §8–§10.
+Open threads from the 2026-08-12/13 measurement sessions. Each is a question the
+data raised but did not answer, with enough context to pick it up cold. Numbers
+and method live in [docs/RESULTS.md](docs/RESULTS.md) §8–§16.
+
+Items 1–3 and 5 are resolved (kept, folded, for the reasoning); 4 and 6–8 are
+open. Nothing here blocks anything shipped.
 
 ---
 
@@ -147,6 +150,53 @@ resident is 20.5 tok/s, 100 % is 72.6.
 * **MXFP4.** ds4 has its own ~156 GB MXFP4 file. It would not fit in VRAM, and
   the residency cliff above suggests the spilling case is exactly where ds4 is
   weakest — worth knowing, but a large download for a likely-negative result.
+
+---
+
+## 6. The 4-P-core generation anomaly
+
+**Why.** §16.2's reading — generation is hurt by heterogeneous cores, because
+ggml waits for the slowest thread at every barrier — explains seven of eight
+measurements. It does not explain this one: **4 P-cores with 4 threads gives
+23.18 tok/s, beating 8 P-cores with 8 threads at 21.56**, on the same 1:1 ratio,
+the same homogeneity, and half the compute. That is 7.5 % against a 2.1 % noise
+floor, so it is real.
+
+Whatever it is, per-barrier overhead apparently grows with thread count as well.
+Worth a walk of 2/4/6/8 threads pinned to matching core counts, and if it holds,
+an upstream question about ggml's barrier cost per thread.
+
+**Low priority** — the configurations involved all cost most of the prefill,
+which is the metric this box optimises for.
+
+---
+
+## 7. `-muge` aborts on mixed-type quants
+
+`-muge` (merge up/gate expert projections) walks all 43 layers and then dies:
+
+```
+GGML_ASSERT(other_type == l.ffn_up_exps->type) failed   llama.cpp:7854
+```
+
+The assert requires `ffn_gate_exps` and `ffn_up_exps` to share a type; the MXFP4
+quant mixes them by design. A core dump is the wrong failure mode for an
+unsupported combination — it should refuse and carry on. Upstream-worthy, and
+cheap to report alongside the ds4 patches (item 5) whenever those go.
+
+---
+
+## 8. Offline `_R4` repack for MXFP4
+
+Every kvram profile carries `-rtr`, which forces `--no-mmap` and re-reads the
+model at every start (~30 s warm here, minutes cold). §1.7 shows the gain can be
+baked into the file with `llama-quantize --repack`, keeping mmap on.
+
+**Not obviously worth it:** ~146 GB more on disk, and §1.7's lesson is that only
+the CPU-resident layers may be `_R4` — an `_R4` expert on the GPU collapses to
+0.35 tok/s — so the file would be **locked to one `--n-cpu-moe`**. With three
+shipped kvram profiles at n17/n18/n20, that is three files or one that only
+suits one profile. Revisit if startup time ever starts to hurt.
 
 ---
 
