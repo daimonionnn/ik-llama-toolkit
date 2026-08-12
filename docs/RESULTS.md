@@ -4,27 +4,35 @@ Every measurement taken while building and tuning this toolkit, on the
 [reference machine](../README.md#the-reference-machine). This is the evidence
 base behind the defaults; the *reasoning* is in [TUNING.md](TUNING.md).
 
-**Model under test: Step-3.7-Flash** (StepFun AI), Unsloth Dynamic GGUF, from
-`unsloth/Step-3.7-Flash-GGUF`.
+Two models are covered. **DeepSeek-V4-Flash is the primary one** — it is what
+this box serves daily and what the current default profile runs; Step-3.7-Flash
+was the toolkit's original tuning target and remains the second model.
 
-- Architecture: `step35` MoE — 45 layers, 288 experts (8 active per token)
-- Params: ~220 B total / ~7.4 B active
-- Trained context: 262 144
+**Model 1: DeepSeek-V4-Flash** (`deepseek4`: MLA + DeepSeek Sparse Attention) —
+the architecture class ik_llama.cpp is built for, and where all the recent
+tuning lives: [§6](#6-re-measurement-2026-08-10) (fair re-match vs mainline),
+§7 (fit-in-VRAM + MTP, the 87–94 tok/s config), §8–§12 (fit-margin, depth
+sweeps, 512k, the kvram placement that is now the default), §13 (ds4).
 
-Tested in two quantizations, which share that architecture and differ only in
-bytes-per-weight (the driver of the Q4-vs-Q8 speed gap in §2):
+- Architecture: 43 layers, 256 experts (6 + 1 shared active), MLA latent KV,
+  DSA indexer top-k 512 — trained context 1 048 576
+- Params: ~284 B total
+- Quants measured: **MXFP4** ~145.6 GiB (effectively lossless QAT; spills to
+  DDR5 — the placement work in §8–§12 is about this), **antirez IQ2XXS**
+  ~81 GiB (fits entirely in VRAM, §7), antirez L37-42-Q4K mix ~91 GiB, Q8_K_XL
+  ~195 GiB (retired)
 
-| quant       | on disk             | role                   |
-|-------------|---------------------|------------------------|
-| **Q4_K_XL** | ~114 GiB (4 shards) | default / daily driver |
-| **Q8_K_XL** | ~195 GiB (6 shards) | quality reference      |
+**Model 2: Step-3.7-Flash** (StepFun AI), Unsloth Dynamic GGUF, from
+`unsloth/Step-3.7-Flash-GGUF` — §1–§5.
 
-A **second model, DeepSeek-V4-Flash** (`deepseek4`: MLA + sparse attention,
-~151 GiB Q8), is also covered — in the runtime comparison at [§3.1](#31-deepseek-v4-flash-deepseek4-mla--sparse-attention) and, after a fair
-re-match, at [§6](#6-re-measurement-2026-08-10),
-because it is the architecture class where ik_llama is expected to differ most.
+- Architecture: `step35` MoE — 45 layers, 288 experts (8 active per token),
+  ~220 B total / ~7.4 B active, trained context 262 144
+- Two quants, differing only in bytes-per-weight (the driver of the Q4-vs-Q8
+  speed gap in §2): **Q4_K_XL** ~114 GiB and **Q8_K_XL** ~195 GiB
 
-**Dates:** 2026-07-24 / 25.
+**Dates:** §1–§5 measured 2026-07-24/25, §6–§7 on 2026-08-10, §8–§13 on
+2026-08-12; §1–§4 predate a RAM reconfiguration and a CUDA upgrade — do not
+compare numbers across those groups.
 **Two measurement methods, don't mix them:**
 
 - **`llama-bench`** — allocates almost no KV cache, so it shows the *weight-only*
