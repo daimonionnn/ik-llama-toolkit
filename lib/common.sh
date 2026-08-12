@@ -268,8 +268,11 @@ show_cmd() {
     printf '%s\n' "$C_OFF" >&2
 }
 
-# Optional CPU pinning. On this hybrid Intel part the P-cores are 0-5 and the
-# E-cores 6-17; pinning to P-cores helps when IK_THREADS is small.
+# Optional CPU pinning. On this hybrid Intel part (Core Ultra 7 270K Plus) the
+# P-cores are 0-7 and the E-cores 8-23 -- verified from cpufreq, 5500 MHz vs
+# lower. (The previous comment said 0-5 / 6-17, which was the older 6P+12E part
+# this toolkit started on; pinning to "0-5" here would catch only P-cores but
+# miss two of them.) Pinning to P-cores helps when IK_THREADS is small.
 maybe_taskset() {
     if [[ -n ${IK_CPU_LIST:-} ]]; then
         echo "taskset -c $IK_CPU_LIST"
