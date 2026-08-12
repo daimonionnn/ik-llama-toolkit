@@ -12,7 +12,8 @@ was the toolkit's original tuning target and remains the second model.
 the architecture class ik_llama.cpp is built for, and where all the recent
 tuning lives: [§6](#6-re-measurement-2026-08-10) (fair re-match vs mainline),
 §7 (fit-in-VRAM + MTP, the 87–94 tok/s config), §8–§12 (fit-margin, depth
-sweeps, 512k, the kvram placement that is now the default), §13 (ds4).
+sweeps, 512k, the kvram placement that is now the default), §13 (ds4 head to
+head), §14–§16 (what is left on MXFP4: MTP at both contexts, and prefill).
 
 - Architecture: 43 layers, 256 experts (6 + 1 shared active), MLA latent KV,
   DSA indexer top-k 512 — trained context 1 048 576
@@ -31,8 +32,9 @@ sweeps, 512k, the kvram placement that is now the default), §13 (ds4).
   speed gap in §2): **Q4_K_XL** ~114 GiB and **Q8_K_XL** ~195 GiB
 
 **Dates:** §1–§5 measured 2026-07-24/25, §6–§7 on 2026-08-10, §8–§13 on
-2026-08-12; §1–§4 predate a RAM reconfiguration and a CUDA upgrade — do not
-compare numbers across those groups.
+2026-08-12, §14–§16 on 2026-08-13; §1–§4 predate a RAM reconfiguration and a
+CUDA upgrade — do not compare numbers across those groups. Generation figures
+are also only comparable at equal `max_tokens` — see §15.1.
 **Two measurement methods, don't mix them:**
 
 - **`llama-bench`** — allocates almost no KV cache, so it shows the *weight-only*
