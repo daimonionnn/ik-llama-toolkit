@@ -659,3 +659,52 @@ states, not from the measurement itself.
 **Not yet tested at 131072**, where the KV is only 5.5 GiB and the prize is
 correspondingly smaller — but `--fit` leaving VRAM on the table is a property of
 `--fit`, not of 512k, so it is worth checking there too.
+
+### 10.3 The two open questions, answered
+
+**`-ub` is not the lever for the compute buffer.** Halving the micro-batch to
+256 at 512k freed only **668 MiB** (VRAM 91 242 vs 91 910) — nowhere near the
+~3.1 GiB `--n-cpu-moe 17` needs, and it still OOMs. The control run (same
+`--n-cpu-moe 19`, only `-ub` changed) also shows what the micro-batch actually
+does:
+
+| 512k, `--n-cpu-moe 19` | prefill | generation |
+|------------------------|--------:|-----------:|
+| `-ub 512`              | 277.9   | 16.30 |
+| `-ub 256`              | 218.9   | 16.30 |
+
+**-21 % prefill, identical generation.** So `-ub` trades prefill only, and the
+13.2 GiB compute buffer is driven by something else — `-b 4096` or the DSA
+structures over 512k positions. `-b` is the untested candidate.
+
+**At 131072 the trick barely pays.** The whole `-nkvo` + manual-placement win is
+a 512k phenomenon, because it is proportional to how much VRAM the KV occupies —
+21.5 GiB there, 5.4 GiB here:
+
+| 131072, 120k depth      | GPU wt | DDR5 wt | prefill | generation |
+|-------------------------|-------:|--------:|--------:|-----------:|
+| `--fit` margin 4096     | 80.9   | 64.7    | 265.7   | 17.43 |
+| `-nkvo --n-cpu-moe 18`  | 87.3   | 58.4    | 288.6   | 17.84 |
+| `-nkvo --n-cpu-moe 16`  | 93.6   | 52.0    | CUDA OOM | — |
+
+**+8.6 % prefill, +2.4 % generation** — the generation figure is inside the
+measurement's resolution. Note also that at 131072 `--fit` is already doing a
+decent job: 64.7 GiB left in DDR5, versus the 90.2 GiB it leaves at 512k. Not
+worth trading `--fit`'s adaptivity for a hand-tuned `--n-cpu-moe` here.
+
+### 10.4 A side finding about the wrapper's own config
+
+The 131072 baseline above ran **lean** (`-ctx-ckpt 0 --cache-ram 0`) and did
+17.43 tok/s at 120k depth. §9.1 measured the same context **stock** at 13.1–14.9
+at 128k depth. That is a 17–33 % gap on the config
+`serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh` actually ships.
+
+**This is not a free win and the wrapper has deliberately not been changed.**
+`--cache-ram 0` disables the prompt cache, and for multi-turn chat or an agent
+that is exactly the structure that makes a re-send free — §9.1's repeat pass hit
+it and skipped an 8-minute prefill entirely. The trade is faster tokens within a
+turn against re-prefilling the whole conversation on the next one.
+
+Untested split: checkpoints and prompt cache were always turned off together, so
+which of the two the speed belongs to is unknown. Worth separating before
+anything acts on this.
