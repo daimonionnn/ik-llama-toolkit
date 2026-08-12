@@ -1182,7 +1182,10 @@ from 12 to 24 threads. That was measured at the old `-ncmoe 16` placement with
 ~90 GiB of experts on the CPU; kvram leaves 56 GiB there and the behaviour
 changed.
 
-The free win: **`-t 8` with `-tb 24` gives +7.4 % generation and leaves prefill
-untouched** (492.8 / 22.78 against 494.3 / 21.21). Pinning to 8 P-cores buys
+The free win: **`-t 8` with `-tb 24` gives ~+5 % generation and leaves prefill
+untouched.** Calibrated across three independent sweeps today, the 24/24
+baseline reads 21.21 / 21.66 / 21.26 — a 2.1 % spread, which is the cross-sweep
+noise floor for generation. `-t 8` reads 22.78 and 22.16, so the honest figure
+is ~+5 %, not the +7.4 % a single pair suggested. Pinning to 8 P-cores buys
 more generation still (25.15) but costs 39 % of prefill, so it is a trade rather
 than a win — wrong way round for this box.
