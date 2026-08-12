@@ -889,35 +889,94 @@ band runs at ~80 % generation speed, once.
 
 ---
 
-## 13. ds4 (DwarfStar) on this box: builds clean, cannot run yet (2026-08-12)
+## 13. ds4 (DwarfStar) vs ik_llama on the same quant (2026-08-12)
 
-TODO item 5 — benchmark antirez's [ds4](https://github.com/antirez/ds4) against
-ik_llama on the same IQ2XXS file. Outcome: **blocked by an upstream bug**, with
-the repro fully characterised.
+TODO item 5: benchmark antirez's [ds4](https://github.com/antirez/ds4) against
+ik_llama on the **same** file — the antirez IQ2XXS ~81 GiB quant this box
+already runs, written by ds4's own author. It took four local patches to get a
+session to start; with those, **ds4 prefills ~1.5–1.8× faster than ik_llama and
+generates ~0.7–0.9× as fast.**
 
-**The build is fine.** `make cuda CUDA_ARCH=sm_120a CUDA_HOME=/usr/local/cuda-13.3`
-compiles first try, zero warnings, `DS4_CUDA_HAVE_MXF4=1` (native FP4 tensor-core
-path for Blackwell) — none of the glibc/cudart fixes ik_llama needed.
+### 13.1 Head to head, IQ2XXS, no speculative decoding on either side
 
-**The session cannot be created.** With the 81 GiB IQ2XXS file:
+ds4 via `ds4-bench` (incremental interval prefill, 128 greedy tokens per
+frontier); ik_llama via HTTP against the live server, `-ngl 99` (no `--fit`),
+f16 KV, same depths. Neither side used MTP/DSpark.
 
-* the model device-cache loads (`80.76 GiB of tensor spans in 13.7 s`, warm),
-  and ds4 plans 82.5 GiB total against 96 — yet **every session `cudaMalloc`
-  fails with `out of memory`**, including a 230 MiB buffer for a 2k context;
-* `nvidia-smi` never shows more than **75.9 GiB** used, so ~5 GiB of the
-  "device cache" is not actually device-resident — an earlier
-  `CUDA (no-copy) host registration skipped: operation not supported` suggests
-  the no-copy mapping path fell back somewhere unaccounted;
-* smaller budgets don't help: `--gpu-vram 70` forces CPU spill, and ds4 prints
-  that CPU-tier execution on CUDA is an unimplemented follow-up
-  (`wave-3b mgpu-graph-session-cpu-spill`) and exits. Full residency is the
-  only CUDA path, and full residency is what breaks.
+| depth  | ds4 prefill | ik prefill | ratio | ds4 gen | ik gen | ratio |
+|-------:|------------:|-----------:|------:|--------:|-------:|------:|
+| 2 048  | **1 853**   | 1 270      | 1.46× | 72.7    | **79.5** | 0.91× |
+| 4 096  | **2 065**   | 1 423      | 1.45× | 52.1    | **72.6** | 0.72× |
+| 8 192  | **2 207**   | 1 403      | 1.57× | 50.3    | **71.2** | 0.71× |
+| 16 384 | **2 176**   | 1 395      | 1.56× | 51.1    | **68.4** | 0.75× |
+| 32 768 | **2 144**   | 1 305      | 1.64× | 46.5    | **63.0** | 0.74× |
+| 65 536 | **2 076**   | 1 166      | 1.78× | 44.8    | **55.9** | 0.80× |
 
-Environment: RTX PRO 6000 Blackwell 96 GiB (sm_120), driver for CUDA 13.x,
-built with CUDA 13.3, ds4 @ HEAD 2026-08-12. Checkout kept at
-`~/development/ds4` for a retry after upstream movement.
+ik generation is the steady (re-sent) figure, so the §12.2 dip band does not
+distort it. Note ds4's prefill advantage *grows* with depth — it is essentially
+flat at ~2 100 tok/s from 4k to 65k, while ik decays 1 423 → 1 166.
 
-**Why it stays interesting** despite this: its published DGX Spark numbers show
-**823–872 tok/s prefill** flat to 65k on far weaker hardware, its compressed KV
-is 1.2 GiB where ik's MLA cache is 2.75 GiB at 65k, and it persists KV to disk
-across restarts — all aimed at exactly the pain measured in §10–§12.
+**Incidentally, this is also the first prefill measurement of the fit-in-VRAM
+quant on ik_llama** (§7 only ever recorded generation): 1 270–1 166 tok/s versus
+484 tok/s for the best MXFP4 config in §11. Prefill suffers from CPU offload
+even more than generation does — 2.6×.
+
+Verdict for this box: neither engine wins outright. ik_llama keeps the
+generation crown (and with MTP reaches 87–94 tok/s, which ds4 has no equivalent
+of here since DSpark needs its own support GGUF). ds4 owns prefill by a wide,
+depth-proof margin. For RAG or long-document work the difference is stark: a
+65k-token prompt costs ~31 s on ds4 and ~56 s on ik_llama.
+
+### 13.2 Four bugs stood between "builds" and "runs"
+
+The build itself is clean — `make cuda CUDA_ARCH=sm_120a CUDA_HOME=/usr/local/cuda-13.3`,
+zero warnings, `DS4_CUDA_HAVE_MXF4=1`. Getting a *session* took a chain of four
+fixes, each hiding the next. Patches are in
+`results/ds4-local-patches-20260812.diff`; none are upstreamable as-is.
+
+1. **`cudaHostRegisterReadOnly` is unsupported on this driver.** Verified
+   directly: `cudaDevAttrHostRegisterReadOnlySupported = 0` on driver 595.84.
+   ds4 registers the model mapping with `Mapped|ReadOnly` and has no fallback,
+   so the no-copy path dies with *"operation not supported"*.
+2. **The mapping was `r--s` — read-only and SHARED.** On Linux ds4 still takes
+   the Metal branch (`MAP_SHARED`, `PROT_READ`), and a read-only mapping cannot
+   be pinned at all without the ReadOnly flag; retrying without it returns
+   *"invalid argument"*. Standalone probes confirmed the rule: anonymous,
+   private-RW file, and even O_DIRECT-backed mappings all pin fine; `PROT_READ`
+   + `ReadOnly` is the only combination the driver rejects. Patch: on Linux map
+   `MAP_PRIVATE | PROT_READ|PROT_WRITE` (copy-on-write, nothing ever writes) and
+   retry registration without the flag. Registering the full 80.76 GiB then
+   succeeds in ~20 s.
+3. **A successful registration disables the device weight cache.**
+   `cuda_model_range_ptr()` returns the host pointer whenever the mapping is
+   registered — correct on a DGX Spark, where host memory *is* device memory,
+   but on a discrete GPU it means PCIe zero-copy reads on every token:
+   **0.54 tok/s**. Patch: honour `DS4_CUDA_WEIGHT_CACHE=1` to fall through to
+   the arena cache.
+4. **The arena allocator cannot achieve full residency.** Its chunked first-fit
+   packing consumed ~1.5× the bytes it stored — at `--n` 256 MiB chunks the card
+   was exhausted with only 64 GiB of 80.76 GiB cached — and the cache limit
+   governs *span* bytes while arenas overshoot it (limit 81 GiB → 88 GiB of
+   arenas). Patch: raise the 8 GiB chunk cap so the whole model lands in **one**
+   arena.
+
+**Partial residency is a cliff, not a slope**, which is why this had to be
+chased to the end:
+
+| resident | prefill | generation |
+|---------:|--------:|-----------:|
+| 0 (registered host only) | 60 | 0.54 |
+| 60.0 GiB (74 %) | 93 | 1.33 |
+| 76.0 GiB (94 %) | 153 | 2.70 |
+| 80.0 GiB (99.1 %) | 2 082 | 20.5 |
+| **80.76 GiB (100 %)** | **2 161** | **72.6** |
+
+The last 536 MiB span is worth 20.5 → 72.6 tok/s. With MoE routing touching
+6 of 256 experts per token, any host-resident weight is hit constantly.
+
+Environment: RTX PRO 6000 Blackwell 96 GiB (sm_120), driver 595.84, CUDA 13.3,
+ds4 @ HEAD 2026-08-12, checkout at `~/development/ds4`.
+
+**Why it stays interesting** beyond the prefill number: a 1.2 GiB compressed KV
+where ik's MLA cache needs 2.75 GiB at 65k, KV persisted to disk across
+restarts, and 1M context.

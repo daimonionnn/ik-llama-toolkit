@@ -115,62 +115,36 @@ in that band runs at ~80 % generation, once).
 
 ---
 
-## 5. Benchmark `antirez/ds4` against ik_llama — ATTEMPTED 2026-08-12, blocked upstream
+## 5. ~~Benchmark `antirez/ds4` against ik_llama~~ — DONE 2026-08-12
 
-Full account in RESULTS §13. Short version: builds clean first try
-(`make cuda CUDA_ARCH=sm_120a CUDA_HOME=/usr/local/cuda-13.3`, sm_120a MXF4
-path on), the 81 GiB IQ2XXS loads, but **every session `cudaMalloc` fails with
-a spurious OOM** — even 230 MiB for a 2k context, with ~18 GiB of VRAM free.
-`nvidia-smi` peaks at 75.9 GiB while ds4 claims an 80.76 GiB device cache, so
-part of the model silently isn't device-resident (`no-copy host registration
-skipped: operation not supported` earlier in the log). No workaround exists:
-CPU spill on CUDA is an unimplemented follow-up in ds4 itself, so full
-residency is the only path and it is the broken one.
+Measured head to head on the same IQ2XXS file (RESULTS §13): **ds4 prefills
+1.5–1.8× faster** (≈2 100 tok/s, flat from 4k to 65k, vs ik's 1 423→1 166) and
+**generates at 0.7–0.9×** (44.8–72.7 vs 55.9–79.5). Neither wins outright; with
+MTP ik reaches 87–94 tok/s and ds4 has no equivalent here.
 
-**Next actions:** file the repro upstream (antirez/ds4) and retry on their next
-wave; the checkout is kept at `~/development/ds4`. The comparison plan below
-still stands once a session can be created.
+Getting there took four local patches (`results/ds4-local-patches-20260812.diff`),
+each hiding the next: no `HostRegisterReadOnly` on driver 595.84; a `r--s`
+Metal-branch mapping that cannot be pinned at all; a successful registration
+short-circuiting the device weight cache (0.54 tok/s of PCIe zero-copy); and an
+arena allocator whose packing overhead (~1.5×) makes full residency impossible
+until the whole model goes in one arena. Partial residency is a cliff — 99.1 %
+resident is 20.5 tok/s, 100 % is 72.6.
 
-<details><summary>original item</summary>
+**Open follow-ups**, in order of value:
 
-## 5. Benchmark `antirez/ds4` against ik_llama
-
-**Why.** [ds4](https://github.com/antirez/ds4) ("DwarfStar") is a purpose-built
-engine for exactly the model this box runs, written by the author of **the quant
-already in use here** — `antirez/deepseek-v4-gguf`. It started Metal-only but now
-lists Metal, CUDA and ROCm. Two features have no equivalent in ik_llama and both
-target pain this repo measured:
-
-* a **KV cache persisted to disk across restarts**, where §10 measured a 500k
-  prefill costing 52 minutes and §9.3/§10.4 showed the in-RAM prompt cache is
-  the only thing making a second turn bearable;
-* **1M context**, against the 524288 that fits here today.
-
-It also ships **DSpark**, its own speculative decoding — worth noting because a
-widely-copied AI-written summary misattributes DSpark to SGLang. It is ds4's.
-
-**The bar is high.** ik_llama does **87–94 tok/s** on this box with the antirez
-IQ2XXS quant plus MTP (§7). ds4 publishes 39.35 tok/s on an M5 Max and 18.05 on
-a DGX Spark GB10; no RTX PRO 6000 numbers exist. DGX Spark is memory-bandwidth
-poor, so it is a weak predictor for this card — but nothing suggests a walkover.
-
-**What to run.** Clone to `~/development/ds4` (its own upstream checkout, the way
-`ik_llama.cpp/` is here), build the CUDA backend, serve the **same** IQ2XXS
-chat-v2 file. Then measure with the §9/§10 method — HTTP against the live server,
-the same depths, unique prompt prefixes — so the numbers drop straight into the
-same tables rather than being "roughly comparable". Compare against both
-baselines: 87–94 tok/s (IQ2XXS + MTP) and ~21 tok/s (MXFP4 GPU+CPU).
-
-**Decision rule.** Numbers go into RESULTS §11 either way. ds4 gets its own
-`ds4-toolkit` repo **only if** it wins on speed, or if the persistent disk KV
-proves valuable enough on its own — `serve.sh`'s `IK_*` abstraction (`--fit`,
-`-ncmoe`, margins) has nothing in common with ds4 and should not be bent to hold
-a second engine.
-
-**Caveats:** beta quality by the author's own statement, heavily AI-assisted
-code, deliberately narrow, and it loads only the author's own GGUF files.
-
-</details>
+* **Report upstream.** Patches 1–2 (driver capability fallback, Linux mapping
+  flags) are straightforwardly upstreamable and would make ds4 work on any
+  discrete NVIDIA card with this driver class. Deliberately *not* filed yet —
+  Matt's call, 2026-08-12.
+* **DSpark.** ds4's speculative decoding needs its own support GGUF
+  (`./download_model.sh ds4f-dspark`); it is the closest analogue to ik's MTP
+  and would decide the generation column fairly.
+* **Persistent disk KV.** Untested and the reason ds4 was interesting in the
+  first place (§10 measured a 52-minute 500k prefill; ds4 claims it survives
+  restarts).
+* **MXFP4.** ds4 has its own ~156 GB MXFP4 file. It would not fit in VRAM, and
+  the residency cliff above suggests the spilling case is exactly where ds4 is
+  weakest — worth knowing, but a large download for a likely-negative result.
 
 ---
 
