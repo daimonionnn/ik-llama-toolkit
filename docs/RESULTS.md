@@ -931,8 +931,12 @@ depth-proof margin. For RAG or long-document work the difference is stark: a
 
 The build itself is clean — `make cuda CUDA_ARCH=sm_120a CUDA_HOME=/usr/local/cuda-13.3`,
 zero warnings, `DS4_CUDA_HAVE_MXF4=1`. Getting a *session* took a chain of four
-fixes, each hiding the next. Patches are in
-`results/ds4-local-patches-20260812.diff`; none are upstreamable as-is.
+fixes, each hiding the next. The patch is committed in this repo as
+[`docs/external/ds4-blackwell-discrete-fixes.patch`](external/ds4-blackwell-discrete-fixes.patch)
+and lives on branch `local/blackwell-discrete-fixes` in `~/development/ds4`,
+together with `run-cuda-local.sh`, which carries the working invocation. Fixes
+1–2 are hardware-portable and would suit upstream as-is; 3–4 want real design
+decisions rather than the env-var escape hatches used here.
 
 1. **`cudaHostRegisterReadOnly` is unsupported on this driver.** Verified
    directly: `cudaDevAttrHostRegisterReadOnlySupported = 0` on driver 595.84.
@@ -975,7 +979,20 @@ The last 536 MiB span is worth 20.5 → 72.6 tok/s. With MoE routing touching
 6 of 256 experts per token, any host-resident weight is hit constantly.
 
 Environment: RTX PRO 6000 Blackwell 96 GiB (sm_120), driver 595.84, CUDA 13.3,
-ds4 @ HEAD 2026-08-12, checkout at `~/development/ds4`.
+ds4 @ upstream 84cc882 (2026-08-12), checkout at `~/development/ds4`.
+
+**To reproduce**, from that checkout on the patched branch:
+
+```sh
+./run-cuda-local.sh bench          # the sweep in §13.1
+./run-cuda-local.sh serve          # OpenAI/Anthropic server on :8091
+```
+
+The two environment variables it sets are not optional and have no sane default
+here — `DS4_CUDA_WEIGHT_CACHE=1` (fix 3) and
+`DS4_CUDA_WEIGHT_ARENA_CHUNK_MB=84000` (fix 4). The ik_llama side of §13.1 is
+`results/ik-iq2xxs-sweep-20260812.csv`, produced by a plain `-ngl 99` server on
+the same file.
 
 **Why it stays interesting** beyond the prefill number: a 1.2 GiB compressed KV
 where ik's MLA cache needs 2.75 GiB at 65k, KV persisted to disk across

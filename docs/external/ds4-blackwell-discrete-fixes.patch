@@ -1,0 +1,254 @@
+From 432c3490715b6cab6c5125f3c38d4ed85bc24806 Mon Sep 17 00:00:00 2001
+From: Daimonion <daimonionnn@gmail.com>
+Date: Wed, 12 Aug 2026 23:42:54 +0200
+Subject: [PATCH] local: make ds4 run on a discrete NVIDIA GPU (RTX PRO 6000,
+ driver 595.84)
+
+Upstream ds4 cannot create a session on this machine: every session cudaMalloc
+fails with a spurious out-of-memory, including 230 MiB for a 2k context with
+~18 GiB of VRAM free. Four causes, each hiding the next.
+
+1. cudaHostRegisterReadOnly is unsupported by this driver
+   (cudaDevAttrHostRegisterReadOnlySupported = 0 on 595.84), and the model
+   registration passes Mapped|ReadOnly with no fallback. Retry without the flag.
+
+2. The mapping itself could not be pinned in any case: on Linux the model is
+   mapped through the Metal branch as MAP_SHARED + PROT_READ, and a read-only
+   mapping is exactly the combination this driver rejects -- retrying without
+   ReadOnly returns "invalid argument". Standalone probes confirmed anonymous,
+   private-RW file and O_DIRECT-backed mappings all pin fine. Map MAP_PRIVATE
+   with PROT_READ|PROT_WRITE on Linux; it is copy-on-write and nothing writes
+   through it, so no pages are duplicated. Registering the full 80.76 GiB then
+   takes ~20 s.
+
+3. With registration working, cuda_model_range_ptr() returns the host pointer
+   whenever the mapping is registered, which disables the device weight cache.
+   That is right on a DGX Spark, where host memory is device memory; on a
+   discrete card it means PCIe zero-copy reads on every token -- 0.54 tok/s
+   measured. Honour DS4_CUDA_WEIGHT_CACHE=1 to fall through to the arena cache.
+
+4. The arena allocator's chunked first-fit consumes ~1.5x the bytes it stores
+   (the card was exhausted at 64 of 80.76 GiB cached with 256 MiB chunks), and
+   its cache limit governs span bytes while arenas overshoot it -- limit 81 GiB
+   produced 88 GiB of arenas. Raise the 8 GiB chunk cap so the whole model can
+   go into one arena.
+
+With all four, on the antirez IQ2XXS ~81 GiB quant: 2161 tok/s prefill and 72.6
+tok/s generation at 2k, and ~2100 tok/s prefill flat from 4k to 65k. Partial
+residency is a cliff rather than a slope -- 99.1 % resident is 20.5 tok/s
+against 72.6 at 100 % -- so the arena fix is what makes the engine usable here
+at all, not merely faster.
+
+Fixes 1 and 2 are hardware-portable and would suit upstream as-is. Fix 3 needs
+a real discrete-vs-unified policy rather than an env var, and fix 4 wants a
+proper arena sizing pass; both are recorded here as what this machine needs.
+
+run-cuda-local.sh carries the working invocation and the reasoning for the two
+environment variables. Full measurements in the ik-llama-toolkit repo,
+docs/RESULTS.md section 13.
+---
+ ds4.c             | 16 +++++++++++-
+ ds4_cuda.cu       | 56 ++++++++++++++++++++++++++++++++++++++--
+ run-cuda-local.sh | 66 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 135 insertions(+), 3 deletions(-)
+ create mode 100755 run-cuda-local.sh
+
+diff --git a/ds4.c b/ds4.c
+index 449140b..8507276 100644
+--- a/ds4.c
++++ b/ds4.c
+@@ -2473,8 +2473,22 @@ static void model_open(ds4_model *m, const char *path, bool metal_mapping,
+      * normal user-space failure. Keeping CPU inference off the shared mapping
+      * avoids that VM accounting path while preserving normal file-backed reads.
+      */
++#if defined(__linux__)
++    /* LOCAL PATCH: there is no Metal on Linux, and the CUDA no-copy path also
++     * lands here with metal_mapping set -- which produced a PROT_READ MAP_SHARED
++     * mapping that cudaHostRegister cannot pin on drivers without
++     * HostRegisterReadOnly support (this box: driver 595.84, RTX PRO 6000,
++     * ReadOnlySupported=0). A writable private (COW) mapping is safe: nothing
++     * writes through it, so no pages are duplicated, and pinning works.
++     * (Verified standalone: registering the full 80.76 GiB RW-private mapping
++     * of this file succeeds in 19.6 s on this machine.) */
++    const int mmap_flags = MAP_PRIVATE;
++    const int mmap_prot = PROT_READ | PROT_WRITE;
++#else
+     const int mmap_flags = metal_mapping ? MAP_SHARED : MAP_PRIVATE;
+-    void *map = mmap(NULL, (size_t)st.st_size, PROT_READ, mmap_flags, fd, 0);
++    const int mmap_prot = PROT_READ;
++#endif
++    void *map = mmap(NULL, (size_t)st.st_size, mmap_prot, mmap_flags, fd, 0);
+     if (map == MAP_FAILED) ds4_die_errno("cannot mmap model", path);
+ 
+     m->fd = fd;
+diff --git a/ds4_cuda.cu b/ds4_cuda.cu
+index 9eb100e..1bae70c 100644
+--- a/ds4_cuda.cu
++++ b/ds4_cuda.cu
+@@ -702,7 +702,16 @@ static const char *cuda_model_ptr(const void *model_map, uint64_t offset) {
+ 
+ static const char *cuda_model_range_ptr(const void *model_map, uint64_t offset, uint64_t bytes, const char *what) {
+     if (bytes == 0) return cuda_model_ptr(model_map, offset);
+-    if (g_model_device_owned || g_model_registered) return cuda_model_ptr(model_map, offset);
++    if (g_model_device_owned) return cuda_model_ptr(model_map, offset);
++    /* LOCAL PATCH: a registered host mapping short-circuited the device weight
++     * cache entirely -- correct on unified-memory boards (DGX Spark), dead slow
++     * on a discrete GPU where "host pointer" means PCIe reads per token. With
++     * DS4_CUDA_WEIGHT_CACHE set, fall through to the arena cache and use the
++     * registered mapping only as the over-limit fallback. */
++    if (g_model_registered &&
++        getenv("DS4_CUDA_WEIGHT_CACHE") == NULL &&
++        getenv("DS4_CUDA_WEIGHT_PRELOAD") == NULL)
++        return cuda_model_ptr(model_map, offset);
+     if (g_model_hmm_direct &&
+         getenv("DS4_CUDA_WEIGHT_CACHE") == NULL &&
+         getenv("DS4_CUDA_WEIGHT_PRELOAD") == NULL) {
+@@ -2302,7 +2311,12 @@ static uint64_t cuda_model_arena_chunk_bytes(uint64_t need) {
+         if (end != env && v > 0) mb = (uint64_t)v;
+     }
+     if (mb < 256) mb = 256;
+-    if (mb > 8192) mb = 8192;
++    /* LOCAL PATCH: cap raised from 8192 so a discrete GPU can hold the whole
++     * model in ONE arena. With 8 GiB chunks the tail waste of first-fit packing
++     * runs ~1.5x the cached bytes here, which makes full residency impossible
++     * on a 96 GiB card for an 81 GiB model -- and partial residency falls back
++     * to PCIe zero-copy reads per token (0.54-2.70 tok/s measured). */
++    if (mb > 131072) mb = 131072;
+     uint64_t bytes = mb * 1048576ull;
+     if (bytes < need) {
+         const uint64_t align = 256ull * 1048576ull;
+@@ -2917,7 +2931,23 @@ extern "C" int ds4_gpu_tensor_alloc_on(ds4_gpu_tensor *t, int device_id,
+     if (bytes == 0) bytes = 1;
+     int ok = 0;
+     WITH_DEVICE(g_gpu[device_id].device_id) {
++        /* DEBUG instrumentation (local, not upstream): when the alloc fails,
++         * show how big it was, what the driver thinks is free, and whether a
++         * sticky error was already pending before we even asked. */
++        const cudaError_t pending = cudaGetLastError();
+         ok = cuda_ok(cudaMalloc(&t->ptr, (size_t)bytes), "tensor alloc");
++        if (!ok) {
++            size_t free_b = 0, tot_b = 0;
++            const cudaError_t mi = cudaMemGetInfo(&free_b, &tot_b);
++            fprintf(stderr,
++                    "ds4: DEBUG tensor alloc %.2f MiB failed; pending-before=%s; "
++                    "memGetInfo=%s free=%.2f GiB total=%.2f GiB\n",
++                    (double)bytes / 1048576.0,
++                    cudaGetErrorString(pending),
++                    cudaGetErrorString(mi),
++                    (double)free_b / 1073741824.0,
++                    (double)tot_b / 1073741824.0);
++        }
+     }
+     if (!ok) return 3;
+     t->bytes = bytes;
+@@ -3757,6 +3787,17 @@ extern "C" int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size)
+ 
+     cudaError_t err = cudaHostRegister((void *)model_map, (size_t)model_size,
+                                        cudaHostRegisterMapped | cudaHostRegisterReadOnly);
++    if (err != cudaSuccess) {
++        /* LOCAL PATCH: driver 595.84 on RTX PRO 6000 Blackwell reports
++         * cudaDevAttrHostRegisterReadOnlySupported=0, so the ReadOnly flag
++         * fails with "operation not supported". The mapping is made writable
++         * (private COW) on Linux, so plain Mapped pinning is safe: retry. */
++        (void)cudaGetLastError();
++        err = cudaHostRegister((void *)model_map, (size_t)model_size,
++                               cudaHostRegisterMapped);
++        if (err == cudaSuccess)
++            fprintf(stderr, "ds4: CUDA host registration retried without ReadOnly (unsupported here)\n");
++    }
+     if (err == cudaSuccess) {
+         void *dev = NULL;
+         err = cudaHostGetDevicePointer(&dev, (void *)model_map, 0);
+@@ -3839,6 +3880,17 @@ extern "C" int ds4_gpu_register_model_map_no_copy(const void *model_map, uint64_
+ 
+     cudaError_t err = cudaHostRegister((void *)model_map, (size_t)model_size,
+                                        cudaHostRegisterMapped | cudaHostRegisterReadOnly);
++    if (err != cudaSuccess) {
++        /* LOCAL PATCH: driver 595.84 on RTX PRO 6000 Blackwell reports
++         * cudaDevAttrHostRegisterReadOnlySupported=0, so the ReadOnly flag
++         * fails with "operation not supported". The mapping is made writable
++         * (private COW) on Linux, so plain Mapped pinning is safe: retry. */
++        (void)cudaGetLastError();
++        err = cudaHostRegister((void *)model_map, (size_t)model_size,
++                               cudaHostRegisterMapped);
++        if (err == cudaSuccess)
++            fprintf(stderr, "ds4: CUDA host registration retried without ReadOnly (unsupported here)\n");
++    }
+     if (err == cudaSuccess) {
+         void *dev = NULL;
+         err = cudaHostGetDevicePointer(&dev, (void *)model_map, 0);
+diff --git a/run-cuda-local.sh b/run-cuda-local.sh
+new file mode 100755
+index 0000000..7628121
+--- /dev/null
++++ b/run-cuda-local.sh
+@@ -0,0 +1,66 @@
++#!/usr/bin/env bash
++# =============================================================================
++# run-cuda-local.sh -- ds4 on a discrete NVIDIA GPU (RTX PRO 6000, 96 GiB)
++# =============================================================================
++# Upstream ds4 cannot create a session on this machine at all; the local branch
++# `local/blackwell-discrete-fixes` carries four fixes, and even with those the
++# runtime needs two environment variables that have no sane default here. This
++# script is the whole working invocation, so none of that has to be remembered.
++#
++#   ./run-cuda-local.sh bench [extra ds4-bench args...]
++#   ./run-cuda-local.sh serve [extra ds4-server args...]
++#   ./run-cuda-local.sh raw   <binary> [args...]
++#
++# WHY THE TWO ENV VARS (measured, see ik-llama-toolkit docs/RESULTS.md §13):
++#
++#   DS4_CUDA_WEIGHT_CACHE=1
++#       Without it, a successfully registered host mapping short-circuits the
++#       device weight cache entirely -- correct on a DGX Spark where host memory
++#       IS device memory, catastrophic on a discrete card: every token reads
++#       weights over PCIe. Measured 0.54 tok/s.
++#
++#   DS4_CUDA_WEIGHT_ARENA_CHUNK_MB=84000
++#       Forces the whole model into ONE arena. The chunked first-fit allocator
++#       otherwise burns ~1.5x the bytes it stores, and full residency becomes
++#       unreachable -- the card ran out at 64 of 80.76 GiB cached with 256 MiB
++#       chunks. Partial residency is a cliff, not a slope:
++#           74 % resident ->  1.33 tok/s      99.1 % -> 20.5 tok/s
++#           94 % resident ->  2.70 tok/s      100  % -> 72.6 tok/s
++#       The last 536 MiB span is worth 3.5x, because MoE routing touches those
++#       weights on every token.
++#
++# Sized for 96 GiB of VRAM and the ~81 GiB antirez IQ2XXS quant. On a different
++# card or quant, set ARENA_MB to roughly (model GiB + 3) * 1024.
++# -----------------------------------------------------------------------------
++set -uo pipefail
++cd "$(dirname "$(readlink -f "$0")")"
++
++MODEL="${DS4_MODEL:-/home/matt/.lmstudio/models/antirez/deepseek-v4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf}"
++ARENA_MB="${DS4_ARENA_MB:-84000}"
++
++export DS4_CUDA_WEIGHT_CACHE=1
++export DS4_CUDA_WEIGHT_ARENA_CHUNK_MB="$ARENA_MB"
++
++[[ -f $MODEL ]] || { echo "model not found: $MODEL" >&2; exit 1; }
++
++mode="${1:-bench}"; shift || true
++
++case "$mode" in
++    bench)
++        exec ./ds4-bench --cuda -m "$MODEL" \
++            --prompt-file speed-bench/promessi_sposi.txt \
++            --ctx-start 2048 --ctx-max 65536 --step-mul 2 --gen-tokens 128 "$@"
++        ;;
++    serve)
++        # ds4-server speaks OpenAI/Anthropic; 8091 to avoid the ik_llama wrapper
++        # default (8090) and LM Studio (8080).
++        exec ./ds4-server --cuda -m "$MODEL" --port "${DS4_PORT:-8091}" "$@"
++        ;;
++    raw)
++        bin="${1:?usage: run-cuda-local.sh raw <binary> [args...]}"; shift
++        exec "./$bin" --cuda -m "$MODEL" "$@"
++        ;;
++    *)
++        sed -n '2,20p' "$0"; exit 2
++        ;;
++esac
+-- 
+2.53.0
+
