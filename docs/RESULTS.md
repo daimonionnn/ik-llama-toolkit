@@ -1171,11 +1171,23 @@ lifted generation 20 % — separated two effects that had been conflated:
 **Prefill tracks the core count alone** — 24 cores gives 492–494 whatever `-t`
 is, 8 cores gives 302–303 — because `-t` and `-tb` are independent knobs.
 
-**Generation tracks the ratio, not the count.** One thread per core lands at
-~21.2–21.6 whether that is 8/8 or 24/24. Oversubscription is what helps:
-1.5:1 → 23.29, 3:1 → 25.15. The reading that fits is latency, not bandwidth —
-expert access is scattered, so a thread stalls and its core idles unless another
-runnable thread is queued behind it.
+**Generation does not track the count either.** One thread per core lands at
+~21.2–21.6 whether that is 8/8 or 24/24, and oversubscribing the *mixed* core
+set does nothing at all — 32 threads on 24 cores gives 21.38, 48 threads gives
+21.38. Only oversubscribing the **P-cores** helps: on 8 P-cores, 8 threads give
+21.56, 12 give 23.29, 24 give 25.15.
+
+So the variable is not the ratio and not the count — it is **whether generation
+runs on E-cores**. ggml waits for the slowest thread at every barrier, and an
+E-core is always the slowest. That also explains why plain `-t 8` helps a little
+without any pinning: with few runnable threads, Intel Thread Director tends to
+place them on P-cores anyway, so it catches part of the same effect by accident.
+
+Walking `-t` with `-tb` fixed at 24 (prefill unmoved at 489–493 throughout):
+
+| `-t` | 6 | 8 | 10 | 12 | 16 | 32 | 48 |
+|------|--:|--:|---:|---:|---:|---:|---:|
+| generation | 22.44 | 22.16 | 22.18 | 21.77 | 21.56 | 21.38 | 21.38 |
 
 **This corrects `default.env`,** which called generation "flat, bandwidth-bound"
 from 12 to 24 threads. That was measured at the old `-ncmoe 16` placement with
