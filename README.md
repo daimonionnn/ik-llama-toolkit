@@ -181,7 +181,8 @@ VRAM at launch. Starting with 20 GiB free instead of 95 GiB silently pushes
 ./serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh           # lossless DeepSeek, experts in DDR5, ~21 tok/s
 ./serve-deepseek-v4-flash-mxfp4-kvram-128k.sh             # fast-prefill variant: 484 tok/s pp (+69 %)
 ./serve-deepseek-v4-flash-mxfp4-kvram-mtp-128k.sh         # same, MTP: 24 tok/s tg, less prefill
-./serve-deepseek-v4-flash-mxfp4-kvram-256k.sh             # same treatment at 256k: 402 pp (+73 %)
+./serve-deepseek-v4-flash-mxfp4-kvram-256k.sh             # same treatment at 256k: 406 pp
+./serve-deepseek-v4-flash-mxfp4-kvram-mtp-256k.sh         # 256k + MTP: 20.5 tok/s tg (+26 %)
 ./serve-deepseek-v4-flash-mxfp4-gpu-cpu-512k.sh           # half-million ctx, KV in RAM, ~16 tok/s
 ./serve-step-3.7-flash-q8.sh            # Step-3.7-Flash Q8_K_XL quality reference, ~13 tok/s
 ./serve.sh --list                       # what profiles exist

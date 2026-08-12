@@ -850,7 +850,8 @@ Three structural notes:
   8192 it leaves only 73.0 GiB of weights on the GPU. The manual split moves
   16.3 GiB of experts out of DDR5.
 * **The caches cost real money at this context: −24 % generation** (17.55 →
-  13.38; at 128k it was ~2 %). Checkpoint overhead scales with KV size (11 GiB
+  13.38; at 128k it was ~2 %). Both figures here are 64-token generations and
+  read low in absolute terms — see §15.1. Checkpoint overhead scales with KV size (11 GiB
   here). Still shipped ON — a re-send at 130k depth would otherwise re-prefill
   for ~5 minutes — but for single-shot batch work over huge prompts, run the
   profile with `-ctx-ckpt 0 --cache-ram 0`.
@@ -1063,3 +1064,55 @@ anyone wants `-muge` on mixed-type quants.
 
 `-amb` was not reached; with the compute buffer already at 440 MiB under
 `-nkvo` (§11.1) there is nothing left for it to cap.
+
+---
+
+## 15. MTP at 262144 — the best trade of the three contexts (2026-08-13)
+
+§14.1 measured MTP at 131072. It cannot be extrapolated to 262144: the KV is
+11.4 GiB instead of 5.4, the compute buffer 2.8 instead of 1.8, and the shipped
+256k profile already sits at `--n-cpu-moe 18` because 17 OOMs there. So the
+5.5 GiB predictor is paid for from a tighter budget. Measured at 130k depth,
+caches on, 160 generated tokens:
+
+| config                         | prefill | generation |
+|--------------------------------|--------:|-----------:|
+| 256k kvram profile (n18)       | **406.1** | 16.31 |
+| n20, no MTP                    | 376.9   | 15.47 |
+| **n20 + MTP**                  | 364.2   | **20.48** |
+| n21 + MTP                      | — exited during startup | — |
+
+**MTP alone is worth +32.4 %** (15.47 → 20.48 at identical placement); net
+against the shipped profile, **+25.6 % generation for −10.3 % prefill**. That
+beats the same treatment at 131072 (+20.4 % isolated, +13.5 % net) — deeper
+context leaves generation more bandwidth-starved, so each accepted draft token
+saves proportionally more.
+
+Verified from the load log that the target split is byte-identical with and
+without the draft (82 838.93 / 66 290.00 MiB), and that the draft accounts for
+the entire 7.2 GiB VRAM difference (95 772 vs 88 360) — so the comparison
+isolates MTP rather than the placement.
+
+Shipped as `deepseek-v4-flash-256k-kvram-mtp` +
+`serve-deepseek-v4-flash-mxfp4-kvram-mtp-256k.sh`.
+
+`--n-cpu-moe 21` exited during startup with no error line and no kernel OOM,
+after both the target and the draft KV had initialised. Not chased: a looser
+placement is monotonically worse (n19 → n20 at 131072 lost on both axes), so
+20 is the answer regardless.
+
+### 15.1 A methodology correction: generation figures depend on `max_tokens`
+
+The n18 baseline above reads 16.31 tok/s where §12.1 recorded **13.38** for what
+is nominally the same configuration. The difference is not noise and not the
+config — §12.1 generated 64 tokens, this section generates 160.
+
+§12.2 established that the tokens right after a fresh prefill are slow. A
+64-token measurement carries that slow start over a quarter of its sample; a
+160-token one dilutes it. **So generation numbers are only comparable across
+sections that used the same `max_tokens`**, and the shipped 256k profile is
+meaningfully faster in ordinary use than §12.1's figure suggests. Prefill is
+unaffected (406.1 vs 402.5 — within noise).
+
+Affected: §12.1 (64 tokens) reads low against §11 and §14–§15 (160 tokens).
+Within any one section the comparison is sound.
