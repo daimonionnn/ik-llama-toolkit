@@ -178,6 +178,7 @@ VRAM at launch. Starting with 20 GiB free instead of 95 GiB silently pushes
 ./serve.sh mxfp4-tuned                  # DeepSeek-V4-Flash MXFP4, the tuned profile
 ./serve-deepseek-v4-flash-antirez-IQ2XXS-gpu-mtp-65k.sh   # fastest DeepSeek: all in VRAM + MTP, ~87 tok/s
 ./serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh           # lossless DeepSeek, experts in DDR5, ~21 tok/s
+./serve-deepseek-v4-flash-mxfp4-kvram-128k.sh             # fast-prefill variant: 484 tok/s pp (+69 %)
 ./serve-deepseek-v4-flash-mxfp4-gpu-cpu-512k.sh           # half-million ctx, KV in RAM, ~16 tok/s
 ./serve-step-3.7-flash-q8.sh            # Step-3.7-Flash Q8_K_XL quality reference, ~13 tok/s
 ./serve.sh --list                       # what profiles exist
@@ -207,6 +208,14 @@ any `serve.sh` flag. Their names spell out quant, placement and context:
   fills VRAM to ~93.8 GiB (margin tuned down to 4096 for this context, worth
   +7 % — see RESULTS §8) and the remaining ~52 GiB of experts run **on the CPU
   out of DDR5**, which pins generation to **~21 tok/s**.
+- **`serve-deepseek-v4-flash-mxfp4-kvram-128k.sh`** → `serve.sh deepseek-v4-flash-128k-kvram`.
+  Same quant, same context, different placement: the KV goes to RAM (`-nkvo`),
+  the freed VRAM goes to experts (`--n-cpu-moe 17`), the CPU experts are
+  repacked for AVX2/VNNI (`-rtr`), and the micro-batch that this unlocks does the
+  rest — **484 tok/s prefill (+69 %) and ~21 tok/s generation** vs the `--fit`
+  wrapper, prompt cache intact (RESULTS §11). The trade is robustness: manual
+  placement, ~1.6 GiB VRAM headroom, and `-rtr` re-reads the model each start.
+  Prefer the `--fit` wrapper for anything that must come up unattended.
 - **`serve-deepseek-v4-flash-mxfp4-gpu-cpu-512k.sh`** → `serve.sh deepseek-v4-flash-512k`.
   The same quant at **524288 context**, with the placement inverted: the KV goes
   to RAM (`-nkvo`) and the VRAM it frees goes to experts (`--n-cpu-moe 19`,
@@ -300,6 +309,8 @@ ik-llama-toolkit/
 │                         wrapper: DeepSeek IQ2XXS all-in-VRAM + MTP, ~87 tok/s
 ├── serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh
 │                         wrapper: DeepSeek MXFP4, experts in DDR5, ~21 tok/s
+├── serve-deepseek-v4-flash-mxfp4-kvram-128k.sh
+│                         wrapper: fast-prefill 128k variant, 484 tok/s pp
 ├── serve-deepseek-v4-flash-mxfp4-gpu-cpu-512k.sh
 │                         wrapper: DeepSeek MXFP4 at 512k, KV in RAM, ~16 tok/s
 ├── serve-step-3.7-flash-q8.sh  wrapper: Step-3.7-Flash Q8 quality reference
