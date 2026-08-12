@@ -322,6 +322,12 @@ Auto-saved `bench.sh` runs (tables + full hardware/git context) live in
 numbers above that came from ad-hoc `llama-bench`/server runs during tuning are
 consolidated here because that is their only permanent home.
 
+Sections 9 and 10 were driven over HTTP against a live server rather than by
+`bench.sh`, because `llama-bench` cannot set `-fidx` and would therefore measure
+a configuration this toolkit does not ship. Those runs saved both their data and
+the script that produced it, as `deepseek-v4-flash-mxfp4-*-20260812.{csv,sh}`.
+`results/` is gitignored, so they are local to the machine that ran them.
+
 ---
 
 ## 6. Re-measurement (2026-08-10)
