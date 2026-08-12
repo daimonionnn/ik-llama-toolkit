@@ -1171,23 +1171,52 @@ lifted generation 20 % — separated two effects that had been conflated:
 **Prefill tracks the core count alone** — 24 cores gives 492–494 whatever `-t`
 is, 8 cores gives 302–303 — because `-t` and `-tb` are independent knobs.
 
-**Generation does not track the count either.** One thread per core lands at
-~21.2–21.6 whether that is 8/8 or 24/24, and oversubscribing the *mixed* core
-set does nothing at all — 32 threads on 24 cores gives 21.38, 48 threads gives
-21.38. Only oversubscribing the **P-cores** helps: on 8 P-cores, 8 threads give
-21.56, 12 give 23.29, 24 give 25.15.
+**Generation is about core *homogeneity*, not core count, thread count or core
+quality.** Three readings died on the way to this one, so the controls matter:
 
-So the variable is not the ratio and not the count — it is **whether generation
-runs on E-cores**. ggml waits for the slowest thread at every barrier, and an
-E-core is always the slowest. That also explains why plain `-t 8` helps a little
-without any pinning: with few runnable threads, Intel Thread Director tends to
-place them on P-cores anyway, so it catches part of the same effect by accident.
+| cores used              | threads | prefill | generation |
+|-------------------------|--------:|--------:|-----------:|
+| 24 mixed (8 P + 16 E)   | 24      | **494.3** | 21.21 |
+| 24 mixed                | 32      | 490.8   | 21.38 |
+| 24 mixed                | 48      | 489.4   | 21.38 |
+| **8 P-cores (0–7)**     | 24      | 303.5   | **25.33** |
+| 8 P-cores               | 12      | 303.1   | 23.29 |
+| 8 P-cores               | 8       | 302.3   | 21.56 |
+| **16 E-cores (8–23)**   | 16      | 303.2   | **24.63** |
+| 8 E-cores (16–23)       | 24      | 161.1   | 20.25 |
+| 4 P-cores (0–3)         | 4       | 189.6   | 23.18 |
 
-Walking `-t` with `-tb` fixed at 24 (prefill unmoved at 489–493 throughout):
+* **Not the ratio:** oversubscribing the mixed set does nothing — 32 and 48
+  threads on 24 cores both give 21.38, same as 24.
+* **Not the count:** 8 cores can beat 24 (25.33 vs 21.21).
+* **Not "E-cores are slow":** *sixteen E-cores alone* give 24.63, beating all
+  24 mixed cores despite having strictly less compute.
 
-| `-t` | 6 | 8 | 10 | 12 | 16 | 32 | 48 |
-|------|--:|--:|---:|---:|---:|---:|---:|
-| generation | 22.44 | 22.16 | 22.18 | 21.77 | 21.56 | 21.38 | 21.38 |
+What fits every row is heterogeneity. ggml splits work evenly across threads and
+waits for the slowest at each barrier, so on a mixed set the P-cores finish and
+idle while the E-cores catch up. A homogeneous set — all-P or all-E — has no
+straggler, which is why 16 E-cores beat 8P+16E. Oversubscribing *within* a
+homogeneous P-core set then adds a little more (8 → 12 → 24 threads:
+21.56 → 23.29 → 25.33) by covering the memory stalls of scattered expert reads.
+
+**One row does not fit and is left standing rather than explained away:** 4
+P-cores with 4 threads gives 23.18, beating 8 P-cores with 8 threads (21.56)
+despite the same 1:1 ratio, the same homogeneity and half the compute — 7.5 %,
+well outside the 2.1 % noise floor. Whatever else is going on, per-barrier
+overhead evidently grows with thread count too, so the honest summary is that
+generation is hurt by *both* heterogeneity and thread count, and helped by
+oversubscribing a homogeneous set. The mechanism is not nailed down.
+
+Prefill, by contrast, is straightforwardly compute-bound and heterogeneity does
+not bother it: it tracks how much core there is. A P-core is **1.88× an E-core**
+here (303.5 vs 161.1 at eight of each), 16 E-cores land exactly where 8 P-cores
+do (303.2 vs 303.5), and all 24 mixed cores give 491.8 — so the 16 E-cores add
+only 62 % on top of the 8 P-cores, i.e. together they are worth about five
+P-cores. Had this part been 24 homogeneous P-cores, prefill would extrapolate to
+~910 tok/s rather than 492.
+
+That is the real prefill ceiling on this box, and no engine flag reaches it: it
+is set by the P/E mix of the CPU.
 
 **This corrects `default.env`,** which called generation "flat, bandwidth-bound"
 from 12 to 24 threads. That was measured at the old `-ncmoe 16` placement with
