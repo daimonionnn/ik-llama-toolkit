@@ -137,10 +137,11 @@ resident is 20.5 tok/s, 100 % is 72.6.
 
 **Open follow-ups**, in order of value:
 
-* **Report upstream.** Patches 1–2 (driver capability fallback, Linux mapping
-  flags) are straightforwardly upstreamable and would make ds4 work on any
-  discrete NVIDIA card with this driver class. Deliberately *not* filed yet —
-  Matt's call, 2026-08-12.
+* ~~**Report upstream.**~~ Filed 2026-08-13:
+  [antirez/ds4#791](https://github.com/antirez/ds4/issues/791) — all four causes,
+  with patches offered for (1) driver capability fallback and (2) the Linux
+  mapping flags, and (3)/(4) left as discrete-vs-unified policy questions.
+  Awaiting a reply; open a PR for 1–2 if the shape suits them.
 * **DSpark.** ds4's speculative decoding needs its own support GGUF
   (`./download_model.sh ds4f-dspark`); it is the closest analogue to ik's MTP
   and would decide the generation column fairly.
@@ -171,18 +172,18 @@ which is the metric this box optimises for.
 
 ---
 
-## 7. `-muge` aborts on mixed-type quants
+## 7. ~~`-muge` aborts on mixed-type quants~~ — DIAGNOSED & FILED 2026-08-13
 
-`-muge` (merge up/gate expert projections) walks all 43 layers and then dies:
+Not a mixed-type quant at all, and not really a `-muge` bug: it is a `-muge` +
+`-rtr` interaction caused by one wrong entry in `interleaved_properties()`,
+where `GGML_TYPE_MXFP4_R8` maps to itself instead of `GGML_TYPE_MXFP4` while
+every other interleaved type maps to its base. Verified both ways — `-muge`
+without `-rtr` loads fine, and the one-line fix makes `-muge -rtr` load cleanly
+(43 layers merged, 34 tensors repacked). Full account in RESULTS §14.2.
 
-```
-GGML_ASSERT(other_type == l.ffn_up_exps->type) failed   llama.cpp:7854
-```
-
-The assert requires `ffn_gate_exps` and `ffn_up_exps` to share a type; the MXFP4
-quant mixes them by design. A core dump is the wrong failure mode for an
-unsupported combination — it should refuse and carry on. Upstream-worthy, and
-cheap to report alongside the ds4 patches (item 5) whenever those go.
+Filed with the patch: [ikawrakow/ik_llama.cpp#2305](https://github.com/ikawrakow/ik_llama.cpp/issues/2305).
+The fix is applied to the local `ik_llama.cpp` checkout, so `./build.sh --update`
+will drop it — re-apply until upstream lands it.
 
 ---
 
