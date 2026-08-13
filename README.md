@@ -42,6 +42,13 @@ everything still works — you just re-run `./bench.sh` to re-pick the split
 | CPU      | Intel Core Ultra 7 270K Plus — 8 P-cores + 16 E-cores = **24 cores**, no SMT |
 | RAM      | 224 GiB DDR5 (2×48 + 2×64 GiB) at 6267 MT/s, dual channel — ~100 GB/s |
 | Storage  | NVMe, 1.8 TB free |
+| OS       | Ubuntu 26.04 LTS (`resolute`), kernel 7.0.0-29-generic, glibc 2.43 |
+| Driver   | NVIDIA **595.84** (CUDA runtime 13.2) |
+| Toolkit  | CUDA 13.3 (`nvcc` V13.3.73), GCC 15.2.0 |
+
+Every number in [docs/RESULTS.md](docs/RESULTS.md) was measured on that software
+stack. A driver or CUDA change is enough to move them, so re-run `./bench.sh`
+after one rather than trusting the tables across it.
 
 The constraint that drives everything is the ratio between the two memory pools:
 VRAM is roughly **18× faster** than system RAM here, so every gigabyte of model

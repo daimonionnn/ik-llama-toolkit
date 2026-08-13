@@ -35,6 +35,22 @@ head), §14–§16 (what is left on MXFP4: MTP at both contexts, and prefill).
 2026-08-12, §14–§16 on 2026-08-13; §1–§4 predate a RAM reconfiguration and a
 CUDA upgrade — do not compare numbers across those groups. Generation figures
 are also only comparable at equal `max_tokens` — see §15.1.
+**Software stack.** Everything below was measured on:
+
+| | |
+|---|---|
+| OS | Ubuntu 26.04 LTS (`resolute`), kernel 7.0.0-29-generic, glibc 2.43 |
+| NVIDIA driver | **595.84** (CUDA runtime 13.2) |
+| CUDA toolkit | 13.3 (`nvcc` V13.3.73) |
+| Host compiler | GCC 15.2.0 |
+| GPU | RTX PRO 6000 Blackwell Workstation, 96 GiB, `sm_120` |
+| CPU | Intel Core Ultra 7 270K Plus — 8 P-cores (0–7) + 16 E-cores (8–23) |
+| RAM | 224 GiB DDR5-6267, dual channel |
+
+The driver version matters for more than provenance: §13 turns on
+`cudaDevAttrHostRegisterReadOnlySupported` reading **0** here, and §16.2 on the
+P/E core split. Re-measure rather than extrapolate if any of these change.
+
 **Two measurement methods, don't mix them:**
 
 - **`llama-bench`** — allocates almost no KV cache, so it shows the *weight-only*
