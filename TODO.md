@@ -252,6 +252,38 @@ depth just after context checkpoint 27 of 32.
 Hermes fallback with no backend until restarted. An auto-restart wrapper would
 mask this; it would not fix it.
 
+**SECOND OCCURRENCE, 2026-08-13 15:55** — and it rules out the leading suspects.
+It happened on the **new** build `2cda8d2d`, i.e. *with* the MMQ padding fix,
+after only 31 minutes and 24 requests (against 4.3 h and 99 on the old build).
+Artifacts: `probabilities-20260813-crash2.txt`, `crash2-context.log`. Again every
+logit `nan`.
+
+| | crash 1 | crash 2 |
+|---|---|---|
+| build | `7ebbb906` | **`2cda8d2d`** (MMQ fix in) |
+| uptime / requests | 4.3 h / 99 | 31 min / 24 |
+| depth | 18 695 | 27 916 |
+| checkpoint | 27 of 32 | **32 of 32, evicting** |
+| reuse similarity | 0.953 | 0.890 |
+| `n_past` vs `n_past_prompt` | +2 | **−3** |
+| prompt cache vs its limit | 16 116 / 8 192 MiB | 18 803 / 8 192 MiB |
+
+So **suspect 1 (`-rtr`/MMQ) is weakened** — the padding fix did not help — and no
+single condition discriminates: negative `n_past` mismatches occur 8 and 11 times
+in the two logs without crashing, and low similarities are routine.
+
+**The one constant is the prompt cache running at 2–2.3× its configured
+`--cache-ram` limit.** That is a bug on its own terms and the only structural
+anomaly common to both.
+
+**The cheap bisect is `--cache-ram 0`**: it removes the fuzzy cross-prompt reuse
+path entirely, costs ~2 % prefill (§11.3), and keeps the context checkpoints,
+which are what actually make a re-send free. If the crashes stop, the cache is
+implicated; if they continue, it is exonerated and the checkpoint machinery is
+next.
+
+<details><summary>the MMQ candidate, now weakened</summary>
+
 **Possibly already fixed.** The 2026-08-13 upstream update brought
 [`26ceed9d` *CUDA: clear MMQ row padding on partially offloaded quantized
 weights* (#2292)](https://github.com/ikawrakow/ik_llama.cpp/commit/26ceed9d) —
@@ -260,10 +292,11 @@ Uninitialised padding feeding the quantised matmul is a credible source of NaN.
 That makes waiting for a recurrence a real test rather than just patience: if it
 does not come back on the new build, this was probably it.
 
+</details>
+
 **Next time it happens**, `probabilities.txt` in the repo root is overwritten —
 copy it and the surrounding server log to `docs/external/crashes/` before doing
-anything else. Two occurrences with different configs would separate suspect 1
-from suspect 3.
+anything else.
 
 ---
 
