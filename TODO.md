@@ -172,7 +172,7 @@ which is the metric this box optimises for.
 
 ---
 
-## 7. ~~`-muge` aborts on mixed-type quants~~ — DIAGNOSED & FILED 2026-08-13
+## 7. ~~`-muge` aborts on mixed-type quants~~ — FIXED UPSTREAM 2026-08-13
 
 Not a mixed-type quant at all, and not really a `-muge` bug: it is a `-muge` +
 `-rtr` interaction caused by one wrong entry in `interleaved_properties()`,
@@ -181,9 +181,11 @@ every other interleaved type maps to its base. Verified both ways — `-muge`
 without `-rtr` loads fine, and the one-line fix makes `-muge -rtr` load cleanly
 (43 layers merged, 34 tensors repacked). Full account in RESULTS §14.2.
 
-Filed with the patch: [ikawrakow/ik_llama.cpp#2305](https://github.com/ikawrakow/ik_llama.cpp/issues/2305).
-The fix is applied to the local `ik_llama.cpp` checkout, so `./build.sh --update`
-will drop it — re-apply until upstream lands it.
+Filed with the patch: [ikawrakow/ik_llama.cpp#2305](https://github.com/ikawrakow/ik_llama.cpp/issues/2305)
+— closed the same day ("Thanks! Fixed now."), landed as
+[`ee77f7ff` *Fix MXFP4 non-interlevaed type* (#2306)](https://github.com/ikawrakow/ik_llama.cpp/commit/ee77f7ff),
+byte-identical to the reported patch. The local edit has been discarded and the
+checkout moved to upstream.
 
 ---
 
@@ -249,6 +251,14 @@ depth just after context checkpoint 27 of 32.
 **Operationally:** the server dies rather than degrading, which leaves the
 Hermes fallback with no backend until restarted. An auto-restart wrapper would
 mask this; it would not fix it.
+
+**Possibly already fixed.** The 2026-08-13 upstream update brought
+[`26ceed9d` *CUDA: clear MMQ row padding on partially offloaded quantized
+weights* (#2292)](https://github.com/ikawrakow/ik_llama.cpp/commit/26ceed9d) —
+and "partially offloaded quantized weights" is exactly this configuration.
+Uninitialised padding feeding the quantised matmul is a credible source of NaN.
+That makes waiting for a recurrence a real test rather than just patience: if it
+does not come back on the new build, this was probably it.
 
 **Next time it happens**, `probabilities.txt` in the repo root is overwritten —
 copy it and the surrounding server log to `docs/external/crashes/` before doing

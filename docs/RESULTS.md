@@ -43,6 +43,7 @@ are also only comparable at equal `max_tokens` — see §15.1.
 | NVIDIA driver | **595.84** (CUDA runtime 13.2) |
 | CUDA toolkit | 13.3 (`nvcc` V13.3.73) |
 | Host compiler | GCC 15.2.0 |
+| ik_llama.cpp | `7ebbb906` (2026-08-10) for §8–§16; re-checked on `2cda8d2d` (2026-08-13) — 494.1 pp / 21.07 tg against the 499 / 21.3 baseline, unchanged |
 | GPU | RTX PRO 6000 Blackwell Workstation, 96 GiB, `sm_120` |
 | CPU | Intel Core Ultra 7 270K Plus — 8 P-cores (0–7) + 16 E-cores (8–23) |
 | RAM | 224 GiB DDR5-6267, dual channel |
@@ -1085,8 +1086,12 @@ prefill.
 attention projects through q/kv LoRA ranks rather than three parallel
 projections, so there is nothing to merge.
 
-**`-muge`** (merge up/gate expert projections) **aborts the server** — but only
-when combined with `-rtr`, which every kvram profile carries. It walks all 43
+**`-muge`** (merge up/gate expert projections) **aborted the server** — but only
+when combined with `-rtr`, which every kvram profile carries. **Fixed upstream
+the same day** as
+[`ee77f7ff` (#2306)](https://github.com/ikawrakow/ik_llama.cpp/commit/ee77f7ff);
+verified here on that build with no local patch — 43 layers merged, 34 tensors
+repacked, server up, no assert. What follows is the diagnosis as it stood. It walks all 43
 layers and then dies:
 
 ```
