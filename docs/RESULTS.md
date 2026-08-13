@@ -1050,19 +1050,32 @@ prefill.
 attention projects through q/kv LoRA ranks rather than three parallel
 projections, so there is nothing to merge.
 
-**`-muge`** (merge up/gate expert projections) **aborts the server** after
-walking all 43 layers:
+**`-muge`** (merge up/gate expert projections) **aborts the server** — but only
+when combined with `-rtr`, which every kvram profile carries. It walks all 43
+layers and then dies:
 
 ```
 merge_up_gate_exps: merging up/gate in layer 42
 llama.cpp:7854: GGML_ASSERT(other_type == l.ffn_up_exps->type) failed
 ```
 
-The assert requires `ffn_gate_exps` and `ffn_up_exps` to share a type, and this
-quant mixes them by design (MXFP4 routed experts, but `w2`/down at other types).
-It is a legitimate incompatibility rather than a misconfiguration, and the
-failure mode is a core dump rather than a refusal — worth an upstream issue if
-anyone wants `-muge` on mixed-type quants.
+**First diagnosis here was wrong** — it blamed the quant for mixing gate/up
+types. The assert one line above (`l.ffn_up_exps->type == l.ffn_gate_exps->type`)
+*passes*, so those two do share a type. The real cause is a one-line table bug
+in `src/llama-quantize.cpp`, where `interleaved_properties()` maps every
+interleaved type back to its base:
+
+```cpp
+{ GGML_TYPE_Q4_0_R8,     { GGML_TYPE_Q4_0,  8} },
+{ GGML_TYPE_IQ4_XS_R8,   { GGML_TYPE_IQ4_XS, 8} },
+{ GGML_TYPE_MXFP4_R8,    { GGML_TYPE_MXFP4_R8, 8} },   // <- maps to itself
+```
+
+With `-rtr`, the merged `ffn_up_gate_exps` is repacked to `MXFP4_R8`; the check
+maps it back expecting `MXFP4`, gets `MXFP4_R8`, and the comparison against
+`ffn_up_exps->type` fails. **Verified both ways: `-muge` without `-rtr` loads
+fine, and correcting the entry to `GGML_TYPE_MXFP4` fixes it with `-rtr` on.**
+Reported upstream with the patch.
 
 `-amb` was not reached; with the compute buffer already at 440 MiB under
 `-nkvo` (§11.1) there is nothing left for it to cap.
