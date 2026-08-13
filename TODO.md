@@ -201,6 +201,62 @@ suits one profile. Revisit if startup time ever starts to hurt.
 
 ---
 
+## 9. NaN logits abort under sustained agent load — cause unknown
+
+**2026-08-13, ~4.3 h into a run of the shipped default profile**, the 99th
+request aborted:
+
+```
+=============================== Failed to sample token
+src/llama-sampling.cpp:745: Fatal error   (core dumped)
+```
+
+**Every logit was `nan`** (artifacts in `docs/external/crashes/`), so the
+forward pass produced NaN and the sampler is only where it surfaced. Config was
+`deepseek-v4-flash-128k-kvram` exactly as shipped: 92 630.93 MiB GPU /
+56 498.00 CPU, KV on host, `-rtr` (51 tensors repacked), `-ub 2048`, at ~18.7k
+depth just after context checkpoint 27 of 32.
+
+**What was ruled out:**
+
+* **Hardware** — no Xid, NVRM, MCE or ECC entries in the kernel log either side
+  of the crash; GPU at 36 °C, no throttling.
+* **The driver upgrade** — an untracked `probabilities.txt` already existed
+  before the 610.43.02 upgrade, so this has happened at least once on 595.84.
+* **Fuzzy prompt-cache reuse**, the obvious first suspect: the log shows 99
+  reuses, *all* below 1.0 similarity and 73 with an `n_past` / `n_past_prompt`
+  mismatch, including values as low as 0.0 and 0.541. The crash happened at
+  0.953, which is unremarkable among them. Common conditions cannot explain a
+  rare event.
+
+**Suspects, in order:**
+
+1. **`-rtr` / the `MXFP4_R8` path.** One bug in `MXFP4_R8` handling already
+   turned up today (§14.2, `interleaved_properties()` mapping it to itself), so
+   that path is demonstrably less exercised than the rest. It is in the shipped
+   default. **The clean test is to run without `-rtr` for a comparable stretch**
+   — it costs 25 % prefill, which is why it is a decision rather than an
+   obvious move.
+2. **The prompt cache exceeding its own limit.** The log reports
+   `cache state: 1 prompts, 16116.439 MiB (limits: 8192.000 MiB, ...)` — twice
+   the configured `--cache-ram`. That is a bug on its own terms regardless of
+   whether it relates to the NaN, and worth reporting upstream.
+3. **ECC is disabled on this card.** A single silent bit flip in ~90 GiB of
+   resident weights would produce exactly this signature: rare, unreproducible,
+   NaN. Enabling it costs ~6 % of VRAM capacity, which **would break the n17
+   placement** — so it is a real trade, not a free safety net.
+
+**Operationally:** the server dies rather than degrading, which leaves the
+Hermes fallback with no backend until restarted. An auto-restart wrapper would
+mask this; it would not fix it.
+
+**Next time it happens**, `probabilities.txt` in the repo root is overwritten —
+copy it and the surrounding server log to `docs/external/crashes/` before doing
+anything else. Two occurrences with different configs would separate suspect 1
+from suspect 3.
+
+---
+
 ## Evaluated and rejected
 
 **KTransformers** — wrong hardware profile for this box, decided 2026-08-12.
