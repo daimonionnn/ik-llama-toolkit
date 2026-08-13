@@ -49,7 +49,25 @@ are also only comparable at equal `max_tokens` — see §15.1.
 
 The driver version matters for more than provenance: §13 turns on
 `cudaDevAttrHostRegisterReadOnlySupported` reading **0** here, and §16.2 on the
-P/E core split. Re-measure rather than extrapolate if any of these change.
+P/E core split. Re-measure rather than extrapolate if any of these change —
+`./check-driver-change.sh --bench` does exactly that.
+
+> **Driver 610.43.02 verified, 2026-08-13 — nothing moved.** Upgraded from
+> 595.84 (CUDA UMD 13.2 → 13.3, matching the 13.3 toolkit) specifically to test
+> whether a newer driver fixes the ds4 failure. It does not:
+> `HostRegisterReadOnlySupported` still reads **0**, so that attribute is a
+> property of the platform — a discrete PCIe card without ATS — rather than of
+> the driver version, and §13's four causes stand unchanged. Throughput was
+> unaffected: 485.5 pp / 21.04 tg against the 499 / 21.3 baseline, i.e. 2.7 %
+> and 1.2 %, both inside the 2.1 % same-config noise floor (§16.2). **Every
+> table below therefore still holds on 610.43.02.** No Xid or GSP errors in
+> either direction, which is worth noting given the open-module hang reports for
+> this card under sustained inference
+> ([#1111](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1111),
+> [#1259](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1259)).
+>
+> Note also that on Blackwell the **open** kernel modules are not a preference
+> but the only option — the proprietary modules cannot initialise the card.
 
 **Two measurement methods, don't mix them:**
 

@@ -43,7 +43,7 @@ everything still works — you just re-run `./bench.sh` to re-pick the split
 | RAM      | 224 GiB DDR5 (2×48 + 2×64 GiB) at 6267 MT/s, dual channel — ~100 GB/s |
 | Storage  | NVMe, 1.8 TB free |
 | OS       | Ubuntu 26.04 LTS (`resolute`), kernel 7.0.0-29-generic, glibc 2.43 |
-| Driver   | NVIDIA **595.84** (CUDA runtime 13.2) |
+| Driver   | NVIDIA **595.84** (CUDA runtime 13.2); also verified on **610.43.02** / UMD 13.3 — no change |
 | Toolkit  | CUDA 13.3 (`nvcc` V13.3.73), GCC 15.2.0 |
 
 Every number in [docs/RESULTS.md](docs/RESULTS.md) was measured on that software
