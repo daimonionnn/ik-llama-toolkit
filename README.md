@@ -26,7 +26,8 @@ card, less VRAM, multiple GPUs) is a one-line change; see [docs/FAQ.md](docs/FAQ
 ```
 
 The server exposes an OpenAI-compatible API and a web UI at
-<http://127.0.0.1:8080>.
+<http://127.0.0.1:8090>. (8090 rather than the usual 8080, which LM Studio and
+Docker containers tend to occupy — override with `--port` if you prefer.)
 
 ---
 
@@ -241,7 +242,8 @@ any `serve.sh` flag. Their names spell out quant, placement and context:
   context — see RESULTS §10. A full 500k prefill still takes ~52 minutes, and
   the prompt cache is off, so this is for long single-shot contexts, not chat.
 
-  All three default to **port 8090** (LM Studio's API server usually holds 8080)
+  All three default to **port 8090** (8080 is usually taken — LM Studio's API
+  server, or a Docker container mapping it)
   and enable MLA + the fused DSA indexer.
 - **`serve-step-3.7-flash-q8.sh`** → `serve.sh step-3.7-flash-q8`, the ~195 GiB
   quality reference. e.g. `./serve-step-3.7-flash-q8.sh --ctx 65536`.
@@ -249,7 +251,7 @@ any `serve.sh` flag. Their names spell out quant, placement and context:
 Query it like any OpenAI endpoint:
 
 ```bash
-curl http://127.0.0.1:8080/v1/chat/completions \
+curl http://127.0.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"step-3.7-flash","messages":[{"role":"user","content":"Hi"}]}'
 ```
