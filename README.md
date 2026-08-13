@@ -47,8 +47,10 @@ everything still works — you just re-run `./bench.sh` to re-pick the split
 | Toolkit  | CUDA 13.3 (`nvcc` V13.3.73), GCC 15.2.0 |
 
 Every number in [docs/RESULTS.md](docs/RESULTS.md) was measured on that software
-stack. A driver or CUDA change is enough to move them, so re-run `./bench.sh`
-after one rather than trusting the tables across it.
+stack. A driver or CUDA change is enough to move them, so after one run
+**`./check-driver-change.sh`** — it reports the new versions, re-probes the two
+device attributes RESULTS depends on, and with `--bench` re-measures the shipped
+default against its recorded baseline.
 
 The constraint that drives everything is the ratio between the two memory pools:
 VRAM is roughly **18× faster** than system RAM here, so every gigabyte of model
