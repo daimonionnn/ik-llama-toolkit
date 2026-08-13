@@ -970,8 +970,9 @@ The build itself is clean — `make cuda CUDA_ARCH=sm_120a CUDA_HOME=/usr/local/
 zero warnings, `DS4_CUDA_HAVE_MXF4=1`. Getting a *session* took a chain of four
 fixes, each hiding the next. The patch is committed in this repo as
 [`docs/external/ds4-blackwell-discrete-fixes.patch`](external/ds4-blackwell-discrete-fixes.patch)
-and lives on branch `local/blackwell-discrete-fixes` in `~/development/ds4`,
-together with `run-cuda-local.sh`, which carries the working invocation. Fixes
+and published as
+[`daimonionnn/ds4@local/blackwell-discrete-fixes`](https://github.com/daimonionnn/ds4/tree/local/blackwell-discrete-fixes),
+which also carries `run-cuda-local.sh` with the working invocation. Fixes
 1–2 are hardware-portable and would suit upstream as-is; 3–4 want real design
 decisions rather than the env-var escape hatches used here.
 

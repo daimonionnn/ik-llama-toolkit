@@ -125,9 +125,9 @@ Measured head to head on the same IQ2XXS file (RESULTS §13): **ds4 prefills
 **generates at 0.7–0.9×** (44.8–72.7 vs 55.9–79.5). Neither wins outright; with
 MTP ik reaches 87–94 tok/s and ds4 has no equivalent here.
 
-Getting there took four local patches (committed as
-`docs/external/ds4-blackwell-discrete-fixes.patch`, and on branch
-`local/blackwell-discrete-fixes` in `~/development/ds4` with `run-cuda-local.sh`),
+Getting there took four local patches (published as
+[`daimonionnn/ds4@local/blackwell-discrete-fixes`](https://github.com/daimonionnn/ds4/tree/local/blackwell-discrete-fixes),
+mirrored here as `docs/external/ds4-blackwell-discrete-fixes.patch`),
 each hiding the next: no `HostRegisterReadOnly` on driver 595.84; a `r--s`
 Metal-branch mapping that cannot be pinned at all; a successful registration
 short-circuiting the device weight cache (0.54 tok/s of PCIe zero-copy); and an
