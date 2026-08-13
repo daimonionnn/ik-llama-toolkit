@@ -74,7 +74,9 @@ if [[ ${1:-} == --bench ]]; then
     echo "=== re-measuring the shipped default (kvram 128k, 32k prompt) ==="
     echo "    baseline on ${BASELINE_DRIVER}: ${BASELINE_PP} tok/s prefill / ${BASELINE_TG} generation"
     echo "    NOTE: -rtr means the model is re-read at every start; allow a few minutes."
-    ./serve.sh > /tmp/driver-check-server.log 2>&1 &
+    # Port 8090 explicitly: bare ./serve.sh takes default.env's 8080, which LM
+    # Studio usually holds -- and the probe below talks to 8090.
+    IK_PORT=8090 IK_KILL_SQUATTERS=1 ./serve.sh > /tmp/driver-check-server.log 2>&1 &
     pid=$!
     for ((i=0;i<400;i++)); do
         grep -q 'HTTP server listening' /tmp/driver-check-server.log 2>/dev/null && break
