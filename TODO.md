@@ -252,73 +252,247 @@ depth just after context checkpoint 27 of 32.
 Hermes fallback with no backend until restarted. An auto-restart wrapper would
 mask this; it would not fix it.
 
-**SECOND OCCURRENCE, 2026-08-13 15:55** — and it rules out the leading suspects.
-It happened on the **new** build `2cda8d2d`, i.e. *with* the MMQ padding fix,
-after only 31 minutes and 24 requests (against 4.3 h and 99 on the old build).
-Artifacts: `probabilities-20260813-crash2.txt`, `crash2-context.log`. Again every
-logit `nan`.
+**FOURTH OCCURRENCE, 2026-08-13 18:47 — the whole caching layer is cleared, and
+the crash tracks PREFILL VOLUME.** It ran with `--cache-ram 0` *and*
+`-ctx-ckpt 0` — zero of either in the log — and aborted after 11 minutes.
 
-| | crash 1 | crash 2 |
-|---|---|---|
-| build | `7ebbb906` | **`2cda8d2d`** (MMQ fix in) |
-| uptime / requests | 4.3 h / 99 | 31 min / 24 |
-| depth | 18 695 | 27 916 |
-| checkpoint | 27 of 32 | **32 of 32, evicting** |
-| reuse similarity | 0.953 | 0.890 |
-| `n_past` vs `n_past_prompt` | +2 | **−3** |
-| prompt cache vs its limit | 16 116 / 8 192 MiB | 18 803 / 8 192 MiB |
+The four runs together give the real signal:
 
-So **suspect 1 (`-rtr`/MMQ) is weakened** — the padding fix did not help — and no
-single condition discriminates: negative `n_past` mismatches occur 8 and 11 times
-in the two logs without crashing, and low similarities are routine.
+| run | time to crash | prefill tokens/min | prefill tokens before crash |
+|---|---:|---:|---:|
+| 1 | 259 min | 1 138 | 294 709 |
+| 2 | 31 min | 3 363 | 103 135 |
+| 3 | 17 min | 5 674 | 94 372 |
+| 4 | **11 min** | **12 083** | 134 124 |
 
-**The one constant is the prompt cache running at 2–2.3× its configured
-`--cache-ram` limit.** That is a bug on its own terms and the only structural
-anomaly common to both.
+Time-to-crash varies **24×** and tracks the prefill rate almost exactly, while
+total prefilled tokens before each abort stays within one order (94k–295k). So
+this is roughly **one abort per 100–300k prefilled tokens** — it is not a
+function of uptime or request count.
 
-**The cheap bisect is `--cache-ram 0`**: it removes the fuzzy cross-prompt reuse
-path entirely, costs ~2 % prefill (§11.3), and keeps the context checkpoints,
-which are what actually make a re-send free. If the crashes stop, the cache is
-implicated; if they continue, it is exonerated and the checkpoint machinery is
-next.
+The rising rate is an artefact of the bisect itself: with reuse disabled every
+turn re-prefills from scratch (crash 4's log contains a 57 509-token
+"reprocessing from scratch"). That does not invalidate steps 1–2, it just means
+they raised exposure rather than making anything worse — which is useful.
 
-<details><summary>the MMQ candidate, now weakened</summary>
+**Step 3 needed a placement change first.** Turning `-rtr` off made the server
+segfault on the second logical batch of the very first request:
 
-**Possibly already fixed.** The 2026-08-13 upstream update brought
-[`26ceed9d` *CUDA: clear MMQ row padding on partially offloaded quantized
-weights* (#2292)](https://github.com/ikawrakow/ik_llama.cpp/commit/26ceed9d) —
-and "partially offloaded quantized weights" is exactly this configuration.
-Uninitialised padding feeding the quantised matmul is a credible source of NaN.
-That makes waiting for a recurrence a real test rather than just patience: if it
-does not come back on the new build, this was probably it.
+```
+kv cache rm [p0, end) p0=4096
+ggml_backend_cuda_buffer_type_alloc_buffer: allocating 2560.08 MiB: cudaMalloc failed: out of memory
+ggml_gallocr_reserve_n: failed to allocate CUDA0 buffer of size 2684440832
+Segmentation fault (core dumped)
+```
 
-</details>
+Comparing eight runs, `-rtr` turns out to shrink the **CUDA compute buffer**, not
+just repack CPU experts. Weights are byte-identical either way (92 630.93 MiB
+CUDA0 / 56 498.00 MiB host); the compute buffer is **1760.01 MiB with `-rtr` and
+2496.01 MiB without it**. Since `--n-cpu-moe 17` was tuned to sit ~1.6 GiB from
+the ceiling, the extra 736 MiB consumes the margin, and when `ggml_gallocr`
+re-reserves at 2560 MiB it must hold the old buffer and the new one at once.
 
-**Next time it happens**, `probabilities.txt` in the repo root is overwritten —
-copy it and the surrounding server log to `docs/external/crashes/` before doing
-anything else.
+That is a genuine finding worth keeping — the profile's comment credited `-rtr`
+with +25 % prefill from repacking alone, but part of its value is that it also
+buys back VRAM headroom, which is what makes `-ub 2048` affordable at
+`--n-cpu-moe 17`. Mechanism not yet established (§14.2's `interleaved_properties`
+work is the obvious place to look). **Worth its own TODO.**
+
+So step 3 runs at `--n-cpu-moe 18`. This does vary a second knob, but a placement
+one: it moves one more layer's experts to host RAM, which changes no arithmetic.
+
+**FIFTH OCCURRENCE, 2026-08-13 22:10 — step 3 is NEGATIVE, and with it the whole
+of this toolkit's tuning is cleared.** Running `-rtr` off at `--n-cpu-moe 18`,
+with cache and checkpoints still off, it aborted after 12 minutes having
+prefilled **188 265 tokens** — squarely inside the band every other run landed in.
+
+| step | removed | crash | prefill before abort | verdict |
+|---|---|---|---:|---|
+| — | baseline | 1 | 294 709 | — |
+| — | baseline | 2 | 103 135 | — |
+| 1 | prompt cache | 3 | 94 372 | negative |
+| 2 | context checkpoints | 4 | 134 124 | negative |
+| 3 | run-time repack | 5 | 188 265 | negative |
+
+Five aborts, 94k–295k prefilled tokens each, time-to-crash spanning 259 → 11 min
+purely with the prefill rate. **One abort per ~100–300k prefilled tokens, and
+none of the prompt cache, the context checkpoints or `-rtr` is responsible.**
+
+The kvram profile has therefore been **restored to its tuned state** — `-rtr` on,
+`--n-cpu-moe 17`, cache and checkpoints back to defaults. Keeping them off bought
+nothing and cost §11.3's free re-send.
+
+**Step 4: run the `--fit` profile.** What is left of this toolkit's own tuning is
+`-nkvo` and the manual `--n-cpu-moe` placement, and they cannot be removed
+piecemeal — without `-nkvo` the KV (5504 MiB) returns to VRAM and the compute
+buffer grows, so the placement has to change with it. The clean test is the
+profile that shares none of it:
+
+```
+./serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh
+```
+
+`--fit` placement, KV on the GPU, `-ub 512`, no `-rtr`. Same weights, same quant.
+Cost: prefill drops to ~287 tok/s (§11), so reaching 100–300k prefilled tokens
+takes proportionally longer — expect to need roughly an hour of steady use rather
+than 12 minutes.
+
+If that crashes too, nothing configured here is the cause and the report goes
+upstream on the strength of the volume correlation alone, which is by now the
+single most reproducible fact about this bug.
+
+**STEPS 4-5 ARE POSITIVE AND THEY AGREE: `-ub` SEPARATES THE TWO GROUPS
+CLEANLY.** Two profiles have now survived far past the band, and the only thing
+they share is a small micro-batch.
+
+| run | `-ub` | `-rtr` | `-nkvo` | placement | prefilled tokens | outcome |
+|---|---:|---|---|---|---:|---|
+| 1 | 2048 | on | yes | ncmoe 17 | 294 709 | abort |
+| 2 | 2048 | on | yes | ncmoe 17 | 103 135 | abort |
+| 3 | 2048 | on | yes | ncmoe 17 | 94 372 | abort |
+| 4 | 2048 | on | yes | ncmoe 17 | 134 124 | abort |
+| 5 | 2048 | off | yes | ncmoe 18 | 188 265 | abort |
+| step 4 | **512** | off | no | `--fit` | 541 369 | **clean** |
+| step 5 | **512** | on | yes | ncmoe 17 | 528 577 | **clean** |
+
+**Step 5 is the decisive one.** It carries `-rtr`, `-nkvo` and `--n-cpu-moe 17` —
+byte-identical to the configuration of aborts 1-4 — and differs from them in
+exactly one flag. 528 577 prefilled tokens over 20 evaluations and 201 minutes,
+deepest prompt 94 973 tokens, zero aborts. That is 1.79x the worst abort and 5.6x
+the earliest.
+
+Every abort has `-ub 2048`. Neither clean run does. **Micro-batch size is the
+variable**, and step 4's survival — which I initially read as evidence for
+placement — is better explained the same way: that profile also runs `-ub 512`.
+
+Not yet proof of a mechanism, and n=2 on the clean side. But it is the first
+variable in the whole bisect that partitions the runs without exception, and it
+is the one that changes the *shape* of the computation: a 2048-row micro-batch
+means different GEMM dimensions and different kernel selection from a 512-row one.
+This build already produced one micro-batch-shaped bug today (§14.2,
+`interleaved_properties` mapping `MXFP4_R8` to itself), which is at least a hint
+that the wide-batch repacked path is the least-travelled one.
+
+**`-ub 1024` ALSO SURVIVES, so the threshold sits between 1024 and 2048.**
+532 148 prefilled tokens over 18 evaluations and 30 minutes, zero aborts. Three
+clean runs now, and the partition is unbroken:
+
+| `-ub` | runs | prefilled tokens | outcome |
+|---:|---:|---|---|
+| 2048 | 5 | 94k-295k | **all abort** |
+| 1024 | 1 | 532 148 | clean |
+| 512 | 2 | 528 577 / 541 369 | clean |
+
+**And it is nearly free.** Measured at 32k depth with a fixed methodology, two
+independent runs 10 minutes apart:
+
+| `-ub` | prefill at 32k | source |
+|---:|---:|---|
+| 2048 | 484.1 tok/s | §11 |
+| 1024 | 465.9 / 459.9 tok/s | depthbench, 1.2-1.5 % spread |
+
+**~4 % of prefill** to move off the configuration that aborts every 100-300k
+prefilled tokens. Full depth curve at `-ub 1024` (`max_tokens` 160, temp 0,
+unique salt per request, 2 repeats):
+
+| depth | prefill tok/s | generation t/s |
+|---:|---:|---:|
+| 515 | 277.6 | 21.55 |
+| 1 027 | 356.2 | 21.41 |
+| 4 101 | 472.2 | 21.47 |
+| 32 701 | 462.9 | 20.07 |
+| 127 981 | 409.6 | 17.48 |
+
+Prefill peaks around 4k and shallow prompts pay a fixed overhead (515 tokens
+reaches only 60 % of peak). Generation is flat to 32k, then falls.
+
+A cliff between 1024 and 2048 rather than a gradient is itself a clue: it points
+at a branch selected by micro-batch size rather than at anything that degrades
+progressively. `-b` is 4096 throughout, so `-ub` is the only thing moving.
+
+**SIXTH ABORT, 2026-08-14 10:23 — the reversion test DID reproduce it, under
+interactive traffic, at 331 269 prefilled tokens.** The band is wider than the
+94k-295k seen before, which is why the run briefly looked like a refutation: it
+passed the old upper edge and aborted a minute later.
+
+| `-ub` | traffic | runs | prefilled tokens | outcome |
+|---:|---|---:|---|---|
+| 2048 | interactive | 6 | 94k-331k | **all abort** |
+| 2048 | synthetic | 1 | 397 077 | clean, but stopped rather than survived |
+| 1024 | mixed | 1 | 532 148 | clean |
+| 512 | interactive | 2 | 528 577 / 541 369 | clean |
+
+**Six of six at `-ub 2048`; none at anything smaller.** The two clean 512 runs
+were real interactive use, so 1.07 M tokens of the workload that aborts six times
+at 2048 pass without one. `-ub 2048` is implicated; the profile is back to 1024.
+
+What the synthetic run shows is weaker than it looks — it was stopped at 397 077,
+not survived, so it cannot rule the micro-batch guilty *only* in combination with
+interactive traffic. It is suggestive, not evidence.
+
+**Where to look next: the partial micro-batch path.** Interactive traffic is
+mostly short prompts — median 1 800 tokens in the crash-6 run, 12 of 23 below
+2048, meaning a single partial micro-batch. The benchmark's eight huge uniform
+prompts fill nearly every micro-batch and did not reproduce it. That asymmetry is
+the most specific lead the investigation has produced.
+
+*(Earlier reading of this run, before it aborted: "397 077 prefilled tokens with NO
+abort")* — 1.35x the worst previous crash — before it was stopped. The clean
+partition is therefore NOT a controlled result, and `-ub` alone does not explain
+the aborts.
+
+One difference remains untested: the **shape** of the load. All five aborts came
+from interactive Hermes traffic (many turns, varied and often short prompts); the
+reversion test was eight huge uniform prompts, where nearly every micro-batch is
+full. A fault in a partial micro-batch path at large `-ub` would barely be
+touched by that. The next data point is real use at `-ub 2048`, which is why the
+profile is back to 2048 as a test setting.
+
+*(Superseded: `-ub 1024` was made the default earlier the same day)* in
+`config/models/deepseek-v4-flash-128k-kvram.env`. It costs ~4 % of prefill
+(462.9 vs 484.1 tok/s at 32k) and removes the only variable that has ever
+separated an abort from a clean run. A profile that aborts every 100-300k
+prefilled tokens is not usable; 4 % is cheap for that.
+
+Next, in order:
+  1. **Confirm by reversion (still owed).** Put `-ub 2048` back on an otherwise identical run.
+     A sixth abort inside 94k-295k turns a clean partition into a controlled
+     result, and it is the single cheapest experiment left (~15 min at this rate).
+  2. **Narrow the threshold.** If 2048 aborts and 512 does not, 1024 says whether
+     this is a cliff or a gradient. `-b` is fixed at 4096 throughout, so `-ub` is
+     the only thing moving.
+  3. **Then file upstream** — with the partition table, the volume correlation and
+     `probabilities.txt` for all five aborts, which is a much stronger report than
+     the volume correlation alone.
 
 ---
 
-## Evaluated and rejected
+## 10. Why does `-rtr` shrink the CUDA compute buffer?
 
-**KTransformers** — wrong hardware profile for this box, decided 2026-08-12.
+Discovered while setting up bisect step 3 for item 9, and not something the
+profile's own documentation predicted.
 
-Its validated DeepSeek-V4-Flash configuration is a single RTX 5090 (32 GiB) with
-≥200 GiB of RAM, reporting 20+ tok/s decode; the famous ~27× over llama.cpp comes
-from **AMX** MoE kernels on dual 32-core Xeons. Two facts about this machine kill
-it:
+With everything else identical -- same model, `-c 131072`, `-nkvo`, `-ub 2048`,
+same `--n-cpu-moe`, byte-identical weight buffers -- the CUDA0 compute buffer is:
 
-* the CPU is a **Core Ultra 7 270K Plus — AVX2 and AVX_VNNI only, no AVX512, no
-  AMX**, so it would land on the slowest fallback kernels, and
-* its entire premise is offloading experts to RAM, which this box does not need:
-  96 GiB of VRAM holds the whole 81 GiB antirez quant, and that is exactly where
-  the 87–94 tok/s comes from.
+| `-rtr` | compute buffer | runs |
+|---|---:|---:|
+| on | 1760.01 MiB | 7 |
+| off | 2496.01 MiB | 1 |
 
-Its single-GPU figure (20+ tok/s) also matches what ik_llama already does on the
-MXFP4 path (~21 tok/s), and §10 showed generation here tracks one variable —
-GiB of weights left in DDR5. A faster CPU kernel does not add memory bandwidth.
+**+736 MiB, or +42 %, from a flag documented as repacking CPU-side experts into
+`MXFP4_R8` for the AVX2/VNNI kernels.** Those tensors are on the host; why the
+*CUDA* graph's scratch space should depend on them is unclear.
 
-**SGLang / vLLM with `flashinfer_mxfp4`** — same root problem. They target
-fully-resident GPU serving; MXFP4 is 145.6 GiB against 96 GiB of VRAM, so it
-would need the offload path that is not their strength.
+Two guesses worth testing:
+  * the repacked type changes which ops the scheduler assigns to CUDA vs CPU, so
+    the CUDA graph genuinely holds fewer/smaller intermediates;
+  * or an un-repacked MXFP4 expert forces a dequant/staging buffer on the GPU
+    side for the hybrid path.
+
+Why it matters: §11 attributes the kvram profile's win to repacking (+25 %) and
+`-ub 2048` (+20 %) as if independent, but the second is only affordable *because*
+of the first. If the buffer growth can be avoided without `-rtr`, `--n-cpu-moe 17`
+becomes reachable in more configurations; if it cannot, the profile comment
+should say so plainly.
+

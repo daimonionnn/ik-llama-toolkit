@@ -61,7 +61,30 @@ is exactly the problem any "model bigger than VRAM" setup faces, on any GPU.
 
 ## The default model
 
-**Step-3.7-Flash**, Unsloth Dynamic `Q4_K_XL`, from
+**DeepSeek-V4-Flash**, MXFP4, served by the `deepseek-v4-flash-128k-kvram`
+profile — 131072 context, ~463 tok/s prefill, ~21 tok/s generation. What that
+profile does and why is in [docs/RESULTS.md §11](docs/RESULTS.md); the short
+version is that the KV cache lives in system RAM so the VRAM it would occupy
+goes to expert weights instead.
+
+> **Known issue — do not raise `IK_UBATCH` above 1024.** The server intermittently
+> aborts with all-`nan` logits (`Failed to sample token`) under sustained use.
+> Six occurrences, every one at `-ub 2048`; none across 1.07 M prefilled tokens of
+> the same interactive workload at 512 or 1024. The profile therefore ships
+> `-ub 1024`, which costs 3–5 % of prefill — that is where the ~463 above comes
+> from rather than the ~484 quoted in §11. The abort follows prefilled *volume*
+> (roughly one per 100–330 k tokens), not uptime, so a short test proves nothing.
+> Cause unknown; the investigation is [RESULTS §19](docs/RESULTS.md) and the open
+> threads are TODO item 9.
+
+Four sibling profiles cover the other trade-offs — 256k and 512k context, and
+MTP variants that swap prefill for generation. See the wrapper list under
+[Usage](#usage).
+
+### The original default: Step-3.7-Flash
+
+Still shipped and still the subject of §1–§5, now behind an explicit
+`./serve.sh step-3.7-flash-q4`. Unsloth Dynamic `Q4_K_XL`, from
 `/home/matt/.lmstudio/models/unsloth/Step-3.7-Flash-GGUF/`.
 
 | property              | value                                       |
@@ -102,7 +125,7 @@ not holding experts:
 
 | context            | KV cache | `-ncmoe` | generation    |
 |--------------------|----------|----------|---------------|
-| 262 144 (default)  | 24 GiB   | 22       | **~25 tok/s** |
+| 262 144 (profile default) | 24 GiB | 22    | **~25 tok/s** |
 | 131 072            | 12 GiB   | 16       | ~33 tok/s     |
 | 65 536             | 6 GiB    | 14       | ~38 tok/s     |
 | 262 144, `q4_0` KV | 13 GiB   | 18       | ~30 tok/s     |
@@ -113,9 +136,9 @@ CPU-resident experts are pre-repacked, lifting prefill to **~246 tok/s (+18%)**
 with generation unchanged and no startup penalty — but it is locked to the
 262144 / `-ncmoe 22` config (see the profile header for why).
 
-The default ships at the **full 262 144 context**. If you want more speed and
-don't need the whole window, lower `IK_CTX` and `IK_NCMOE` together (see the
-table in [docs/TUNING.md §1](docs/TUNING.md)). Prompt processing runs at a few
+The `step-3.7-flash-q4` profile ships at the **full 262 144 context**. If you
+want more speed and don't need the whole window, lower `IK_CTX` and `IK_NCMOE`
+together (see the table in [docs/TUNING.md §1](docs/TUNING.md)). Prompt processing runs at a few
 hundred tok/s regardless — inherent to a model larger than VRAM.
 
 ---
@@ -303,7 +326,7 @@ permanent.
 | `IK_CTK` / `IK_CTV`      | `q8_0`          | KV cache precision (`q4_0` frees ~11 GiB at 262k) |
 | `IK_THREADS`             | `24`            | CPU threads for generation (all cores; generation is flat past 12 — see TUNING §2) |
 | `IK_THREADS_BATCH`       | `24`            | CPU threads for prompt processing — **worth +32% prefill over 12** |
-| `IK_BATCH` / `IK_UBATCH` | `4096` / `1024` | Prefill batch sizes |
+| `IK_BATCH` / `IK_UBATCH` | `4096` / `1024` | Prefill batch sizes. **Do not raise `IK_UBATCH`** — see the known issue above |
 | `IK_RTR`                 | `0`             | Repack CPU experts — faster prefill, but disables mmap |
 | `IK_SER`                 | *(unset)*       | Use fewer than 8 experts. Faster, changes output |
 

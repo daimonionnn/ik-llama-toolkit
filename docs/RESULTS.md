@@ -1283,3 +1283,247 @@ noise floor for generation. `-t 8` reads 22.78 and 22.16, so the honest figure
 is ~+5 %, not the +7.4 % a single pair suggested. Pinning to 8 P-cores buys
 more generation still (25.15) but costs 39 % of prefill, so it is a trade rather
 than a win — wrong way round for this box.
+
+---
+
+## 17. How much of prefill is CPU work? (what a faster CPU could buy)
+
+Measured 2026-08-14, prompted by the question of whether to change platform.
+§16 established that prefill is limited by the CPU rather than by memory; this
+puts a number on it, which is what bounds any CPU upgrade.
+
+### 17.1 Method
+
+`--n-cpu-moe n` puts the expert FFN of n layers on the CPU. Sweeping n at a fixed
+32k depth and timing prefill gives
+
+    T(n) = T_other + n*t_cpu + (43-n)*t_gpu
+         = [T_other + 43*t_gpu] + n*(t_cpu - t_gpu)
+
+so a line fitted to time-per-token against n has slope `(t_cpu - t_gpu)`. Since
+`t_gpu > 0` the slope understates the true per-layer CPU cost, making the CPU
+share a **lower bound** — the safe direction for a purchasing decision.
+
+Held fixed: 32 920-token prompts, `-ub 1024`, `-rtr`, `-nkvo`, MXFP4, thread
+count. 2 repeats per point. `-ub 1024` rather than the profile's 2048 because
+2048 is the prime suspect for the NaN abort (§18 / TODO 9) and a crash mid-sweep
+would waste the run; the difference cancels out of a slope.
+
+### 17.2 Result
+
+| `--n-cpu-moe` | prefill at 32k | µs/token |
+|---:|---:|---:|
+| 17 | 459.5 | 2176 |
+| 18 | 435.8 | 2295 |
+| 19 | 406.2 | 2462 |
+| 20 | 406.4 | 2461 |
+
+    per-layer CPU cost   102.03 us/token   (fit R2 = 0.898)
+    at n=17              2195 us/token  ->  456 tok/s
+    of which CPU experts 1734 us  =  79 %      LOWER BOUND
+    everything else      21 %
+
+**Prefill is overwhelmingly CPU work.**
+
+### 17.3 Where the fit is weak, and why it probably reads low
+
+R² = 0.898 on four points is not a good fit, and the reason is visible in the
+table: n=19 and n=20 are identical (406.2 vs 406.4). Beyond ~19 CPU-resident
+layers the linear model breaks — most likely the CPU becomes memory-bandwidth
+bound there, so further layers stop costing proportionally.
+
+If so, the relevant slope for the region actually shipped (n=17) is the one from
+the first pair, 118 µs/layer, which puts the CPU share at **92 %**. The honest
+interval is **79–92 %**, nearer the top.
+
+### 17.4 What it implies
+
+| CPU part faster by | prefill | vs today |
+|---|---:|---:|
+| 1.5x | 618 tok/s | +36 % |
+| 2x | 753 tok/s | +65 % |
+| 3x | 962 tok/s | +111 % |
+| infinite (Amdahl) | 2170 tok/s | +376 % |
+
+Two consequences worth recording:
+
+* Generation is not on this curve at all — it is bandwidth-bound, so a faster CPU
+  does close to nothing for it. Puget Systems measured a 16 % token-generation
+  drop from moving this platform's RAM 7200 -> 5600 MT/s, which is the same
+  finding from the other side.
+* The ceiling is high enough that plausible CPU upgrades are not capped by it,
+  so the question is entirely whether a given CPU exploits the path. ik_llama's
+  `MXFP4_R8` GEMM lives in `iqk_gemm_legacy_quants.cpp`, which carries 14
+  `HAVE_FANCY_SIMD` branches; `iqk_common.h` switches loads from `__m256i` to
+  `__m512i` under it. So AVX-512 hardware would use genuinely wider code —
+  unlike vanilla llama.cpp, which largely does not.
+
+### 17.5 A better experiment, not yet run
+
+Varying **thread count** rather than layer placement would fit Amdahl directly
+and avoid the placement confound entirely: fewer threads is a direct simulation
+of a slower CPU. §16 has partial data. Worth doing before anyone spends money.
+
+---
+
+## 18. Micro-batch size: what `-ub` is worth, and what it does not touch
+
+Measured 2026-08-14 with `depthbench.sh`, one fixed methodology on both sides:
+`max_tokens` 160, temperature 0, a salt unique per request so nothing is served
+from the prompt cache, 2+ repeats. Everything else identical -- MXFP4, `-rtr`,
+`-nkvo`, `--n-cpu-moe 17`, `-b 4096`, f16 KV, `-c 131072`.
+
+### 18.1 Prefill
+
+| depth (tokens) | `-ub 1024` | `-ub 2048` | 2048 ahead by |
+|---:|---:|---:|---:|
+| 515 | 277.6 | — | |
+| 1 027 | 356.2 | — | |
+| 4 101 | 472.2 | — | |
+| 32 701 | 462.9 | **485.3** | +4.8 % |
+| 127 981 | 409.6 | **422.7** | +3.2 % |
+
+Two things worth recording:
+
+* **§11's 484.1 tok/s is confirmed.** The `-ub 2048` figure at 32k came out at
+  485.3 under the new methodology — 0.25 % from the old number, measured months
+  and several rebuilds apart. That validates §11 and the method at once.
+* **Prefill peaks around 4k and shallow prompts pay a fixed overhead.** At 515
+  tokens the rate is 277.6 tok/s, only 59 % of the 4k peak. Anything that
+  measures prefill on short prompts will understate this configuration badly.
+
+Repeatability differed between the two: 1.2 % spread at `-ub 1024`, **6.5 %** at
+2048 (496.3 / 492.1 / 488.7 / 464.1 across four samples, the last lowest). Against
+the ~2 % noise floor of §16 that is worth noting rather than explaining away.
+
+### 18.2 Generation is untouched
+
+| depth | `-ub 1024` | `-ub 2048` |
+|---:|---:|---:|
+| 32 701 | 20.07 t/s | 20.4-21.1 |
+| 127 981 | 17.48 t/s | 17.2-17.4 |
+
+Identical within noise, as expected: micro-batching governs how prompt tokens are
+chunked, and generation processes one token at a time. So the whole `-ub` question
+is a prefill trade, with nothing at stake for interactive token rate.
+
+### 18.3 The whole `-ub` range, and why 3072 does not load
+
+Recovered 2026-08-14 from logs of 2026-08-12, which had not been written up:
+
+| `-ub` | `--n-cpu-moe` | CUDA0 compute buffer | prefill at 32k |
+|---:|---:|---:|---:|
+| 512 | 17 | 440.00 MiB | — |
+| 1024 | 17 | 880 MiB | 462.9 |
+| 2048 | 17 | 1760.01 MiB | 485.3 |
+| 3072 | 17 | 2640.01 MiB | **CUDA OOM** |
+| 4096 | **18** | 3520.02 MiB | **494.1** (497.2 / 491.0) |
+
+`-ub 4096` runs, and is ~1.8 % ahead of 2048 — but not on equal terms: it needs
+`--n-cpu-moe 18`, because 3520 MiB of compute buffer does not fit beside 17 layers
+of experts. `-ub 3072` at `--n-cpu-moe 17` aborts for the same reason. That it is
+still slightly ahead while carrying a worse placement suggests the micro-batch
+gain has not run out by 4096, but the two effects are confounded here and a clean
+comparison would need 4096 and 2048 at the same `n`.
+
+**The compute buffer is exactly linear in `-ub`:**
+
+    440/512 = 1760/2048 = 2640/3072 = 3520/4096 = 0.859 MiB per unit of -ub
+
+Four points, no deviation. So whether a given `-ub` fits can be computed rather
+than discovered by trying it. This is the same quantity TODO item 10 is about:
+`-rtr` shrinks it (1760 vs 2496 MiB at `-ub` 2048), which is what makes
+`--n-cpu-moe 17` reachable at all.
+
+Those two runs prefilled 32 699 tokens each, so they say nothing about the abort
+question — a third of the lower edge of the band.
+
+### 18.4 What this cost buys
+
+Dropping to `-ub 1024` costs 3-5 % of prefill. Whether that is worth paying is
+the open question of TODO item 9: five NaN-logits aborts all happened at
+`-ub 2048`, but a deliberate reversion run reached 397 077 prefilled tokens at
+2048 without one, so the association is not established. The reproduction attempt
+now runs under interactive traffic, which is the one condition the clean runs did
+not share.
+
+---
+
+## 19. The NaN-logits abort: `-ub 2048` is implicated (2026-08-13/14)
+
+Under sustained use the server aborts in `llama-sampling.cpp:745` with every
+logit `nan`:
+
+    =============================== Failed to sample token
+    Data has been stored in probabilities.txt
+
+Six occurrences over two days. This section records what the bisect established,
+because most of it is negative results that are worth not repeating.
+
+### 19.1 It follows prefilled VOLUME, not uptime
+
+Time-to-abort varied 24x across runs — 259 min down to 11 — and moved inversely
+with the prefill rate, while the tokens prefilled before each abort stayed inside
+one band. That is what made the investigation tractable: exposure could be raised
+deliberately to get answers in minutes instead of hours.
+
+### 19.2 What was ruled out
+
+Each by a run that removed exactly one thing and aborted anyway:
+
+| suspect | how it was cleared | abort at |
+|---|---|---:|
+| prompt cache | `--cache-ram 0`, provably inert in the log | 94 372 |
+| context checkpoints | `-ctx-ckpt 0`, zero created | 134 124 |
+| run-time repack | `-rtr` off | 188 265 |
+| hardware | no Xid, MCE or ECC events in the journal | — |
+| driver | reproduced on 595.84 and 610.43.02 | — |
+| the build | identical binary across aborting and clean runs | — |
+
+The whole context-state caching layer is therefore innocent, and so is the
+repack. Those flags were restored.
+
+### 19.3 What survived
+
+| `-ub` | traffic | runs | prefilled tokens | outcome |
+|---:|---|---:|---|---|
+| 2048 | interactive | 6 | 94k-331k | **all abort** |
+| 2048 | synthetic | 1 | 397 077 | clean, but stopped rather than survived |
+| 1024 | mixed | 1 | 532 148 | clean |
+| 512 | interactive | 2 | 528 577 / 541 369 | clean |
+
+Six of six at `-ub 2048`; none at anything smaller. The two clean 512 runs were
+real interactive use, so **1.07 M tokens of the same workload that aborts six
+times at 2048 pass without one**.
+
+### 19.4 How the reversion test nearly misled us
+
+`-ub 1024` was made the default once the first five aborts lined up against three
+clean runs. That partition was not a controlled result, so 2048 was deliberately
+put back. It then ran **397 077 prefilled tokens under benchmark load with no
+abort** — past the 94k-295k band — which read as a refutation and was reported as
+one.
+
+It was not. Driven by interactive traffic instead, the same setting aborted at
+**331 269** tokens: past the old upper edge, hence the false all-clear a minute
+earlier. The lesson is that the band's upper edge was an artefact of the sample,
+not a boundary.
+
+### 19.5 The most specific lead: partial micro-batches
+
+The two load shapes differ in a way that matters. Interactive traffic is mostly
+short prompts — median 1 800 tokens in the crash-6 run, 12 of 23 below 2048,
+i.e. a **single partial micro-batch**. The benchmark's eight huge uniform prompts
+fill nearly every micro-batch, and did not reproduce it.
+
+If the fault is in a partial micro-batch path at large `-ub`, that asymmetry is
+exactly what would be seen. It is the first lead in this investigation that points
+at code rather than at another thing to bisect. Untested; the experiment is a
+generator of many short varied prompts at `-ub 2048`.
+
+### 19.6 Shipping position
+
+`-ub 1024`, costing 3-5 % of prefill (§18). `-ub 4096` is faster still (§18.3)
+and is the same suspect, only more so. Mechanism unknown, nothing filed upstream
+yet — see TODO item 9 for the open threads.
+

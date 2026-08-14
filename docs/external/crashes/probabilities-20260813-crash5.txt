@@ -1,7 +1,7 @@
 candidates->size: 40
 max  = nan
 sump = nan
-r    = 4037330787
+r    = 315528563
 probabilities:
 0  38  nan  nan
 1  22  nan  nan

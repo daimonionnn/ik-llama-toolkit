@@ -8,3 +8,7 @@ compat/
 logs/
 results/
 *.log
+
+# Transient crash dump, rewritten by the server on every abort. The copies that
+# matter are archived by hand under docs/external/crashes/ with a date.
+probabilities.txt
