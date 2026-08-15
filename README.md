@@ -393,3 +393,14 @@ ik-llama-toolkit/
   slow loads, `sm_120` errors
 - [ik_llama.cpp parameter reference](ik_llama.cpp/docs/parameters.md) — upstream
   documentation for every flag
+
+## License
+
+[MIT](LICENSE).
+
+This repository contains only its own scripts, profiles and documentation.
+`ik_llama.cpp/` is **not** vendored here — `build.sh` clones it, and it carries
+its own MIT licence from the ggml authors. The one piece of derived material is
+[`docs/external/ds4-blackwell-discrete-fixes.patch`](docs/external/ds4-blackwell-discrete-fixes.patch),
+a diff against [antirez/ds4](https://github.com/antirez/ds4), which is MIT as
+well. So everything here is MIT-compatible in both directions.
