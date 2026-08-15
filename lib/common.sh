@@ -58,6 +58,17 @@ load_config() {
     [[ -f $model_cfg ]] || die "unknown profile '$profile' (no $model_cfg)
 available: $(ls "$TOOLKIT_ROOT/config/models/" 2>/dev/null | sed 's/\.env$//' | tr '\n' ' ')"
 
+    # Where the GGUFs live. Profiles reference $IK_MODELS_ROOT rather than an
+    # absolute path, so the toolkit works on any machine and nobody's home
+    # directory ends up in git.
+    #
+    # This has to be set HERE, not in default.env: the profile is sourced first
+    # (see the precedence note above), so anything default.env declares does not
+    # exist yet when the profile needs it. Override it in the environment:
+    #   IK_MODELS_ROOT=/mnt/models ./serve.sh
+    : "${IK_MODELS_ROOT:=$HOME/.lmstudio/models}"
+    export IK_MODELS_ROOT
+
     # Profile first (its :=defaults win), then default.env fills the rest.
     # shellcheck source=/dev/null
     source "$model_cfg"

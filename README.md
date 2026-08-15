@@ -85,7 +85,7 @@ MTP variants that swap prefill for generation. See the wrapper list under
 
 Still shipped and still the subject of §1–§5, now behind an explicit
 `./serve.sh step-3.7-flash-q4`. Unsloth Dynamic `Q4_K_XL`, from
-`/home/matt/.lmstudio/models/unsloth/Step-3.7-Flash-GGUF/`.
+`$IK_MODELS_ROOT/unsloth/Step-3.7-Flash-GGUF/`.
 
 | property              | value                                       |
 |-----------------------|---------------------------------------------|
@@ -326,6 +326,7 @@ permanent.
 | `IK_CTK` / `IK_CTV`      | `q8_0`          | KV cache precision (`q4_0` frees ~11 GiB at 262k) |
 | `IK_THREADS`             | `24`            | CPU threads for generation (all cores; generation is flat past 12 — see TUNING §2) |
 | `IK_THREADS_BATCH`       | `24`            | CPU threads for prompt processing — **worth +32% prefill over 12** |
+| `IK_MODELS_ROOT`         | `$HOME/.lmstudio/models` | Where the GGUFs live. Profiles are written against this, so the toolkit runs on any machine — `IK_MODELS_ROOT=/mnt/models ./serve.sh` |
 | `IK_BATCH` / `IK_UBATCH` | `4096` / `1024` | Prefill batch sizes. **Do not raise `IK_UBATCH`** — see the known issue above |
 | `IK_RTR`                 | `0`             | Repack CPU experts — faster prefill, but disables mmap |
 | `IK_SER`                 | *(unset)*       | Use fewer than 8 experts. Faster, changes output |

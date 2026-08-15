@@ -131,7 +131,7 @@ LM Studio writes `downloading_*.part` files next to finished shards.
 half-written GGUF produces confusing failures much later.
 
 ```bash
-ls -la /home/matt/.lmstudio/models/unsloth/Step-3.7-Flash-GGUF/
+ls -la "$IK_MODELS_ROOT/unsloth/Step-3.7-Flash-GGUF/"
 ```
 
 ### `other processes are holding GPU memory`

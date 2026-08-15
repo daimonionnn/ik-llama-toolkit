@@ -220,7 +220,7 @@ index 0000000..7628121
 +set -uo pipefail
 +cd "$(dirname "$(readlink -f "$0")")"
 +
-+MODEL="${DS4_MODEL:-/home/matt/.lmstudio/models/antirez/deepseek-v4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf}"
++MODEL="${DS4_MODEL:-$HOME/.lmstudio/models/antirez/deepseek-v4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf}"
 +ARENA_MB="${DS4_ARENA_MB:-84000}"
 +
 +export DS4_CUDA_WEIGHT_CACHE=1
