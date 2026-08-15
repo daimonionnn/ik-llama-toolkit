@@ -394,7 +394,7 @@ CUDA upgrade; do not compare across sections.)
 
 **Setup:** DeepSeek-V4-Flash-0731 MXFP4 (~146 GiB), `-ncmoe 16`, `-mla 3
 -fidx`, q8_0 KV, 24 threads, GPU otherwise idle. Measured over HTTP with
-`multi-gpu-llm/linux/scripts/benchmark-loaded-model.sh` so both engines are
+`multi-gpu-llm-toolkit/linux/scripts/benchmark-loaded-model.sh` so both engines are
 driven identically.
 
 ### 6.1 Head-to-head, both at their best
@@ -448,7 +448,7 @@ time and was wrong.
 
 This also means the **Blackwell CUDA 13.x collapse is mainline-specific**.
 Mainline llama.cpp loses ~5× past 8192 context under CUDA 13.3 on `sm_120`
-(documented in `~/development/multi-gpu-llm/doc/cuda-fa-blackwell.md`, with a
+(documented in `~/development/multi-gpu-llm-toolkit/doc/cuda-fa-blackwell.md`, with a
 container-based CUDA 12.8 workaround); ik_llama's MLA path does not route
 through the flash-attention kernels that misbehave, so it never sees it.
 `build-cuda12.sh` remains available as insurance and as the record of this

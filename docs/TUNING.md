@@ -265,7 +265,7 @@ prediction held. Dropping to 2×64 GiB raised the configured speed from
 6267 to 7400 MT/s — **+18% of raw bandwidth, worth +2 to +4%** end to end on
 the RAM-offload configurations, and nothing at all on the all-VRAM ones.
 Measured across both engines in
-`~/development/multi-gpu-llm/doc/benchmarks.md`.
+`~/development/multi-gpu-llm-toolkit/doc/benchmarks.md`.
 
 Amdahl explains the whole gap: the CPU-resident experts are one term of the
 per-token latency, so a fifth more bandwidth on that term buys a few percent
@@ -313,7 +313,7 @@ CPU-resident layers proportionally across GPUs rather than taking the first N.
 Mainline llama.cpp built with CUDA 13.x loses most of its throughput on
 Blackwell once the KV cache passes 8192 tokens - proven, with a container-based
 CUDA 12.8 workaround, in
-`~/development/multi-gpu-llm/doc/cuda-fa-blackwell.md`. The obvious worry was
+`~/development/multi-gpu-llm-toolkit/doc/cuda-fa-blackwell.md`. The obvious worry was
 that this toolkit inherits the same problem.
 
 It does not. Measured on MXFP4, `--n-cpu-moe 16`, q8_0 KV, 24 threads,

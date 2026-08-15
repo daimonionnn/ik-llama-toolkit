@@ -5,7 +5,7 @@
 # Why: on Blackwell (sm_120) a CUDA 13.x-built llama.cpp loses most of its
 # throughput once the KV cache passes 8192 tokens - the same source built with
 # CUDA 12.8 does not. Proven on the mainline engine; see
-# ~/development/multi-gpu-llm/doc/cuda-fa-blackwell.md. CUDA 12.8 cannot be
+# ~/development/multi-gpu-llm-toolkit/doc/cuda-fa-blackwell.md. CUDA 12.8 cannot be
 # installed on this host (glibc 2.43 rejects its headers), so the build runs in
 # an Ubuntu 22.04 container and the CUDA 12 runtime libraries are bundled next
 # to the binaries.
