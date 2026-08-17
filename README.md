@@ -62,7 +62,7 @@ is exactly the problem any "model bigger than VRAM" setup faces, on any GPU.
 ## The default model
 
 **DeepSeek-V4-Flash**, MXFP4, served by the `deepseek-v4-flash-gpu-experts-128k`
-profile — 131072 context, **~1800 tok/s prefill at 32k**, ~19 tok/s generation.
+profile — 131072 context, **~1850 tok/s prefill at 32k**, ~20 tok/s generation.
 The experts that do not fit in VRAM are computed *on the GPU* rather than on the
 CPU, which is worth roughly 3x prefill (RESULTS §21–§24). What that
 profile does and why is in [docs/RESULTS.md §11](docs/RESULTS.md); the short

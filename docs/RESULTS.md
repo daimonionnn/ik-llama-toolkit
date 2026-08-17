@@ -1919,3 +1919,53 @@ repository: this one, and §21, which came from the user comparing against anoth
 toolkit. The internal bisecting produced correct measurements and wrong
 conclusions.
 
+---
+
+## 25. DDR5 6267 -> 7400: generation +5.5 %, prefill +2.7 % (2026-08-17)
+
+Four DIMMs at 6267 MT/s replaced by two at 7400. Same tool, same depths, same
+methodology, same build — only the memory changed.
+
+| depth | pp 6267 | pp 7400 | | tg 6267 | tg 7400 | |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4k | 1335.4 | **1382.1** | +3.5 % | 20.07 | **21.23** | +5.8 % |
+| 16k | 1867.2 | **1909.7** | +2.3 % | 19.85 | **21.07** | +6.1 % |
+| 32k | 1801.7 | **1845.8** | +2.4 % | 19.18 | **20.22** | +5.4 % |
+| 128k | 1330.9 | **1362.2** | +2.4 % | 17.17 | **18.00** | +4.8 % |
+
+Generation gains roughly twice what prefill does, at every depth.
+
+### 25.1 The size of the gain is the interesting part
+
+Dual channel at 7400 is ~118.4 GB/s against ~100.3 for four DIMMs at 6267 —
+**+18 % theoretical**. Generation gained 5.5 %.
+
+That is what the mechanism predicts. At `--n-cpu-moe 19`, 19 of 43 layers keep
+their experts in host RAM: 44 % of the expert reads. The rest are already in VRAM
+and do not care how fast the DDR5 is. So
+
+    0.44 x (1 - 1/1.18) = 6.7 % expected, 5.5 % measured
+
+with the shortfall being everything the model ignores — attention, sampling,
+per-token overhead. Close enough to treat the mechanism as confirmed from a third
+direction, after §21's kernel reading and §22.5's inert `-tb`.
+
+**Prefill moving at all is worth noting**, since in this profile the GPU computes
+the experts. It still has to *read* them out of host RAM once per micro-batch
+before shipping them across PCIe, so faster memory helps that read — just far
+less than it helps decode, which re-reads per token with nothing to amortise
+over.
+
+### 25.2 Capacity
+
+RAM dropped 224 -> 122 GiB with the swap. Every profile still fits:
+
+| profile | `--n-cpu-moe` | host weights | free |
+|---|---:|---:|---:|
+| gpu-experts (default) | 19 | 60.6 GiB | 61.4 |
+| kvram 128k | 17 | 54.2 | 67.8 |
+| 512k (plus ~21.5 GiB KV in RAM) | 19 | 60.6 | ~40 |
+
+Even the sweep's `--n-cpu-moe 24` arm (76.5 GiB) leaves 45 GiB. The headroom that
+was lost was never being used.
+
