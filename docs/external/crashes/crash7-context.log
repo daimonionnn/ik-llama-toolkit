@@ -1,0 +1,50 @@
+slot create_check: id  0 | task 15307 | created context checkpoint 19 of 32 (pos_min = 0, pos_max = 32101, n_tokens = 32102, size = 871.886 MiB, took 315.04 ms)
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="133497399701504" timestamp=1786984405 id_slot=0 id_task=15307 p0=32102
+slot create_check: id  0 | task 15307 | created context checkpoint 20 of 32 (pos_min = 0, pos_max = 32107, n_tokens = 32108, size = 871.886 MiB, took 311.98 ms)
+slot print_timing: id  0 | task 15307 | 
+prompt eval time =    7694.12 ms / 10464 tokens (    0.74 ms per token,  1360.00 tokens per second)
+       eval time =   10036.20 ms /   191 tokens (   52.55 ms per token,    19.03 tokens per second)
+      total time =   17730.32 ms / 10655 tokens
+INFO [      log_server_request] request | tid="133322871074816" timestamp=1786984415 remote_addr="127.0.0.1" remote_port=47428 status=200 method="POST" path="/v1/chat/completions" params={}
+slot create_check: id  0 | task 15307 | created context checkpoint 21 of 32 (pos_min = 0, pos_max = 32296, n_tokens = 32297, size = 871.888 MiB, took 312.27 ms)
+INFO [           release_slots] slot released | tid="133497399701504" timestamp=1786984416 id_slot=0 id_task=15307 n_ctx=131072 n_past=32297 n_system_tokens=0 n_cache_tokens=32297 truncated=false
+INFO [              slots_idle] all slots are idle | tid="133497399701504" timestamp=1786984416
+======== Prompt cache: cache size: 32297, n_keep: 0, n_discarded_prompt: 0, cache_ram_n_min: 0, f_keep: 1.00, cache_ram_similarity: 0.50
+ - looking for better prompt, base f_keep = 1.000, sim = 0.987, n_keep = 0, n_discarded_prompt = 0
+ - cache state: 1 prompts, 7610.452 MiB (limits: 8192.000 MiB, 0 tokens, 38631 est)
+   - prompt 0x793f1004a0e0:   35889 tokens,       0 discarded, checkpoints:  6,  7610.452 MiB
+prompt cache load took 6.11 ms
+INFO [   launch_slot_with_task] slot is processing task | tid="133497399701504" timestamp=1786984417 id_slot=0 id_task=15501
+======== Cache: cache_size = 32297, n_past =  32297, n_past_prompt = 32293
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="133497399701504" timestamp=1786984417 id_slot=0 id_task=15501 p0=32297
+slot create_check: id  0 | task 15501 | created context checkpoint 22 of 32 (pos_min = 0, pos_max = 33138, n_tokens = 33139, size = 871.894 MiB, took 316.18 ms)
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="133497399701504" timestamp=1786984420 id_slot=0 id_task=15501 p0=33139
+slot create_check: id  0 | task 15501 | created context checkpoint 23 of 32 (pos_min = 0, pos_max = 33144, n_tokens = 33145, size = 871.894 MiB, took 311.51 ms)
+slot print_timing: id  0 | task 15501 | 
+prompt eval time =    2865.76 ms /   847 tokens (    3.38 ms per token,   295.56 tokens per second)
+       eval time =    6419.22 ms /   119 tokens (   53.94 ms per token,    18.54 tokens per second)
+      total time =    9284.98 ms /   966 tokens
+INFO [      log_server_request] request | tid="133322862682112" timestamp=1786984427 remote_addr="127.0.0.1" remote_port=37570 status=200 method="POST" path="/v1/chat/completions" params={}
+slot create_check: id  0 | task 15501 | created context checkpoint 24 of 32 (pos_min = 0, pos_max = 33261, n_tokens = 33262, size = 871.895 MiB, took 315.08 ms)
+INFO [           release_slots] slot released | tid="133497399701504" timestamp=1786984427 id_slot=0 id_task=15501 n_ctx=131072 n_past=33262 n_system_tokens=0 n_cache_tokens=33262 truncated=false
+INFO [              slots_idle] all slots are idle | tid="133497399701504" timestamp=1786984427
+======== Prompt cache: cache size: 33262, n_keep: 0, n_discarded_prompt: 0, cache_ram_n_min: 0, f_keep: 1.00, cache_ram_similarity: 0.50
+ - looking for better prompt, base f_keep = 1.000, sim = 0.913, n_keep = 0, n_discarded_prompt = 0
+ - cache state: 1 prompts, 7610.452 MiB (limits: 8192.000 MiB, 0 tokens, 38631 est)
+   - prompt 0x793f1004a0e0:   35889 tokens,       0 discarded, checkpoints:  6,  7610.452 MiB
+prompt cache load took 6.61 ms
+INFO [   launch_slot_with_task] slot is processing task | tid="133497399701504" timestamp=1786984431 id_slot=0 id_task=15622
+======== Cache: cache_size = 33262, n_past =  33262, n_past_prompt = 33259
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="133497399701504" timestamp=1786984431 id_slot=0 id_task=15622 p0=33262
+slot create_check: id  0 | task 15622 | created context checkpoint 25 of 32 (pos_min = 0, pos_max = 39517, n_tokens = 39518, size = 871.943 MiB, took 331.20 ms)
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="133497399701504" timestamp=1786984436 id_slot=0 id_task=15622 p0=39518
+=============================== Failed to sample token
+Data has been stored in probabilities.txt
+Create an issue with full log and attach probabilities.txt to the issue
+
+
+Crashing now
+/home/matt/development/ik-llama-toolkit/ik_llama.cpp/src/llama-sampling.cpp:745: Fatal error
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf

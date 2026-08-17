@@ -1770,3 +1770,152 @@ this profile is a different code path at `-ub 8192` and nothing is known about i
 Until it has taken 300-500k prefilled tokens of real traffic without an abort, the
 kvram profile stays the shipped default.
 
+---
+
+## 23. Head to head with `multi-gpu-llm-toolkit` — it depends on depth (2026-08-17)
+
+The comparison that started §21, now measured on the tuned profile at the depths
+the other toolkit publishes. Same MXFP4 file, same machine, same PCIe 5.0 x16.
+
+Against that toolkit's **final** configuration (`--cuda-only`, `-b 8192 -ub 4096`,
+`--n-cpu-moe 18`, `-t 24 -tb 24`, 600 W, memory offset +3009 MT/s):
+
+| depth | ik_llama `gpu-experts` (tuned) | multi-gpu-llm-toolkit (final) | |
+|---:|---:|---:|---|
+| ~4k | 1 347.5 | **1 760.8** | theirs **+31 %** |
+| 16 384 | **1 887.1** | *(1 731.6, pre-overclock run)* | not comparable |
+| 32 768 | 1 804.1 | *not published* | |
+| 65k | *not measured* | 1 505.3 | |
+| ~128k | **1 327.7** | 1 179.9 | **ours +12.5 %** |
+
+Generation at 128k: ours 17.20, theirs 16.66 — **ours +3.2 %**.
+
+Our four measurements of the 32k point across the day were 1792.9 / 1793.6 /
+1795.3 / 1804.1 — 0.6 % spread — so these are not noise.
+
+**The hardware settings are not a confound.** Their final run raises the card to
+600 W and applies a +3009 MT/s memory offset. Both are already in effect here:
+`power.limit` is 600 W (which is also this card's maximum and default), and
+`clocks.max.memory` reports 15 505 MHz against a stock supported maximum of
+14 001 — a difference of 1504 MHz, i.e. 3008 MT/s, the same offset. So these
+numbers are measured on the same silicon in the same state.
+
+**The curves have different shapes, and that is the real finding.** Theirs falls
+monotonically with depth (1760.8 -> 1505.3 -> 1179.9); ours rises then falls
+(1347.5 -> 1887.1 -> 1804.1 -> 1327.7). Same cause as the crossover below: `-ub
+8192` needs depth before it earns its keep, so we are behind on short prompts and
+ahead on long ones.
+
+### 23.1 Why the crossover
+
+Their config is `--n-cpu-moe 18 -b 8192 -ub 4096`; ours tuned to `19 / 8192 /
+8192`. At a 4k prompt our micro-batch is twice the whole prompt, so we get none
+of the amortisation and pay only its cost — the extra expert layer that `-ub 8192`
+forces into host RAM, at -1.9 % (§22.2). By 128k the larger micro-batch is working
+and the order reverses.
+
+A shallow-prompt variant is therefore available if it is ever wanted: `-ub 4096`
+at `--n-cpu-moe 18` measured 1370.8 at 4k, narrowing their lead to 12 % rather
+than closing it.
+
+### 23.2 What still separates them, and what does not
+
+`-nkvo` is the remaining structural difference (§22.3): they run attention on the
+GPU, we cannot, because ik_llama's attention scratch is 8.24x larger and forces
+the KV to host RAM. That is an engine difference, not a tuning gap, and it is the
+most plausible source of their 4k advantage.
+
+Caveats worth stating rather than burying: their harness predicts 128 tokens and
+ours 160, and the prompt content differs. Neither should move prefill much, but a
+few percent either way is not worth arguing over.
+
+### 23.3 The honest summary
+
+For raw prefill on this box the two are now comparable, each ahead at different
+depths, after starting 3x apart. The gap that mattered was never tuning — it was
+that this toolkit was computing experts on eight AVX2 cores while the other
+shipped them to a Blackwell (§21).
+
+---
+
+## 24. The abort was very likely an upstream f16 overflow in DSA (2026-08-17)
+
+Seven aborts were chased across two days and five configuration variables. The
+answer appears to have been sitting in upstream since the afternoon of the first
+one.
+
+### 24.1 What was missed
+
+Our checkout was `2cda8d2d`, 2026-08-13 11:45. Three and a half hours later
+upstream merged:
+
+    ff141691  2026-08-13 15:22  Use f32 accumulation in CUDA DSA implementation (#2311)
+    7cd62a3e  2026-08-15 09:41  More principled CUDA DSA (#2315)
+                                "Just do V*softmax(K*Q) in f32 precision"
+
+DSA is DeepSeek Sparse Attention — this model's attention. f16 saturates at
+65 504; an accumulation that overflows gives `inf`, and `inf - inf` or `inf/inf`
+gives NaN, which then propagates through everything downstream.
+
+**That mechanism matches every observation:**
+
+* **All logits NaN, never some.** All seven `probabilities.txt` dumps have 40 of
+  40 candidates NaN, with identical token ids (38, 22, 10, 34 …) — the degenerate
+  order left by a sort whose comparisons are all false. Not one bad expert; a
+  poisoned tensor propagated to the output.
+* **It tracks prefilled volume**, not uptime or requests: more attention computed
+  is more chances to overflow.
+* **It happened in both regimes.** §21's two strategies differ in where the
+  *experts* are computed. Attention does not care, and the aborts did not either
+  — which is exactly why every configuration bisect came back negative.
+
+### 24.2 Verification so far
+
+`tools/stress.sh` was written to reproduce the abort quickly by driving the one
+thing the crashing runs had and the clean benchmarks did not: prompts far shorter
+than `-ub`, i.e. a partial micro-batch per request, plus conversations that grow
+so checkpoints are built.
+
+On the updated build, at `-ub 8192`:
+
+    123 requests, 610 103 prefilled tokens, 13 minutes, no abort
+
+That is 1.8x the latest abort (331 269) and ~55 000 tokens/min, roughly 25x the
+rate of real traffic — which is what makes the tool useful: a question that took
+half a day now takes minutes.
+
+**And it costs nothing.** Re-measured on the new build:
+
+| depth | old build | new build (f32 DSA) | |
+|---:|---:|---:|---:|
+| 4k | 1347.5 | 1335.4 | -0.9 % |
+| 16k | 1887.1 | 1867.2 | -1.1 % |
+| 32k | 1804.1 | 1801.7 | -0.1 % |
+| 128k | 1327.7 | 1330.9 | +0.2 % |
+
+All inside the noise floor. Plausibly because DSA attends only ~512 positions
+regardless of depth, so the precision change lands on a small share of the work.
+
+### 24.3 What this is not
+
+One clean synthetic run against seven aborts. The build changed, so the run
+clears **this build**, and says nothing about the configuration hypotheses that
+were live before it — a distinction `tools/stress.sh` now prints in its own
+output, because getting it backwards is exactly the error that made `-ub 2048`
+look exonerated for an hour on 2026-08-14.
+
+What is still owed is real traffic: Hermes, over a day, at the rate that produced
+seven aborts in two.
+
+### 24.4 The lesson, which is not a technical one
+
+Every configuration variable was bisected — prompt cache, checkpoints, `-rtr`,
+`-ub`, placement, driver, hardware — with runs that were individually sound. The
+one thing never checked was whether the engine had moved. `git log HEAD..origin`
+costs seconds and would have surfaced it on day one.
+
+Two of the three big findings of these two days came from looking outside the
+repository: this one, and §21, which came from the user comparing against another
+toolkit. The internal bisecting produced correct measurements and wrong
+conclusions.
+

@@ -1,0 +1,30 @@
+diff --git a/examples/server/server-task.cpp b/examples/server/server-task.cpp
+index 95c1a05f..35c80f45 100644
+--- a/examples/server/server-task.cpp
++++ b/examples/server/server-task.cpp
+@@ -1213,6 +1213,25 @@ void server_prompt_cache::update() {
+ 
+             states.pop_front();
+         }
++
++        // The loop above cannot help when a *single* state is over the limit,
++        // and one easily is: a state carries up to --ctx-checkpoints
++        // checkpoints, and a checkpoint is a fixed size regardless of how many
++        // tokens it covers (~872 MiB at 131072 ctx here, ~1/6 of the whole KV
++        // cache), so 32 of them is ~27 GiB against a default limit of 8 GiB.
++        // Observed: 1 prompt holding 18 checkpoints = 18803 MiB, limit 8192.
++        //
++        // Checkpoints are an optimisation for partial reuse, not the state
++        // itself -- `data` is. So trim them oldest-first to get back under the
++        // limit, rather than letting the cache silently ignore it.
++        for (auto& state : states) {
++            while (size() > limit_size && !state.checkpoints.empty()) {
++                LLAMA_LOG_INFO(" - cache size limit reached, dropping a checkpoint (size = %.3f MiB)\n",
++                    state.checkpoints.front().size() / (1024.0 * 1024.0));
++
++                state.checkpoints.pop_front();
++            }
++        }
+     }
+ 
+     // average size per token

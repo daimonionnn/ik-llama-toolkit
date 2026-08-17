@@ -32,11 +32,10 @@
 #   * a GPU faster than the CPU at quantised GEMM. True here (Blackwell vs an
 #     Arrow Lake with no AVX-512); a Zen 4/5 with AVX-512 could flip it back.
 #
-# NOT the shipped default yet -- but only one thing is missing now. Placement,
-# batching, KV placement and threads have all been swept (RESULTS §22). What has
-# not happened is a stability soak: the NaN-logits abort (RESULTS §19) was chased
-# entirely in the -rtr path at -ub 2048, and this is a different path at -ub 8192.
-# Use it deliberately and watch it; see TODO item 11.
+# THIS IS NOW THE DEFAULT PROFILE (config/default.env), so `./serve.sh` with no
+# arguments does the same thing. The wrapper stays for the explicit name.
+# Provisional: see RESULTS §24 for why the abort that blocked it is believed
+# fixed upstream, and what verification is still owed.
 #
 # Two deliberate defaults (same as the other wrappers):
 #   * Port 8090, not 8080 -- LM Studio's API server usually holds 8080.

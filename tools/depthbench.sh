@@ -2,9 +2,13 @@
 # =============================================================================
 # depthbench.sh -- prefill and generation vs prompt depth, through the API
 # =============================================================================
-#   ./tools/depthbench.sh <ubatch> [-r N] [--attach] [depth ...]
+#   ./tools/depthbench.sh <ubatch> [-r N] [--attach] [-p PROFILE] [depth ...]
 #
 #     <ubatch>    -ub to run with; the server is restarted to apply it
+#     -p PROFILE  profile to serve. WITHOUT THIS the default profile is used, which
+#                 is not necessarily the one being tuned -- a mistake that silently
+#                 measured the wrong profile once, since -ub is accepted by any of
+#                 them and simply gets clamped to that profile's -b.
 #     -r N        repeats per depth (default 2) -- the noise floor is ~2 %, so a
 #                 single sample cannot resolve small differences (RESULTS §16)
 #     --attach    measure the server that is ALREADY running and leave it alone.
@@ -44,10 +48,11 @@ set -uo pipefail
 cd "$(dirname "$(readlink -f "$0")")/.."
 TOOLKIT_ROOT="$PWD"
 
-UB=""; REPEATS=2; ATTACH=0; DEPTHS=()
+UB=""; REPEATS=2; ATTACH=0; PROFILE=""; DEPTHS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         -r)        REPEATS="$2"; shift 2 ;;
+        -p)        PROFILE="$2"; shift 2 ;;
         --attach)  ATTACH=1; shift ;;
         *)         [ -z "$UB" ] && UB="$1" || DEPTHS+=("$1"); shift ;;
     esac
@@ -70,7 +75,7 @@ if [ "$ATTACH" -eq 1 ]; then
 else
     ./stop.sh >/dev/null 2>&1
     for ((i=0;i<30;i++)); do ps -eo comm | grep -q '^llama-serv' || break; sleep 2; done
-    IK_UBATCH="$UB" IK_PORT="$PORT" IK_KILL_SQUATTERS=1 ./serve.sh > "$LOG" 2>&1 &
+    IK_UBATCH="$UB" IK_PORT="$PORT" IK_KILL_SQUATTERS=1 ./serve.sh ${PROFILE:+"$PROFILE"} > "$LOG" 2>&1 &
     # The liveness check must tolerate the first seconds, while serve.sh has been
     # backgrounded but has not exec'd llama-server yet.
     for ((i=0;i<240;i++)); do
@@ -80,7 +85,9 @@ else
         fi
         sleep 5
     done
-    echo "server up, -ub $UB (load took $((i*5)) s)"
+    echo "server up, -ub $UB, profile ${PROFILE:-<default>} (load took $((i*5)) s)"
+    got_ub=$(grep -aoE 'n_ubatch += [0-9]+' "$LOG" | head -1 | grep -oE '[0-9]+$')
+    [ "$got_ub" = "$UB" ] || echo "  WARNING: asked for -ub $UB, server reports $got_ub (clamped by -b?)"
 fi
 
 python3 - "$UB" "$REPEATS" "$LOG" "$REPORT" "$PORT" "${DEPTHS[@]}" <<'PY'

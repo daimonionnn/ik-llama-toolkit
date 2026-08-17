@@ -203,7 +203,19 @@ suits one profile. Revisit if startup time ever starts to hurt.
 
 ---
 
-## 9. NaN logits abort under sustained agent load — cause unknown
+## 9. NaN logits abort — very likely fixed upstream, verification owed
+
+> **2026-08-17: probably solved, see RESULTS §24.** Our checkout predated
+> `ff141691` "Use f32 accumulation in CUDA DSA implementation" by three and a half
+> hours — merged the afternoon of the first abort. f16 overflow in the attention
+> accumulator produces inf, then NaN, then a poisoned output tensor, which matches
+> all-NaN logits, the prefilled-volume correlation, and aborts in both §21
+> regimes. On the updated build `tools/stress.sh` ran 610 103 prefilled tokens of
+> exactly the shape that used to abort, clean, at no measurable performance cost.
+> Still owed: a day of real Hermes traffic. Everything below is the investigation
+> as it happened and is kept for the negative results.
+
+## 9 (historical). NaN logits abort under sustained agent load — cause unknown
 
 **2026-08-13, ~4.3 h into a run of the shipped default profile**, the 99th
 request aborted:

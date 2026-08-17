@@ -61,8 +61,10 @@ is exactly the problem any "model bigger than VRAM" setup faces, on any GPU.
 
 ## The default model
 
-**DeepSeek-V4-Flash**, MXFP4, served by the `deepseek-v4-flash-128k-kvram`
-profile — 131072 context, ~486 tok/s prefill, ~21 tok/s generation. What that
+**DeepSeek-V4-Flash**, MXFP4, served by the `deepseek-v4-flash-gpu-experts-128k`
+profile — 131072 context, **~1800 tok/s prefill at 32k**, ~19 tok/s generation.
+The experts that do not fit in VRAM are computed *on the GPU* rather than on the
+CPU, which is worth roughly 3x prefill (RESULTS §21–§24). What that
 profile does and why is in [docs/RESULTS.md §11](docs/RESULTS.md); the short
 version is that the KV cache lives in system RAM so the VRAM it would occupy
 goes to expert weights instead.
@@ -254,7 +256,9 @@ any `serve.sh` flag. Their names spell out quant, placement and context:
   the `-rtr` profiles win instead. Now swept (RESULTS §22): `--n-cpu-moe 19`,
   `-ub 8192`, `-b 8192`, which is **1329 / 1794 / 1328 tok/s at 4k / 32k / 128k**
   against the kvram profile's 478 / 486 / 437 — 2.8x, 3.7x and 3.0x — for 3-7 %
-  less generation. Not the default yet: the §19 abort has not been re-tested in
+  less generation. Against `multi-gpu-llm-toolkit` on the same card and the same
+  file it wins at depth and loses shallow — **+12.5 % at 128k, -31 % at 4k**
+  (RESULTS §23), because `-ub 8192` needs depth before it pays. Not the default yet: the §19 abort has not been re-tested in
   this path, and that soak is what is still owed.
 - **`serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh`** → `serve.sh deepseek-v4-flash`.
   The ~146 GiB MXFP4 quant (effectively lossless QAT) at 131072 ctx; `--fit`
