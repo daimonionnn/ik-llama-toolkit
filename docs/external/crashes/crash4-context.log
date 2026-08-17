@@ -1,0 +1,57 @@
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="127030082220032" timestamp=1786639613 id_slot=0 id_task=2573 p0=57344
+INFO [      log_server_request] request | tid="126855782752256" timestamp=1786639613 remote_addr="127.0.0.1" remote_port=44522 status=200 method="POST" path="/v1/chat/completions" params={}
+slot print_timing: id  0 | task 2573 | 
+prompt eval time =  117368.72 ms / 57509 tokens (    2.04 ms per token,   489.99 tokens per second)
+       eval time =    4217.30 ms /    85 tokens (   49.62 ms per token,    20.16 tokens per second)
+      total time =  121586.02 ms / 57594 tokens
+INFO [           release_slots] slot released | tid="127030082220032" timestamp=1786639618 id_slot=0 id_task=2573 n_ctx=131072 n_past=57593 n_system_tokens=0 n_cache_tokens=57593 truncated=false
+INFO [              slots_idle] all slots are idle | tid="127030082220032" timestamp=1786639618
+======== Prompt cache: cache size: 57593, n_keep: 0, n_discarded_prompt: 0, cache_ram_n_min: 0, f_keep: 0.01, cache_ram_similarity: 0.50
+INFO [   launch_slot_with_task] slot is processing task | tid="127030082220032" timestamp=1786639620 id_slot=0 id_task=2673
+======== Cache: cache_size = 57593, n_past =  480, n_past_prompt = 480
+cache : , batch them.
+
+You have persistent memory across sessions. Save durable facts using the memory tool: user preferences, environment details, tool quirks, and
+prompt: , batch them.
+
+## Mid-turn user steering
+While you work, the user can send an out-of-band message that Hermes appends to the
+slot apply_checkp: id  0 | task 2673 | n_past = 480, slot.prompt.tokens.size() = 57593, seq_id = 0, pos_min = 0
+slot apply_checkp: id  0 | task 2673 | no checkpoint before divergence point - reprocessing from scratch
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="127030082220032" timestamp=1786639620 id_slot=0 id_task=2673 p0=0
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="127030082220032" timestamp=1786639628 id_slot=0 id_task=2673 p0=4096
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="127030082220032" timestamp=1786639636 id_slot=0 id_task=2673 p0=8192
+slot print_timing: id  0 | task 2673 | 
+prompt eval time =   20887.40 ms / 10757 tokens (    1.94 ms per token,   515.00 tokens per second)
+       eval time =    5097.77 ms /   113 tokens (   45.11 ms per token,    22.17 tokens per second)
+      total time =   25985.18 ms / 10870 tokens
+INFO [           release_slots] slot released | tid="127030082220032" timestamp=1786639646 id_slot=0 id_task=2673 n_ctx=131072 n_past=10869 n_system_tokens=0 n_cache_tokens=10869 truncated=false
+INFO [              slots_idle] all slots are idle | tid="127030082220032" timestamp=1786639646
+INFO [      log_server_request] request | tid="126855774359552" timestamp=1786639646 remote_addr="127.0.0.1" remote_port=44972 status=200 method="POST" path="/v1/chat/completions" params={}
+======== Prompt cache: cache size: 10869, n_keep: 0, n_discarded_prompt: 0, cache_ram_n_min: 0, f_keep: 1.00, cache_ram_similarity: 0.50
+INFO [   launch_slot_with_task] slot is processing task | tid="127030082220032" timestamp=1786639646 id_slot=0 id_task=2789
+======== Cache: cache_size = 10869, n_past =  10869, n_past_prompt = 10870
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="127030082220032" timestamp=1786639646 id_slot=0 id_task=2789 p0=10869
+slot print_timing: id  0 | task 2789 | 
+prompt eval time =     630.93 ms /   158 tokens (    3.99 ms per token,   250.42 tokens per second)
+       eval time =    6126.46 ms /   135 tokens (   45.38 ms per token,    22.04 tokens per second)
+      total time =    6757.39 ms /   293 tokens
+INFO [           release_slots] slot released | tid="127030082220032" timestamp=1786639653 id_slot=0 id_task=2789 n_ctx=131072 n_past=11161 n_system_tokens=0 n_cache_tokens=11161 truncated=false
+INFO [              slots_idle] all slots are idle | tid="127030082220032" timestamp=1786639653
+INFO [      log_server_request] request | tid="126855765966848" timestamp=1786639653 remote_addr="127.0.0.1" remote_port=45010 status=200 method="POST" path="/v1/chat/completions" params={}
+======== Prompt cache: cache size: 11161, n_keep: 0, n_discarded_prompt: 0, cache_ram_n_min: 0, f_keep: 1.00, cache_ram_similarity: 0.50
+INFO [   launch_slot_with_task] slot is processing task | tid="127030082220032" timestamp=1786639653 id_slot=0 id_task=2925
+======== Cache: cache_size = 11161, n_past =  11161, n_past_prompt = 11163
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="127030082220032" timestamp=1786639653 id_slot=0 id_task=2925 p0=11161
+=============================== Failed to sample token
+Data has been stored in probabilities.txt
+Create an issue with full log and attach probabilities.txt to the issue
+
+
+Crashing now
+/home/matt/development/ik-llama-toolkit/ik_llama.cpp/src/llama-sampling.cpp:745: Fatal error
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+❌️ ptrace: Inappropriate ioctl for device.
+❌️ No stack.

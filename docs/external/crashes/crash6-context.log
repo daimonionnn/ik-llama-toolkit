@@ -1,0 +1,50 @@
+slot apply_checkp: id  0 | task 11363 | n_past = 74480, slot.prompt.tokens.size() = 75783, seq_id = 0, pos_min = 0
+slot apply_checkp: id  0 | task 11363 | restored context checkpoint took  64.77 ms (pos_min = 0, pos_max = 74444, n_tokens = 74445, n_past = 74445, size = 872.209 MiB)
+slot apply_checkp: id  0 | task 11363 | erased invalidated context checkpoint (pos_min = 0, pos_max = 74956, size = 872.213 MiB)
+slot apply_checkp: id  0 | task 11363 | erased invalidated context checkpoint (pos_min = 0, pos_max = 75468, size = 872.217 MiB)
+slot apply_checkp: id  0 | task 11363 | erased invalidated context checkpoint (pos_min = 0, pos_max = 75782, size = 872.219 MiB)
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="138288432091136" timestamp=1786702963 id_slot=0 id_task=11363 p0=74445
+slot create_check: id  0 | task 11363 | created context checkpoint 21 of 32 (pos_min = 0, pos_max = 75919, n_tokens = 75920, size = 872.221 MiB, took 312.16 ms)
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="138288432091136" timestamp=1786702967 id_slot=0 id_task=11363 p0=75920
+INFO [      log_server_request] request | tid="138114041311232" timestamp=1786702967 remote_addr="127.0.0.1" remote_port=40486 status=200 method="POST" path="/v1/chat/completions" params={}
+slot create_check: id  0 | task 11363 | created context checkpoint 22 of 32 (pos_min = 0, pos_max = 75925, n_tokens = 75926, size = 872.221 MiB, took 305.31 ms)
+slot print_timing: id  0 | task 11363 | 
+prompt eval time =    4001.86 ms /  1480 tokens (    2.70 ms per token,   369.83 tokens per second)
+       eval time =    6795.27 ms /   126 tokens (   53.93 ms per token,    18.54 tokens per second)
+      total time =   10797.13 ms /  1606 tokens
+slot create_check: id  0 | task 11363 | created context checkpoint 23 of 32 (pos_min = 0, pos_max = 76049, n_tokens = 76050, size = 872.222 MiB, took 309.36 ms)
+INFO [           release_slots] slot released | tid="138288432091136" timestamp=1786702974 id_slot=0 id_task=11363 n_ctx=131072 n_past=76050 n_system_tokens=0 n_cache_tokens=76050 truncated=false
+INFO [              slots_idle] all slots are idle | tid="138288432091136" timestamp=1786702974
+======== Prompt cache: cache size: 76050, n_keep: 0, n_discarded_prompt: 0, cache_ram_n_min: 0, f_keep: 0.98, cache_ram_similarity: 0.50
+ - looking for better prompt, base f_keep = 0.979, sim = 0.978, n_keep = 0, n_discarded_prompt = 0
+ - cache state: 1 prompts, 3511.020 MiB (limits: 8192.000 MiB, 0 tokens, 1357 est)
+   - prompt 0x6443829758a0:     582 tokens,       0 discarded, checkpoints:  3,  3511.020 MiB
+prompt cache load took 4.65 ms
+INFO [   launch_slot_with_task] slot is processing task | tid="138288432091136" timestamp=1786702974 id_slot=0 id_task=11491
+======== Cache: cache_size = 76050, n_past =  74445, n_past_prompt = 74446
+cache : ><｜Assistant｜><think></think></think>Mám kompletný obsah. Uložím do vaultu.
+
+<｜DSML｜tool_calls>
+<｜DSML｜invoke
+prompt: <｜Assistant｜><think> </think>Mám kompletný obsah. Uložím do vaultu.
+
+<｜DSML｜tool_calls>
+<｜DSML｜invoke name
+slot apply_checkp: id  0 | task 11491 | n_past = 74445, slot.prompt.tokens.size() = 76050, seq_id = 0, pos_min = 0
+slot apply_checkp: id  0 | task 11491 | restored context checkpoint took  63.09 ms (pos_min = 0, pos_max = 74444, n_tokens = 74445, n_past = 74445, size = 872.209 MiB)
+slot apply_checkp: id  0 | task 11491 | erased invalidated context checkpoint (pos_min = 0, pos_max = 75919, size = 872.221 MiB)
+slot apply_checkp: id  0 | task 11491 | erased invalidated context checkpoint (pos_min = 0, pos_max = 75925, size = 872.221 MiB)
+slot apply_checkp: id  0 | task 11491 | erased invalidated context checkpoint (pos_min = 0, pos_max = 76049, size = 872.222 MiB)
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="138288432091136" timestamp=1786702974 id_slot=0 id_task=11491 p0=74445
+slot create_check: id  0 | task 11491 | created context checkpoint 21 of 32 (pos_min = 0, pos_max = 76075, n_tokens = 76076, size = 872.222 MiB, took 313.20 ms)
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="138288432091136" timestamp=1786702979 id_slot=0 id_task=11491 p0=76076
+=============================== Failed to sample token
+Data has been stored in probabilities.txt
+Create an issue with full log and attach probabilities.txt to the issue
+
+
+Crashing now
+/home/matt/development/ik-llama-toolkit/ik_llama.cpp/src/llama-sampling.cpp:745: Fatal error
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf

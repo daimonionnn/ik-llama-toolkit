@@ -12,3 +12,8 @@ results/
 # Transient crash dump, rewritten by the server on every abort. The copies that
 # matter are archived by hand under docs/external/crashes/ with a date.
 probabilities.txt
+
+# Crash records are evidence, not noise: the *.log rule above would swallow the
+# context excerpt saved with every abort, leaving the probabilities dump without
+# the log that explains it. Six of them were missing for exactly that reason.
+!docs/external/crashes/*.log
