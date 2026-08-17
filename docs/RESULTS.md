@@ -1527,3 +1527,58 @@ generator of many short varied prompts at `-ub 2048`.
 and is the same suspect, only more so. Mechanism unknown, nothing filed upstream
 yet — see TODO item 9 for the open threads.
 
+---
+
+## 20. PCIe 5.0 x8 -> x16: +5 % prefill, and my transfer model was wrong (2026-08-17)
+
+The Radeon 9700 was moved to a chipset PCIe 4.0 x4 slot, which let the RTX PRO
+6000 come up at its full x16 (`pcie.link.width.max` went 8 -> 16). Re-measured
+with `tools/depthbench.sh`, same `-ub 1024`, same depths, same methodology — only
+the machine changed.
+
+| depth | prefill x8 | prefill x16 | delta | generation x8 | generation x16 |
+|---:|---:|---:|---:|---:|---:|
+| ~515 | 277.6 | **286.4** | +3.2 % | 21.55 | 21.34 |
+| ~1 020 | 356.2 | **384.4** | +7.9 % | 21.41 | 21.63 |
+| ~4 100 | 472.2 | **478.0** | +1.2 % | 21.47 | 21.70 |
+| ~32 700 | 462.9 | **486.4** | +5.1 % | 20.07 | 20.32 |
+| ~128 000 | 409.6 | **436.7** | +6.6 % | 17.48 | **17.97** |
+
+Prefill spreads within each point were 0.2-1.4 %, so everything except the 4k row
+is comfortably outside noise. Mean prefill gain **+4.8 %**.
+
+### 20.1 The bandwidth model was right and still predicted the wrong answer
+
+Before the change I estimated the gain at "well under 1 %", from traffic volume:
+activations cross the bus, not weights — `n_embd` 4096 at f16 is 8 KiB per token,
+times 17 CPU-resident layers, times two directions, is ~272 KiB per token. For a
+2048-token micro-batch that is 557 MB, ~22 ms at gen5 x8, against 70.7 s for a
+32k prefill. **0.5 % of the time, so doubling the width could save at most 0.25 %.**
+
+That arithmetic still checks out, which is exactly why the result is interesting:
+**bandwidth cannot explain a 5 % gain**, so the bus was not costing what it moves.
+The remaining candidate is latency and synchronisation — every layer boundary is
+a point where one side waits for the other, 17 of them each way per micro-batch,
+and what matters there is how fast a round trip retires rather than how much fits
+through.
+
+The generation column is the supporting evidence. Generation had been completely
+insensitive to `-ub` (§18.2) because it processes one token at a time, so data
+volume across the bus is negligible. It moved anyway — +2.8 % at 128k — which is
+what a per-round-trip cost would do and what a bandwidth cost would not.
+
+### 20.2 Two variables moved at once
+
+The Radeon did not merely vacate lanes; it moved from a CPU-attached slot to the
+chipset. So this measures "RTX at x16 **and** the second GPU off the CPU root
+complex" as one change. The improvement is real and is what the machine now does,
+but attributing it specifically to link width would be more than the data
+supports.
+
+### 20.3 The `-ub 1024` stability tax is now paid off
+
+`-ub 1024` at x16 reaches **486.4 tok/s at 32k, above the 485.3 that `-ub 2048`
+managed at x8** (§18.1). The configuration that has never aborted is now also
+faster than the one that aborted six times. Whether `-ub 2048` would gain the
+same ~5 % is untested and not worth testing on the shipped profile.
+
