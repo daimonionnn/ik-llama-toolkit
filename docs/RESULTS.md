@@ -1969,3 +1969,41 @@ RAM dropped 224 -> 122 GiB with the swap. Every profile still fits:
 Even the sweep's `--n-cpu-moe 24` arm (76.5 GiB) leaves 45 GiB. The headroom that
 was lost was never being used.
 
+---
+
+## Appendix: primary data
+
+Sections §18 onwards were produced by `tools/depthbench.sh` and `tools/sweep.sh`,
+which write a self-describing report per run — the configuration in it is read
+back from the server log, not from what was requested. Those reports are in the
+repository so the numbers quoted above can be checked against their source:
+
+| section | report in `results/` |
+|---|---|
+| §18 depth curve at `-ub 1024` | `depthbench-ub1024-20260814-043225.md` |
+| §18 the 1027-token point | `depthbench-ub1024-20260814-044737.md` |
+| §18 independent 32k re-measure | `depthbench-ub1024-20260814-044910.md` |
+| §18.1 `-ub 2048` at 32k | `depthbench-ub2048-20260814-055007.md` |
+| §20 PCIe x8 -> x16 | `depthbench-ub1024-20260817-082855.md` |
+| §21 `-rtr` off, first measurement | `depthbench-ub4096-20260817-162505.md` |
+| §22.3 `-nkvo` off | `sweep-…-20260817-165008.md` |
+| §22.3 `-amb 512` | `sweep-…-20260817-165522.md` |
+| §22.2 `--n-cpu-moe` 14-24 | `sweep-…-20260817-165941.md` |
+| §22.2 `--n-cpu-moe 17` boundary | `sweep-…-20260817-170811.md` |
+| §22.4 `-ub` / `-b` | `sweep-…-20260817-170943.md` |
+| §22.4 `-ub` 12288 / 16384 | `sweep-…-20260817-172100.md` |
+| §22.5 threads | `sweep-…-20260817-173130.md` |
+| §23 head-to-head depths | `sweep-…-20260817-185348.md` |
+| §24 updated build | `sweep-…-20260817-193021.md` |
+| §25 DDR5-7400 | `sweep-…-20260817-232449.md` |
+
+(`sweep-…` is `sweep-deepseek-v4-flash-gpu-experts-128k-`.)
+
+The rest of `results/` is ignored by git: it is output from ad-hoc scripts that no
+longer exist, backing §8-§16, and nothing cites it by name.
+
+One of these carries a correction. `depthbench-ub2048-20260814-055007.md`
+originally attributed its own interruption to the NaN abort; the server had in
+fact been stopped by hand. A dropped connection looks identical to a crash from
+the client side, so the tool no longer guesses — see the note in that file.
+

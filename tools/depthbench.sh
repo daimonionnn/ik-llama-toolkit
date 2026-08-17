@@ -168,8 +168,12 @@ with open(report, "w") as f:
         f.write(f"| {pn} | **{pps:.1f}** | **{gps:.2f}** | {spread:.1f} % |\n")
     if died:
         d, r, err = died
-        f.write(f"\n## INCOMPLETE\n\nThe server died at depth {d}, repeat {r+1}: `{err}`\n\n"
-                f"The rows above are still valid; the depths below it were never run.\n")
+        f.write(f"\n## INCOMPLETE\n\nThe run stopped at depth {d}, repeat {r+1}: `{err}`\n\n"
+                f"The rows above are still valid; the depths below were never run.\n\n"
+                f"**Cause not established here.** A lost connection means the server went\n"
+                f"away, which covers an abort, an OOM, and someone stopping it by hand\n"
+                f"equally well. Check the server log before concluding anything -- an\n"
+                f"earlier version of this file asserted a cause and was wrong.\n")
 
 print(flush=True)
 for pn, pps, gps, spread in rows:
