@@ -213,7 +213,8 @@ VRAM at launch. Starting with 20 GiB free instead of 95 GiB silently pushes
 ./serve.sh mxfp4-tuned                  # DeepSeek-V4-Flash MXFP4, the tuned profile
 ./serve-deepseek-v4-flash-antirez-IQ2XXS-gpu-mtp-65k.sh   # fastest DeepSeek: all in VRAM + MTP, ~87 tok/s
 ./serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh           # lossless DeepSeek, experts in DDR5, ~21 tok/s
-./serve-deepseek-v4-flash-mxfp4-kvram-128k.sh             # fast-prefill variant: 484 tok/s pp (+69 %)
+./serve-deepseek-v4-flash-mxfp4-kvram-128k.sh             # experts on the CPU: 486 tok/s pp
+./serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh       # experts on the GPU: 1794 tok/s pp (3.7x)
 ./serve-deepseek-v4-flash-mxfp4-kvram-mtp-128k.sh         # same, MTP: 24 tok/s tg, less prefill
 ./serve-deepseek-v4-flash-mxfp4-kvram-256k.sh             # same treatment at 256k: 406 pp
 ./serve-deepseek-v4-flash-mxfp4-kvram-mtp-256k.sh         # 256k + MTP: 20.5 tok/s tg (+26 %)
@@ -241,6 +242,20 @@ any `serve.sh` flag. Their names spell out quant, placement and context:
   **entirely on the GPU** (no DDR5 spill) with a 5.5 GiB MTP draft on top:
   **~87 tok/s at 65536 ctx**, the fastest coherent DeepSeek config here. 131072
   does not fit alongside the draft.
+- **`serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh`** →
+  `serve.sh deepseek-v4-flash-gpu-experts-128k`. **A different principle from
+  every other wrapper here.** The others decide where weights *live*; this decides
+  who *computes* them. The overflow experts still sit in host RAM, but they are
+  shipped across PCIe each pass and the GEMM runs **on the GPU** — which is what
+  happens as soon as `-rtr` is not passed, because `-rtr` repacks them into a
+  CPU-only type. **1376 tok/s prefill at 4k and 1529 at 32k, roughly 3× the kvram
+  profile** (RESULTS §21), for 1–4 % less generation and no quality trade. Needs a
+  wide PCIe link and a GPU faster than the CPU at quantised GEMM; on a narrow link
+  the `-rtr` profiles win instead. Now swept (RESULTS §22): `--n-cpu-moe 19`,
+  `-ub 8192`, `-b 8192`, which is **1329 / 1794 / 1328 tok/s at 4k / 32k / 128k**
+  against the kvram profile's 478 / 486 / 437 — 2.8x, 3.7x and 3.0x — for 3-7 %
+  less generation. Not the default yet: the §19 abort has not been re-tested in
+  this path, and that soak is what is still owed.
 - **`serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh`** → `serve.sh deepseek-v4-flash`.
   The ~146 GiB MXFP4 quant (effectively lossless QAT) at 131072 ctx; `--fit`
   fills VRAM to ~93.8 GiB (margin tuned down to 4096 for this context, worth
@@ -354,6 +369,7 @@ ik-llama-toolkit/
 │                         wrapper: DeepSeek IQ2XXS all-in-VRAM + MTP, ~87 tok/s
 ├── serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh
 │                         wrapper: DeepSeek MXFP4, experts in DDR5, ~21 tok/s
+├── serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh
 ├── serve-deepseek-v4-flash-mxfp4-kvram-128k.sh
 │                         wrapper: fast-prefill 128k variant, 484 tok/s pp
 ├── serve-deepseek-v4-flash-mxfp4-gpu-cpu-512k.sh

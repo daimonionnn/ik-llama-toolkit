@@ -469,6 +469,14 @@ Next, in order:
 
 ## 10. Why does `-rtr` shrink the CUDA compute buffer?
 
+> **DOUBTFUL as stated, 2026-08-17.** The `gpu-experts` profile runs *without*
+> `-rtr` at `-ub 4096` and reports a 3520.02 MiB compute buffer — which is exactly
+> `0.859 x 4096`, the same per-unit rate measured *with* `-rtr` (§18.3). So `-rtr`
+> does not shrink the buffer in general. The 1760-vs-2496 pair below was measured
+> at `--n-cpu-moe` 17 vs 18 as well, so placement is a confound that was not
+> controlled. Re-measure at fixed `-ub` and fixed `-ncmoe` before treating this as
+> real.
+
 Discovered while setting up bisect step 3 for item 9, and not something the
 profile's own documentation predicted.
 
@@ -495,4 +503,141 @@ Why it matters: §11 attributes the kvram profile's win to repacking (+25 %) and
 of the first. If the buffer growth can be avoided without `-rtr`, `--n-cpu-moe 17`
 becomes reachable in more configurations; if it cannot, the profile comment
 should say so plainly.
+
+---
+
+## 11. Tune the `gpu-experts` regime — it starts 3x ahead and untuned
+
+New profile `deepseek-v4-flash-gpu-experts-128k` (RESULTS §21). Experts stay in
+host RAM but are computed **on the GPU**, which is what happens as soon as `-rtr`
+is not passed. Measured 1375.7 / 1562.8 / 1529.0 / 1145.4 pp at 4k / 16k / 32k /
+128k, against 478 / — / 486 / 437 for the shipped kvram profile.
+
+Every number in it was borrowed from `multi-gpu-llm-toolkit`, which swept them
+for a different engine. Nothing here has been swept. In rough order of expected
+value:
+
+1. ~~**`-nkvo` off.**~~ **DONE 2026-08-17, and the answer is no** — at least not
+   at `-ub 4096`. Swept `--n-cpu-moe` 19, 20 and 22 with the KV back on the GPU;
+   **all three fail to load with CUDA OOM**, even n22, which frees four expert
+   layers (~13 GiB). Baseline reproduced to 0.1 % in the same sweep (1375.0 /
+   1526.8 pp), so the harness is sound.
+
+   What blocks it is not the KV — 5504 MiB would fit — but the attention scratch,
+   which returns to VRAM with it. The profile comment already recorded that going
+   `-nkvo` collapses the compute buffer from 3624 to 440 MiB **at `-ub 512`**; at
+   `-ub 4096` the same ratio would be tens of GiB.
+
+   **The number, from the OOM message itself:**
+
+   | | CUDA0 compute buffer at `-ub 4096` |
+   |---|---:|
+   | `-nkvo` (KV in RAM) | 3 520 MiB |
+   | KV on the GPU | **28 992 MiB** |
+
+   8.24x, and the same ratio the profile recorded at `-ub 512` (3624 vs 440), so
+   the attention scratch is linear in `-ub` too — at **7.08 MiB per unit** against
+   0.859 for the rest. Fitting it in the free VRAM would need `-ub` below ~1150,
+   which throws away the amortisation that makes streaming pay in the first place.
+
+   **`-amb 512` does nothing here, on either axis.** All three OOM arms requested
+   the identical 28 992.18 MiB, and the arm that did load matched the baseline in
+   both allocation (3520.02 MiB) and speed (1372.3 / 1532.9 pp against 1375.0 /
+   1526.8 — 0.2 % and 0.4 %). ik_llama's attention-batch cap does not reach this
+   path; presumably `-mla 3` takes a different route. Worth knowing before
+   reaching for it again.
+
+   So `-nkvo` is not a choice in this regime, it is a requirement, and the
+   remaining 10-12 % against `multi-gpu-llm-toolkit` is explained rather than
+   closed: upstream fits `--n-cpu-moe 18` + KV on GPU + `-ub 4096` in the same
+   96 GiB, so its attention scratch is far smaller, and ours forces the KV out to
+   host RAM and attention onto the CPU. That is an ik_llama implementation
+   difference, not something a flag here can reach.
+2. ~~**`--n-cpu-moe`.**~~ **DONE 2026-08-17 — 18 is right, and it is right because
+   it is the floor.** Lower is better on both axes, monotonically, until it stops
+   fitting:
+
+   | `--n-cpu-moe` | host weights | pp 4k | pp 32k | tg 32k |
+   |---:|---:|---:|---:|---:|
+   | 14, 16 | — | **OOM** | | |
+   | **18** | 59 762 MiB | **1366.0** | **1528.4** | **19.83** |
+   | 20 | 66 290 | 1307.9 | 1457.4 | 18.52 |
+   | 24 | 79 346 | 1218.0 | 1353.6 | 16.44 |
+
+   Each layer pushed to host RAM costs **-1.9 % prefill and -2.8 % generation**,
+   linearly across the range. The compute buffer stays 3520.02 MiB throughout, so
+   `--n-cpu-moe` moves weights only — it does not buy scratch.
+
+   This is a different shape from the `-rtr` path, where §17 measured ~102 us per
+   layer per token and the curve flattened above 19. There the constraint was CPU
+   GEMM; here it is bytes over the link every batch, so nothing saturates and the
+   penalty stays linear. Generation suffers more than prefill (-2.8 % vs -1.9 %)
+   because a single decoded token has nothing to amortise the transfer over.
+
+   16 does not load: fewer layers in RAM means more weights in VRAM and no room
+   left for the 3520 MiB compute buffer. **17 does not load either**, so 18 is
+   exactly the floor at `-ub 4096` — the borrowed value happened to be the right
+   one, and there is nothing below it to win.
+
+   Consequence for `-ub`: the two are in direct conflict. A larger micro-batch
+   needs a bigger compute buffer, which has to be paid for by pushing another
+   layer to host RAM at -1.9 %. So raising `-ub` only wins if it beats that.
+3. ~~**`-ub` / `-b`.**~~ **DONE 2026-08-17 — `-ub 8192` at `--n-cpu-moe 19` is
+   worth +17.9 % at 32k**, easily repaying the extra layer.
+
+   | arm | pp 4k | pp 32k | tg 32k | compute buffer |
+   |---|---:|---:|---:|---:|
+   | ub 2048 / b 8192 / n18 | 1029.3 | 1122.6 | 19.73 | 2496 MiB |
+   | ub 4096 / b 8192 / n18 | **1370.8** | 1520.7 | 19.62 | 3520 |
+   | ub 4096 / b 4096 / n18 | 1371.9 | 1435.9 | 19.77 | 3520 |
+   | ub 6144 / b 8192 / n18 | — | **OOM at depth** | | 5280 |
+   | **ub 8192 / b 8192 / n19** | 1336.7 | **1792.9** | 19.15 | 7040 |
+
+   Three things worth keeping:
+
+   * **The optimum depends on depth.** `-ub 4096` wins at 4k by 2.5 %; `-ub 8192`
+     wins at 32k by 17.9 %. At 4k a 4101-token prompt is a single micro-batch
+     either way, so the larger setting only shows its cost, not its benefit.
+   * **`-b` matters, but only at depth.** Identical at 4k (1371.9 vs 1370.8, 0.08 %)
+     and +5.9 % for 8192 at 32k. A 32k prompt splits into eight logical batches at
+     `-b 4096` and four at 8192, and each boundary costs something; at 4k there is
+     one batch either way. RESULTS §2 called `-b` inert, but measured it in the
+     `-rtr` path where CPU GEMM buried the difference.
+   * **Loading is not fitting.** `ub 6144` at n18 started cleanly, reported its
+     5280 MiB buffer, served a 4k prompt — and then died at 32k with a CUDA OOM in
+     `cuMemCreate` (`ggml-cuda.cu:469`), because the allocator grows on demand. Any
+     fit check has to run at depth. Note this is an OOM, **not** the NaN abort of
+     item 9.
+
+   The compute buffer follows 0.859 MiB per unit of `-ub` exactly, so what fits
+   can be computed: at n19 the free VRAM is 11 784 MiB, which is `-ub 12288` with
+   1229 MiB to spare — too thin given what happened to 6144. Hence n20 for 12288
+   and n21 for 16384, being swept now.
+4. ~~**Threads.**~~ **DONE 2026-08-17 — the two split cleanly, and the current
+   values are already right.**
+
+   | arm | pp 4k / 32k | tg 4k / 32k |
+   |---|---:|---:|
+   | `-t 24 -tb 24` (shipped) | 1334.3 / 1795.3 | 20.05 / **19.20** |
+   | `-t 24 -tb 8` | 1331.2 / 1794.7 | 20.05 / 19.09 |
+   | `-t 24 -tb 4` | 1315.9 / 1791.9 | 20.18 / 19.16 |
+   | `-t 8 -tb 24` | 1353.4 / 1801.5 | 19.23 / **18.04** |
+
+   **`-tb` is inert across 4 to 24** — 0.03 % at 32k between 24 and 8. That is a
+   third, independent confirmation of the mechanism: prefill genuinely does not
+   run on the CPU any more. §16 measured +32 % for more prefill threads in the
+   `-rtr` path; here the knob does nothing.
+
+   **`-t` still matters**: 8 threads costs 4.1 % of generation at 4k and 6.0 % at
+   32k. Decode ships little across the link, so host-side work still shows.
+
+   Practical note worth keeping: `-tb` can be dropped to 8 for free if the CPU is
+   wanted elsewhere while the server runs. Nothing is gained by it, but nothing is
+   lost either.
+
+**Before this can become the default:** the NaN-logits abort (item 9) was
+characterised entirely in the `-rtr` CPU path. `-ub 4096` here is far above the
+`-ub 2048` that aborts there, but it is a different code path and proves nothing
+either way. It needs its own soak — one abort per 100-330k prefilled tokens was
+the rate in the other path, and at ~1500 tok/s that band is reached in minutes.
 

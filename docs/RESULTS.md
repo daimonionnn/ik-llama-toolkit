@@ -771,6 +771,10 @@ anything acts on this.
 
 ## 11. Prefill: +69 % on MXFP4, with nothing given up (2026-08-12)
 
+> **PARTLY SUPERSEDED by §21.** The `-rtr` component of this win holds only at
+> small `-ub`. At `-ub 4096` on a gen5 x16 link, `-rtr` costs 64 % instead of
+> gaining 25 %, because it blocks GPU offload of the host-resident experts.
+
 Constraint for this whole section: **MXFP4 stays**. That rules out the IQ2XXS
 quant (fits entirely in VRAM, no CPU experts at all — almost certainly the
 fastest thing this box can do, but 2-bit) and `-ser` (changes output). Every
@@ -1288,6 +1292,10 @@ than a win — wrong way round for this box.
 
 ## 17. How much of prefill is CPU work? (what a faster CPU could buy)
 
+> **CORRECTED by §21.** The number below is real but describes the `-rtr` CPU
+> path, not the machine. With `-rtr` off the experts run on the GPU and this
+> share collapses. Do not use this section to justify buying a CPU.
+
 Measured 2026-08-14, prompted by the question of whether to change platform.
 §16 established that prefill is limited by the CPU rather than by memory; this
 puts a number on it, which is what bounds any CPU upgrade.
@@ -1581,4 +1589,184 @@ supports.
 managed at x8** (§18.1). The configuration that has never aborted is now also
 faster than the one that aborted six times. Whether `-ub 2048` would gain the
 same ~5 % is untested and not worth testing on the shipped profile.
+
+---
+
+## 21. `-rtr` was costing 3x prefill — two strategies, and we had picked the wrong one (2026-08-17)
+
+Prompted by a comparison the user ran: `multi-gpu-llm-toolkit` (upstream
+llama.cpp) reached **1565 tok/s at 4k** on the *same MXFP4 file*, against 478
+here. A 3x gap is not tuning, so something structural had to differ. It did.
+
+### 21.1 What the other toolkit does differently
+
+Its CUDA-only profile is `-c 131072 --n-cpu-moe 18 -b 8192 -ub 4096 -ngl 99 -fa on`
+— **more** expert layers in host RAM than ours (18 vs 17), and no `-nkvo`. Its own
+`doc/performance-model.md` states the mechanism plainly: with `--op-offload` on
+(the default) *llama.cpp does not compute CPU-hosted expert layers on the CPU —
+it ships them to the GPU*.
+
+ik_llama has the same machinery: `ggml-backend.cpp:2558` initialises the
+`op_offload` mask to `0xffffffff`, i.e. on for every op. **We were disabling it
+by accident.** `-rtr` repacks host-resident experts into `MXFP4_R8`, and that type
+exists only under `ggml/src/iqk/` — there is no CUDA kernel for it. A repacked
+tensor therefore cannot be offloaded, and the CPU must do the GEMM.
+
+So these are two strategies, not a flag and an improvement:
+
+| | `-rtr` + small `-ub` | no `-rtr` + large `-ub` |
+|---|---|---|
+| experts computed on | CPU, AVX2/VNNI | **GPU** |
+| crosses PCIe | activations | weights, amortised over the micro-batch |
+| sensitive to PCIe width | barely | strongly |
+| wins when | narrow link, strong CPU | wide link, strong GPU |
+
+### 21.2 Measured
+
+`tools/depthbench.sh`, `-rtr` off, `--n-cpu-moe 18`, `-b 8192 -ub 4096`, otherwise
+the shipped profile (`-nkvo` kept), gen5 x16:
+
+| depth | shipped (`-rtr`, ub 1024) | no `-rtr`, ub 4096 | factor | generation |
+|---:|---:|---:|---:|---|
+| 4 101 | 478.0 | **1 375.7** | 2.88x | 20.74 (was 21.70) |
+| 16 194 | — | **1 562.8** | — | 20.27 |
+| 32 701 | 486.4 | **1 529.0** | 3.14x | 19.55 (was 20.32) |
+| 127 981 | 436.7 | **1 145.4** | 2.62x | 17.58 (was 17.97) |
+
+Spreads 0.1-3.0 %. Generation is 1-4 % *lower* — a cheap price for 3x prefill.
+Nothing is traded on quality: same weights, same quant, same arithmetic, just
+executed on the other processor.
+
+This puts ik_llama at 88 % of the other toolkit at 4k and 90 % at 16k, with no
+tuning of this regime at all. The remaining gap is most likely `-nkvo`, which we
+still carry and they do not.
+
+### 21.3 What this invalidates
+
+Three earlier conclusions in this file were measured correctly and interpreted
+wrongly. They are left in place, with this section as the correction:
+
+* **§11: "`-rtr` is worth +25 % prefill".** True at `-ub 512`, where streaming
+  weights cannot amortise. At `-ub 4096` the same flag costs **-64 %**. It is a
+  regime, not a property.
+* **§17: "79-92 % of prefill is CPU work", and the CPU-upgrade advice built on
+  it.** The measurement was sound; the framing was not. That share was a
+  consequence of `-rtr` forcing the CPU path, not a property of the machine. The
+  honest answer to "would a faster CPU help?" turns out to be **no — stop using
+  `-rtr` instead**. The Amdahl ceiling derived there describes a configuration we
+  should not be running.
+* **§20's premise.** The PCIe x8 -> x16 change gave only +4.8 % *because* `-rtr`
+  had made prefill insensitive to the link. In this regime the link is central,
+  which is exactly why the other toolkit gained ~30 % from the same rewiring.
+
+There is a lesson worth keeping: every one of those measurements was repeatable
+and internally consistent, and all three still misled, because they characterised
+a self-inflicted constraint. A cross-check against a different tool on the same
+file found in one afternoon what a week of internal bisecting did not.
+
+### 21.4 Not yet done
+
+* `-nkvo` off, KV on the GPU, retuned `--n-cpu-moe` — the likely remaining 10 %.
+* The whole `-ub 2048` abort investigation (§19) was conducted in the `-rtr` CPU
+  path. Whether it reproduces in the streaming regime is unknown and must be
+  re-established before this becomes the default.
+* `--n-cpu-moe` and `-ub` want a fresh sweep here; 18/4096 was copied from the
+  other toolkit, not tuned.
+
+---
+
+## 22. Tuning the `gpu-experts` regime: 486 -> 1794 tok/s at 32k (2026-08-17)
+
+§21 found the regime; this is what four sweeps made of it. Every arm is a fresh
+server, `tools/sweep.sh`, two repeats, `max_tokens` 160, temperature 0, unique
+salt per request. Baseline reproduced across five independent runs to within
+0.7 % (1366.0 / 1370.8 / 1375.0 / 1375.7 at 4k), so differences above ~1 % are
+real.
+
+### 22.1 Result
+
+| | borrowed start | **tuned** |
+|---|---|---|
+| `--n-cpu-moe` | 18 | **19** |
+| `-ub` / `-b` | 4096 / 8192 | **8192 / 8192** |
+| `-nkvo` | on | on (forced, see 22.3) |
+| `-t` / `-tb` | 24 / 24 | 24 / 24 (already right) |
+
+| depth | kvram profile | gpu-experts, tuned | factor |
+|---:|---:|---:|---:|
+| 4 101 | 478.0 | 1 329.4 | **2.78x** |
+| 32 701 | 486.4 | **1 793.6** | **3.69x** |
+| 127 981 | 436.7 | 1 327.7 | **3.04x** |
+
+Generation is 3-7 % lower (19.98 / 19.14 / 17.20 against 21.70 / 20.32 / 17.97).
+
+### 22.2 `--n-cpu-moe` wants the floor, and the floor is set by `-ub`
+
+Monotonic, with no flattening: each layer pushed to host RAM costs **1.9 %
+prefill and 2.8 % generation** (n18 1528.4 -> n20 1457.4 -> n24 1353.6 at 32k).
+That is a different shape from §17, where the same knob cost ~102 us/token and
+the curve flattened above 19 — there the constraint was CPU GEMM, here it is
+bytes over the link every batch, so nothing saturates.
+
+Generation suffers more than prefill because a single decoded token has nothing
+to amortise the transfer over.
+
+### 22.3 `-nkvo` is not a choice here
+
+With the KV back on the GPU the compute buffer goes **3520 -> 28 992 MiB** at
+`-ub 4096` (8.24x — the attention scratch follows the KV home, the same ratio the
+kvram profile recorded at `-ub 512`). `--n-cpu-moe` 19, 20 and 22 all fail to
+load. Fitting it would need `-ub` under ~1150, which discards the amortisation
+the whole strategy rests on. `-amb 512` changes neither the allocation (identical
+28 992.18 MiB request) nor the speed (identical to baseline within 0.4 %); it does
+not reach this path.
+
+This explains the residual gap to `multi-gpu-llm-toolkit` rather than closing it.
+That toolkit fits `--n-cpu-moe 18` **with KV on the GPU** and `-ub 4096` in the
+same 96 GiB, so upstream's attention scratch is far smaller than ik_llama's. An
+engine difference, not a flag.
+
+### 22.4 `-ub` pays, `-b` pays only at depth, and neither can be trusted to fit
+
+| `-ub` / `-b` / `n` | pp 4k | pp 32k | pp 128k |
+|---|---:|---:|---:|
+| 2048 / 8192 / 18 | 1029.3 | 1122.6 | — |
+| 4096 / 8192 / 18 | **1370.8** | 1520.7 | 1145.4 |
+| 4096 / 4096 / 18 | 1371.9 | 1435.9 | — |
+| 6144 / 8192 / 18 | — | **OOM at depth** | — |
+| **8192 / 8192 / 19** | 1329.4 | **1793.6** | **1327.7** |
+| 12288 / 12288 / 20 | — | **OOM at depth** | — |
+| 16384 / 16384 / 21 | — | **OOM at depth** | — |
+
+* **The optimum depends on depth.** `-ub 4096` wins at 4k by 3.4 %; `-ub 8192`
+  wins by 17.3 % at 32k and 15.9 % at 128k. At 4k a 4101-token prompt is a single
+  micro-batch either way, so the larger value shows only its cost.
+* **`-b` matters, but only at depth** — 0.08 % at 4k, +5.9 % at 32k for 8192 over
+  4096, because a 32k prompt is four logical batches instead of eight. §2 called
+  `-b` inert; it measured the `-rtr` path, where CPU GEMM buried the difference.
+* **Loading is not fitting.** `-ub 6144` at n18 started, reported its 5280 MiB
+  buffer, served a 4k prompt, then died in `cuMemCreate` at 32k. The reported
+  compute buffer follows 0.859 MiB per unit of `-ub`, but the runtime allocator
+  wants far more: 12288 had 4493 MiB of computed headroom and still died, while
+  8192 survived on 4747. **Any fit check must run at depth**, which is why
+  `tools/sweep.sh` measures 32k and treats a mid-run death as a recorded result.
+  These are CUDA OOMs, not the NaN abort of §19.
+
+### 22.5 Threads split exactly along the mechanism
+
+`-tb` is **inert from 4 to 24** (0.03 % at 32k between 24 and 8) — a third
+independent confirmation that prefill no longer runs on the CPU, after §21's
+kernel reading and §20's PCIe sensitivity. §16 measured +32 % for prefill threads
+in the `-rtr` path; here the knob does nothing.
+
+`-t` still matters: 8 threads costs 4.1 % of generation at 4k and 6.0 % at 32k.
+Decode ships little across the link, so host-side work still shows. Both stay at
+24; `-tb` can be lowered to 8 for free if the CPU is wanted elsewhere.
+
+### 22.6 Still owed
+
+A stability soak. §19's six aborts were all in the `-rtr` path at `-ub 2048`;
+this profile is a different code path at `-ub 8192` and nothing is known about it.
+Until it has taken 300-500k prefilled tokens of real traffic without an abort, the
+kvram profile stays the shipped default.
 
