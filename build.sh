@@ -6,6 +6,10 @@
 #   ./build.sh --clean    wipe the build directory first
 #   ./build.sh --update   git pull, then rebuild from scratch
 #
+# --update warns first if the clone carries local source changes. It has to: the
+# clone is gitignored here, so a patch applied to it exists in no commit at all.
+# The re-appliable copies live in docs/external/*.patch.
+#
 # The awkward part on this box is CUDA: the RTX PRO 6000 Blackwell is compute
 # capability 12.0 (sm_120), and nvcc only learned that target in CUDA 12.8.
 # Ubuntu's default nvidia-cuda-toolkit is 12.4, which cannot emit code for this
@@ -196,6 +200,23 @@ Try: sudo apt install -y gcc-13 g++-13"
 # -----------------------------------------------------------------------------
 if [[ $UPDATE == 1 ]]; then
     log "updating ik_llama.cpp"
+
+    # The clone is gitignored by this repo, so any local patch lives ONLY in its
+    # working tree -- there is no commit anywhere that holds it. Currently that
+    # is the --cache-ram fix (docs/external/local-cache-limit.patch, RESULTS
+    # §31). `pull --ff-only` will not overwrite such a change silently: it stops
+    # if upstream touched the same file. But it stops with a message about the
+    # merge, not about the patch, which reads as a mystery unless you already
+    # know the patch is there. So say so first.
+    dirty=$(git -C "$IK_SRC" status --porcelain -- '*.c' '*.cpp' '*.h' '*.cu' '*.cuh')
+    if [[ -n $dirty ]]; then
+        warn "the clone carries local source changes, which no commit holds:"
+        while read -r line; do warn "  $line"; done <<< "$dirty"
+        warn "If the pull below aborts, upstream touched one of these. Recover with"
+        warn "  git -C $IK_SRC stash && ./build.sh --update"
+        warn "then re-apply from docs/external/*.patch -- check they still apply first."
+    fi
+
     git -C "$IK_SRC" pull --ff-only || die "git pull failed"
 fi
 
