@@ -65,6 +65,26 @@ Two of those three came from looking outside this repository. The full
 measurements, including the negative results and three conclusions that were
 measured correctly and read wrongly, are in [docs/RESULTS.md](docs/RESULTS.md).
 
+### Against a pair of DGX Sparks
+
+The popular way to run this model is 2× DGX Spark at TP=2. On **prefill this one
+card is in their band** — above the poorly-tuned FP8 runs, level with the good
+ones, below the NVFP4 record of 2639 tok/s. On **generation they win by 2–4×**,
+and it is structural rather than a tuning gap: each node holds half the model in
+unified memory at ~273 GB/s, against ~107 GB/s of DDR5 here for the experts that
+do not fit in VRAM.
+
+Two things are worth knowing before trusting any such comparison:
+
+* **Published 2× Spark prefill ranges from 176 to 2639 tok/s** — fifteen-fold, on
+  identical hardware. Quantisation, engine and tuning decide it, not the machine.
+* **The published figure for an RTX PRO 6000 is 344 tok/s**, measured with
+  `ds4.c` on a 2-bit quant. This repository gets **1830** out of the same card on
+  effectively lossless MXFP4 — 5.3× — so a hardware comparison drawn from that
+  number is wrong by more than the hardware difference it is trying to show.
+
+Tables and sources in [docs/COMPARISON.md](docs/COMPARISON.md).
+
 ---
 
 ## The reference machine
@@ -413,40 +433,60 @@ ik-llama-toolkit/
 ├── build.sh              compile ik_llama.cpp (CUDA + host compiler probing)
 ├── build-cuda12.sh       same, with CUDA 12.8 in a container (optional; see TUNING §9)
 ├── serve.sh              one-command server launch
-├── serve-deepseek-v4-flash-antirez-IQ2XXS-gpu-mtp-65k.sh
-│                         wrapper: DeepSeek IQ2XXS all-in-VRAM + MTP, ~87 tok/s
-├── serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh
-│                         wrapper: DeepSeek MXFP4, experts in DDR5, ~21 tok/s
-├── serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh
-├── serve-deepseek-v4-flash-mxfp4-gpu-experts-256k.sh
-├── serve-deepseek-v4-flash-mxfp4-kvram-128k.sh
-│                         wrapper: fast-prefill 128k variant, 484 tok/s pp
-├── serve-deepseek-v4-flash-mxfp4-gpu-experts-512k.sh
-│                         wrapper: DeepSeek MXFP4 at 512k, KV in RAM, ~16 tok/s
-├── serve-step-3.7-flash-q8.sh  wrapper: Step-3.7-Flash Q8 quality reference
 ├── stop.sh               stop any running server (any profile/port)
-├── TODO.md               open measurement threads (see RESULTS §8-§10)
-├── bench.sh              benchmark harness
+│
+│  DeepSeek MXFP4, experts computed ON THE GPU -- the tuned line (RESULTS §21-§29)
+├── serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh
+│                         the default: 1830 tok/s pp / 19.3 tg at 32k
+├── serve-deepseek-v4-flash-mxfp4-gpu-experts-256k.sh
+│                         1637 / 17.4 at 32k, checkpoints capped at 32 GiB
+├── serve-deepseek-v4-flash-mxfp4-gpu-experts-512k.sh
+│                         1721 / 16.3 at 32k, checkpoints off (they cost 28 % here)
+│
+│  Same model on the CPU path (-rtr). Kept as fallbacks: a different code path
+├── serve-deepseek-v4-flash-mxfp4-kvram-128k.sh      486 / 21.7 at 32k
+├── serve-deepseek-v4-flash-mxfp4-kvram-256k.sh
+├── serve-deepseek-v4-flash-mxfp4-kvram-mtp-128k.sh  27 tg at 4k -- MTP, the fastest
+├── serve-deepseek-v4-flash-mxfp4-kvram-mtp-256k.sh  generation here; will not
+│                                                    convert (RESULTS §27.4)
+├── serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh    --fit placement, unattended
+│
+│  Other models
+├── serve-deepseek-v4-flash-antirez-IQ2XXS-gpu-mtp-65k.sh
+│                         DeepSeek IQ2XXS all-in-VRAM + MTP, ~87 tok/s
+├── serve-step-3.7-flash-q8.sh    Step-3.7-Flash Q8, the quality reference
+│
+├── tools/                the measurement harness -- RESULTS §17 onwards is its output
+│   ├── depthbench.sh     prefill + generation vs prompt depth, one profile
+│   ├── sweep.sh          the same across configurations, one server per arm
+│   ├── stress.sh         drive short prompts hard, to reproduce the §19 abort fast
+│   └── ckpt-value.sh     do context checkpoints pay off on YOUR traffic? (§30)
+├── bench.sh              older llama-bench harness (§1-§16)
+│
 ├── config/
 │   ├── default.env       global defaults, fully annotated
-│   └── models/*.env      per-model profiles (q4, q4-r4, q8, deepseek-v4, mxfp4-tuned)
+│   └── models/*.env      per-model profiles
 ├── lib/common.sh         shared helpers: config, preflight, arg assembly
 ├── docs/
-│   ├── RESULTS.md        every measurement taken (Q4 + Q8)
-│   ├── FAQ.md            platform, portability, hardware bottlenecks
+│   ├── RESULTS.md        every measurement taken, including the negative ones
+│   ├── COMPARISON.md     this box against 2x DGX Spark and other published setups
 │   ├── TUNING.md         why every parameter is set the way it is
 │   ├── BENCHMARKING.md   how to measure and how to read the numbers
-│   └── TROUBLESHOOTING.md
+│   ├── FAQ.md            platform, portability, hardware bottlenecks
+│   ├── TROUBLESHOOTING.md
+│   └── external/         what was sent upstream, and every crash record
 ├── compat/               generated <math.h> shim (CUDA 13 + new glibc)
 ├── logs/                 server logs, timestamped
-├── results/              benchmark reports
-└── ik_llama.cpp/         upstream source (git clone)
+├── results/              benchmark reports (the 16 the docs cite are tracked)
+└── ik_llama.cpp/         upstream source (git clone, not vendored here)
 ```
 
 ---
 
 ## Further reading
 
+- [docs/COMPARISON.md](docs/COMPARISON.md) — how this box compares to 2× DGX
+  Spark and other published setups, and why those numbers vary fifteen-fold
 - [docs/RESULTS.md](docs/RESULTS.md) — every measurement taken for Q4 and Q8:
   the split sweeps, thread scaling, rtr/R4, PCIe, and the Q4-vs-Q8 comparison
 - [docs/FAQ.md](docs/FAQ.md) — platform & portability: other NVIDIA cards, AMD

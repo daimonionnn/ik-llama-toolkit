@@ -17,3 +17,9 @@ probabilities.txt
 # context excerpt saved with every abort, leaving the probabilities dump without
 # the log that explains it. Six of them were missing for exactly that reason.
 !docs/external/crashes/*.log
+
+# Local-only profiles: models that live on this machine but do not belong in a
+# public repository. They stay on disk and work exactly like any other profile;
+# they are simply never committed. Matt's call, 2026-08-19.
+config/models/deepseek-v4-flash-abliterated-128k.env
+serve-deepseek-v4-flash-abliterated-mxfp4-128k.sh
