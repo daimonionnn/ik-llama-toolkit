@@ -2007,3 +2007,439 @@ originally attributed its own interruption to the NaN abort; the server had in
 fact been stopped by hand. A dropped connection looks identical to a crash from
 the client side, so the tool no longer guesses — see the note in that file.
 
+---
+
+## 26. 256 GB DDR5-6400: no measurable speed, and the bandwidth law holds (2026-08-18)
+
+Third memory configuration on the same machine, same build, same profile, same
+tool. This one is 4 x 64 GB at 6400 MT/s, replacing 4 x 56 GB at 6267.
+
+| depth | 6267 (§20) | **6400** | delta | 7400 dual (§25) |
+|---:|---:|---:|---:|---:|
+| 4k | 1335.4 / 20.07 | **1354.8 / 20.05** | +1.5 % / 0 % | 1382.1 / 21.23 |
+| 16k | 1867.2 / 19.85 | **1888.0 / 19.84** | +1.1 % / 0 % | 1909.7 / 21.07 |
+| 32k | 1801.7 / 19.18 | **1802.1 / 19.18** | 0 % / 0 % | 1845.8 / 20.22 |
+| 128k | 1330.9 / 17.17 | **1335.1 / 17.14** | +0.3 % / -0.2 % | 1362.2 / 18.00 |
+
+Prefill +0.7 % on average, generation exactly zero. Both inside the noise floor,
+which is what §25's model predicted: 6400 against 6267 is +2 % of bandwidth, and
+only 44 % of the expert reads come from host RAM, so the ceiling on the gain was
+0.9 % before anything was measured.
+
+### 26.1 Three points now, and generation tracks bandwidth alone
+
+| MT/s | bandwidth | tg at 32k |
+|---:|---:|---:|
+| 6267 | 100.3 GB/s | 19.18 |
+| 6400 | 102.4 | **19.18** |
+| 7400 (dual DIMM) | 118.4 | 20.22 |
+
++2 % of bandwidth bought 0 %; +18 % bought 5.4 %. Nothing else in the memory
+configuration moved the number — not capacity, not rank count, not the move from
+four DIMMs to two. §12.1 says the same about latency from the other side: the
+tighter kit at the same 7400 measured within 1 % on every depth.
+
+**So for this workload, memory is a single-variable problem: MT/s.** CAS latency
+and capacity can be chosen freely, and what capacity buys is context and
+`--n-cpu-moe` headroom rather than speed.
+
+### 26.2 Stability
+
+`tools/stress.sh`, the shape that used to abort: **406 384 prefilled tokens, 84
+requests, 9 minutes, clean.** That is 1.2x the latest historical abort. Zero
+`Failed to sample`, zero CUDA errors, and zero machine checks or Xid events in
+the journal afterwards — the EDAC and rasdaemon lines at boot are the subsystem
+initialising, not faults. (One of them matches a naive `edac` grep only because
+"redaction" contains the string.)
+
+### 26.3 What 256 GB actually costs
+
+`free` reports 244.75 GiB, not 256, and the missing 11 GiB is accounted for:
+
+    physically installed   256.00 GiB
+    e820 usable            253.27 GiB   firmware took 2.73 (PCIe MMIO, ACPI, SMM)
+    after kernel reserve   244.43 GiB   kernel took 8.84
+    MemTotal               244.75 GiB
+
+The largest single item is visible in the kernel command line:
+`crashkernel=…,128G-:4096M` reserves **4 GiB** outright, plus 256 MB low, because
+the rule scales with installed RAM. The rest is mostly the `struct page` array —
+67 M pages at 64 bytes is ~4.3 GiB, and it grows with capacity by construction.
+
+`crashkernel=no` would return 4.25 GiB at the cost of kernel crash dumps. Worth
+knowing but not recommended by default; the practical ceiling is ~249 GiB.
+
+---
+
+## 27. Clearing the TODO backlog: two old mysteries were `-rtr` all along (2026-08-19)
+
+Five open items measured in one chain. Two of them turned out not to exist any
+more, one confirms something I had wrongly cast doubt on, one profile converts,
+and one refuses to.
+
+### 27.1 `-rtr` really does shrink the compute buffer (item 10 — CONFIRMED)
+
+Controlled this time: `--n-cpu-moe 18` and `-ub 2048` held fixed, only `-rtr`
+varying.
+
+| `-rtr` | GPU weights | compute buffer |
+|---:|---:|---:|
+| on | 89 366.93 MiB | **1 760.01 MiB** |
+| off | 89 366.93 MiB | **2 496.01 MiB** |
+
+Byte-identical weights, +736 MiB (+42 %) without the repack. **The original claim
+holds and my later doubt was wrong** — I had inferred from the `gpu-experts`
+profile reporting exactly `0.859 x -ub` without `-rtr` that the flag was
+irrelevant, but that reading came from a different `-ub`, `-b` and `--n-cpu-moe`,
+none of them controlled.
+
+§26.3 below explains the loose end that misled me: the per-unit rate is not a
+constant.
+
+### 27.2 The compute buffer scales with CONTEXT too, not only `-ub`
+
+Discovered while the 256k conversion kept running out of memory:
+
+| context | `-ub` | compute buffer | per unit |
+|---:|---:|---:|---:|
+| 131072 | 8192 | 7 040 MiB | 0.859 |
+| **262144** | 8192 | **11 136 MiB** | **1.359** |
+
+So §18.3's "0.859 MiB per unit of `-ub`" is a **131072-only** law. Any headroom
+arithmetic has to be redone per context, which is exactly the mistake that cost
+two OOM arms below.
+
+### 27.3 The 256k profile converts, and the trade is better than it looks (12.2)
+
+| depth | baseline `-rtr` n18 ub2048 | **gpu-experts n21 ub8192** | prefill | generation |
+|---:|---:|---:|---:|---:|
+| 4k | 451.2 / 20.29 | **1 100.6 / 18.12** | 2.44x | -10.7 % |
+| 32k | 468.2 / 19.32 | **1 636.9 / 17.43** | 3.50x | -9.8 % |
+| 128k | 429.3 / 17.11 | **1 258.8 / 15.67** | 2.93x | -8.4 % |
+
+The generation cost is roughly twice the 131072 profile's, and it is arithmetic
+rather than a property of streaming: n21 against n18 is three more expert layers
+in host RAM at §22.2's measured -2.8 % each, i.e. -8.4 % of the -10 %. The extra
+layers are what `-ub 8192` costs at this context.
+
+**Percentages mislead here.** On a 128k prompt:
+
+    prefill    298 s -> 102 s     saves 196 seconds
+    a 500-token answer  29.2 s -> 31.9 s     costs 2.7 seconds
+
+Three minutes of waiting for the first token against under three seconds of
+slower typing, on a profile that exists for long contexts. Shipped: `--n-cpu-moe 21`,
+`-ub 8192`, `-b 8192`.
+
+`--n-cpu-moe` 19 does not load and 20 dies at depth in `cuMemCreate`, both for the
+reason in §27.2.
+
+### 27.4 The MTP profiles cannot be converted — they do not fit (12.3)
+
+Both arms failed before producing a number: `n21` at `-ub 8192` would not load,
+`n20` at `-ub 4096` loaded and died at depth. CUDA OOM in both cases, not the NaN
+abort.
+
+The draft model is the reason, and I underestimated it: 5.5 GB of weights **plus
+its own KV cache** (`-cd 8192`), all resident in VRAM, leaving too little for a
+large micro-batch. I had expected this experiment to fail on generation; it fails
+one step earlier, on fitting.
+
+They stay on `-rtr`, and deservedly: MTP measures **27.01 tg at 4k and 26.51 at
+32k**, against 20.29 for the plain profile — **+33 %**, the highest generation
+recorded on this model. Trading that for prefill would defeat the point of the
+profile.
+
+### 27.5 The "dip band" is gone (item 4)
+
+§12 recorded generation collapsing to 14-15 t/s in a 1k-16k band, against 21-24
+outside it, and the mechanism was never found. Measured again in the streaming
+regime:
+
+| depth | 523 | 1 019 | 2 055 | 4 099 | 7 991 | 16 195 | 32 737 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| tg | 20.06 | 20.52 | 20.14 | 20.45 | 20.37 | 20.17 | 19.38 |
+
+Flat to within 2.3 % across the whole band. **The dip belonged to the `-rtr` CPU
+path.** Closed without ever being explained, because the configuration that caused
+it is no longer used.
+
+(Prefill peaked at 16 195 tokens with **1 912.2 tok/s**, the highest figure
+measured on this machine.)
+
+### 27.6 The 4-core anomaly does not reproduce (item 6)
+
+| `-t` | pp 4k | tg 4k | pp 32k | tg 32k |
+|---:|---:|---:|---:|---:|
+| 24 | 1365.8 | 20.39 | **1821.0** | 19.50 |
+| 16 | 1371.8 | **20.65** | 1761.6 | **20.50** |
+| 8 | 1375.7 | 19.65 | 1764.8 | 18.89 |
+| 4 | 1368.9 | 16.36 | 1761.8 | 15.84 |
+
+§16 measured 4 threads producing an unexplained **23.18 t/s** — higher than
+configurations with far more cores. Here generation falls monotonically as threads
+are removed, with no anomaly anywhere. Same verdict as §27.5: it was a property of
+the path that no longer runs.
+
+Prefill is flat across the whole range (1366-1376 at 4k), a fourth independent
+confirmation that it does not touch the CPU (§22.5).
+
+`-t 16` and `-t 24` are within noise of each other and neither is clearly better —
+16 wins generation at 32k, 24 wins prefill there. Left at 24.
+
+---
+
+## 28. The compute buffer is a max(), not a sum — and item 10 dissolves (2026-08-19)
+
+No new run: nine measurements already in the logs, sorted, answer the question
+§27.1 left open.
+
+| context | `-ub` | `-rtr` | measured | `rate x ub` | |
+|---:|---:|---:|---:|---:|---|
+| 131072 | 2048 | **on** | 1 760 | 1 760 | ✓ |
+| 131072 | 2048 | off | **2 496** | 1 760 | ✗ |
+| 131072 | 4096 | off | 3 520 | 3 520 | ✓ |
+| 131072 | 8192 | off | 7 040 | 7 040 | ✓ |
+| 131072 | 12288 | off | 10 560 | 10 555 | ✓ |
+| 131072 | 16384 | off | 14 080 | 14 073 | ✓ |
+| 262144 | 2048 | on | 2 784 | 2 783 | ✓ |
+| 262144 | 8192 | off | 11 136 | 11 133 | ✓ |
+
+Every point fits
+
+    compute buffer = max( rate(context) x ub , floor(-rtr) )
+
+with `rate` = 0.859 MiB/unit at 131072 and 1.359 at 262144, and a **floor of
+~2496 MiB that exists only when `-rtr` is off**.
+
+### 28.1 What that means
+
+**`-rtr` does not shrink the buffer.** Without it the GPU computes the
+host-resident experts (§21), which needs somewhere to stage those tensors — and
+staging space is a fixed size, independent of how many tokens are in the
+micro-batch. With `-rtr` those ops run on the CPU and the staging area is not
+needed at all.
+
+So this was never a separate phenomenon: it is §21's mechanism seen from the
+allocator's side.
+
+It also explains why the effect appeared and vanished depending on where one
+looked. At `-ub 2048` the floor (2496) exceeds the proportional term (1760) and
+`-rtr` is clearly visible; above `-ub` ~2900 the proportional term takes over and
+the two configurations report identical buffers. **That is exactly what misled me
+on 2026-08-17** into recording item 10 as doubtful: the comparison used
+`-ub 4096`, where the floor is invisible.
+
+### 28.2 What is left, and why it does not matter
+
+The floor's size (~2496 MiB) is not derived from anything, and whether it scales
+with context is unmeasured — there is no 262144 point at small `-ub` with `-rtr`
+off. Both are irrelevant in practice: every shipped profile runs `-ub` well above
+the crossover, so the floor never decides anything. Item 10 is closed on that
+basis rather than on a complete model.
+
+---
+
+## 29. The 512k profile: 5.3x prefill, and the two levers finally conflict (2026-08-19)
+
+Converted and swept the same way as the others. It is the largest gain measured
+on any single profile — and the first context where `-ub` and `--n-cpu-moe` cannot
+both have what they want.
+
+### 29.1 Result
+
+| depth | baseline `n19 ub512` | **tuned `n25 ub8192`** | factor |
+|---:|---:|---:|---:|
+| 4k | 309.9 / 20.34 | **1 068.9 / 16.91** | **3.4x** |
+| 32k | 323.1 / 19.26 | **1 721.3 / 16.26** | **5.3x** |
+| 128k | 301.7 / 17.32 | **1 334.9 / 14.86** | **4.4x** |
+
+The old profile's prefill was flat at 300-320 tok/s regardless of depth, which is
+what `-ub 512` does: the micro-batch is too small for the weight streaming to
+amortise over, so depth changes nothing.
+
+### 29.2 Where the levers fight
+
+At 524288 the compute buffer is **21 376 MiB at `-ub 8192`** — three times the
+131072 figure for the same batch. So a large micro-batch has to be paid for with
+expert layers pushed to host RAM, and both sides were measured:
+
+| arm | pp 4k / 32k / 128k | tg 4k / 32k / 128k |
+|---|---:|---:|
+| **n25 / ub 8192** | 1069 / **1721** / **1335** | 16.91 / 16.26 / 14.86 |
+| n22 / ub 4096 | **1112** / 1454 / 1141 | **18.54** / **17.71** / **16.06** |
+| n23 / ub 4096 | 1096 / 1429 / 1123 | 17.95 / 17.25 / 15.67 |
+
+`-ub 4096` wins generation by ~9 % and loses prefill by ~17 %. At 32k that is
+nearly a wash in wall-clock — 3.5 s of prefill against 2.6 s of answer — but the
+prefill difference scales with prompt length and the generation difference does
+not:
+
+    512k prompt:   prefill  383 s  vs  449 s     -> 66 s
+    500-token answer:        33.6 s vs 31.1 s    -> 2.5 s
+
+For a profile that exists to hold half a million tokens, that resolves in favour
+of the batch. **Shipped: `--n-cpu-moe 25`, `-ub 8192`, `-b 8192`.**
+
+n23 confirms §22.2's rule from the other side: at fixed `-ub`, fewer layers is
+strictly better (n22 beats n23 on both axes), so `--n-cpu-moe` belongs at the
+floor of what fits.
+
+### 29.3 The floor is higher than arithmetic predicts, again
+
+Predicted `n23`; measured that n22 and n23 do not load at all, and **n24 loads,
+serves 4k, then dies at 32k** with 6728 MiB of computed headroom. n25 leaves 9992
+and survives.
+
+The required headroom grows with context: 4747 MiB sufficed at 131072, 7176 at
+262144, and 6728 was not enough at 524288. §22.4's warning that "loading is not
+fitting" applies more strongly the longer the context.
+
+### 29.4 The buffer's growth is not linear, so 1M cannot be extrapolated
+
+| context | buffer at `-ub 8192` | per unit |
+|---:|---:|---:|
+| 131072 | 7 040 | 0.859 |
+| 262144 | 11 136 | 1.359 |
+| 524288 | **21 376** | **2.609** |
+
+The increments are 4 096 and 10 240 MiB — the second is 2.5x the first, so the
+two-point line fitted before this run **under-predicted 524288 by 10.6 %** and
+would under-predict 1 048 576 by more. Extrapolating the same slope suggests
+~41 900 MiB and `--n-cpu-moe` near 30, i.e. 30 of 43 layers in host RAM, but that
+is a guess resting on a curve that has already bent once. A 1M profile would have
+to be measured.
+
+### 29.5 An oddity worth recording
+
+At both 32k and 128k the 524288 profile out-prefills the 262144 one
+(1721 vs 1637, 1335 vs 1259) despite carrying four more expert layers in RAM,
+which §22.2 says should cost ~7.6 %.
+
+The plausible difference is that the 512k profile ships `-ctx-ckpt 0
+--cache-ram 0` — memory discipline for a context where a single checkpoint is
+~1744 MiB — so it never pauses to build checkpoints during prefill, while the 256k
+profile does. §11.3 measured what checkpoints buy on re-send; this suggests they
+also cost something to create. **Untested**: one run of the 256k profile with
+`-ctx-ckpt 0` would settle it.
+
+---
+
+## 30. Context checkpoints cost 11-27 % of prefill (2026-08-19)
+
+§29.5 noticed the 524288 profile out-prefilling the 262144 one despite carrying
+four more expert layers in host RAM, and guessed at checkpoints. It was
+checkpoints, and the size of the effect is larger than the anomaly that revealed
+it.
+
+### 30.1 Measured on `deepseek-v4-flash-gpu-experts-256k`
+
+| depth | checkpoints on | `-ctx-ckpt 0` | prefill | generation |
+|---:|---:|---:|---:|---:|
+| 4k | 1102.8 / 18.04 | **1398.4 / 19.66** | **+26.8 %** | +9.0 % |
+| 32k | 1635.5 / 17.40 | **1881.0 / 18.72** | **+15.0 %** | +7.6 % |
+| 128k | 1254.7 / 15.68 | **1396.1 / 16.90** | **+11.3 %** | +7.8 % |
+
+The control arm reproduced the profile's own figures to 0.2 %, so these are real.
+
+**The prompt cache is free.** A third arm with `-ctx-ckpt 0 --cache-ram 0`
+measured 1392.0 / 1872.2 / 1397.7 — identical to dropping checkpoints alone.
+Every bit of the cost is checkpoint creation; `--cache-ram` can stay on without
+paying anything for it.
+
+The prefill gain shrinks with depth (27 -> 15 -> 11 %) while the generation gain
+stays near 8 %. That fits the mechanism: a checkpoint is a fixed slab of copying
+(~872 MiB at 131072, ~1744 at 262144), so it is a large share of a shallow
+prompt's work and a smaller share of a deep one — while a token being generated
+pays the same toll however deep the context is.
+
+**1881 tok/s at 32k is the highest prefill measured on this machine**, higher
+than the 131072 profile's 1830 with checkpoints on. So this is not a 262144
+finding: every profile in the repository is paying it.
+
+### 30.2 What this does NOT mean
+
+It is not an argument for turning checkpoints off. `tools/depthbench.sh` salts
+every prompt uniquely so nothing is ever reused — by construction it measures
+their **cost with none of their benefit**.
+
+§11.3 measured the other side: checkpoints, not the prompt cache, are what make a
+re-send free. So the trade is
+
+* **cost** 11-27 % of prefill throughput on every prompt;
+* **benefit** up to 100 % of prefill on any prompt whose prefix repeats.
+
+For agent traffic — a fixed system prompt, a conversation that grows by one turn
+at a time — the prefix repeats constantly and the benefit is far larger than the
+toll. For one-shot passes over long documents that share nothing, checkpoints are
+pure loss.
+
+A rough decision rule: if more than about a fifth of prefilled tokens would be
+served from a checkpoint, keep them.
+
+### 30.3 Consequently
+
+Nothing is changed on that basis alone, because the answer depends on a workload
+property this repository has never measured — the actual prefix-reuse rate of
+Hermes traffic. That is now TODO item 14, and it is measurable from the server
+logs of a normal working day rather than by another benchmark.
+
+The one place the decision is already clear is the 524288 profile, which ships
+`-ctx-ckpt 0` for memory reasons (a checkpoint there is ~1744 MiB and 32 of them
+would be ~55 GiB). §29.5's "oddity" is now explained and is not an oddity: that
+profile was simply not paying a toll the others were.
+
+---
+
+## 31. Checkpoints at 524288 cost twice what they cost at 262144 (2026-08-19)
+
+§30 priced checkpoint creation on the 262144 profile. Repeated on 524288, where a
+checkpoint is 3487 MiB rather than 1743.
+
+| `-ctx-ckpt` | pp 4k | pp 32k | pp 128k | tg 32k |
+|---:|---:|---:|---:|---:|
+| **0** | **1060.4** | **1717.9** | **1330.6** | **16.42** |
+| 4 | 764.9 | 1352.7 | 1098.6 | 14.25 |
+| 8 | 769.1 | 1340.8 | 1098.1 | 14.34 |
+| 32 | 765.7 | 1343.3 | — | 14.26 |
+
+Cost of having them at all: **-27.9 % prefill at 4k, -21.3 % at 32k, -17.4 % at
+128k, and a flat -13 % of generation** at every depth. Roughly double §30's
+figures for 262144, which is what a checkpoint twice the size should cost.
+
+### 31.1 `-ctx-ckpt N` controls memory, not overhead
+
+4, 8 and 32 are indistinguishable — within 0.9 % on every one of the six points
+they share. An eightfold range in the limit changes nothing.
+
+So checkpoints are created on a fixed schedule and `N` only decides **how many are
+retained**. Lowering it to save time does not work; lowering it saves RAM. Since
+only 4.6 % of checkpoints are ever restored (§30.2 / TODO 14), a low N costs
+almost no hit rate — but it also buys no throughput.
+
+### 31.2 The 32-checkpoint arm OOM-killed the machine
+
+The `-ctx-ckpt 32` arm never finished its 128k point. At 524288, 32 checkpoints
+are 109 GiB; with 80.7 GiB of host weights and 21.5 of KV that is 211 GiB of 244,
+and the kernel took the server at **231 GiB RSS** — along with the user's editor:
+
+    Out of memory: Killed process 613298 (llama-server) anon-rss:242085500kB
+    app-code-18973.scope: Failed with result 'oom-kill'
+
+My own arithmetic had said 211 of 244 GiB "fits", and it does — **it fits the
+model, not the desktop**. A headroom calculation for a workstation has to leave
+room for the workstation. That arm should have carried a `--cache-ram` ceiling or
+not been run.
+
+### 31.3 What ships
+
+* **524288**: `-ctx-ckpt 0`. Double the cost of 262144 and a demonstrated memory
+  hazard, against a benefit that is no larger.
+* **262144**: checkpoints kept, with `--cache-ram 32768` added — roughly 19
+  checkpoints, ~32 GiB. They earn 8.4 : 1 on real traffic (TODO 14) and now have
+  the ceiling they always needed. That ceiling only works because of the local
+  patch in `docs/external/local-cache-limit.patch`; upstream does not enforce
+  `--cache-ram` when the cache holds a single prompt, which is the bug filed as a
+  comment on ikawrakow/ik_llama.cpp#2320.
+* **131072**: unchanged, checkpoints on at defaults.
+

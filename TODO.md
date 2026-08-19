@@ -22,7 +22,7 @@ checkpoints cost 24 % generation at this KV size (§12.1) — kept on regardless
 
 <details><summary>original item</summary>
 
-## 1. Apply the 512k findings to 262144 — the forgotten middle
+## 1 (historical). Apply the 512k findings to 262144 — the forgotten middle
 
 **Why.** 256k is the one context where none of today's work landed. The
 128k wrapper switches `--fit-margin` to 4096 only at `ctx <= 131072`; at 262144
@@ -78,7 +78,7 @@ profiles; the caches cost only 3.5 % at 32k depth (the 26 % figure was at 256k).
 
 <details><summary>original item</summary>
 
-## 3. Checkpoints or prompt cache — which one is the 26 %?
+## 3 (historical). Checkpoints or prompt cache — which one is the 26 %?
 
 **Why.** `-ctx-ckpt 0` and `--cache-ram 0` have only ever been measured
 **together** (§9.3: 54 GiB of RAM and +26 % generation at 256k; §10.4: 17.43 vs
@@ -98,7 +98,16 @@ trade and the wrappers should keep it on.
 
 ---
 
-## 4. The uncached-request dip — band mapped, mechanism still open
+## 4. ~~The uncached-request dip~~ — GONE 2026-08-19, it was `-rtr`
+
+> Re-measured in the `gpu-experts` regime across seven depths: generation is flat
+> at 20.06 / 20.52 / 20.14 / 20.45 / 20.37 / 20.17 / 19.38 from 523 to 32 737
+> tokens — 2.3 % spread where §12 recorded a collapse to 14-15 t/s. The dip
+> belonged to the CPU path and disappeared with it (RESULTS §27.5). Closed without
+> the mechanism ever being found, which is an acceptable ending for a symptom of a
+> configuration nobody runs any more.
+
+## 4 (historical). The uncached-request dip — band mapped, mechanism still open
 
 **Status 2026-08-12 (§12.2).** Both hypotheses died under measurement: the dip
 is indifferent to `-b` (2048 / 4096 / 8192 all dip identically at 4k), and
@@ -154,7 +163,13 @@ resident is 20.5 tok/s, 100 % is 72.6.
 
 ---
 
-## 6. The 4-P-core generation anomaly
+## 6. ~~The 4-P-core generation anomaly~~ — DOES NOT REPRODUCE 2026-08-19
+
+> `-t` 24 / 16 / 8 / 4 in the `gpu-experts` regime gives 20.39 / 20.65 / 19.65 /
+> 16.36 tg at 4k — monotonic, no anomaly. §16's unexplained 23.18 t/s at four
+> threads was, like item 4, a property of the `-rtr` path (RESULTS §27.6).
+
+## 6 (historical). The 4-P-core generation anomaly
 
 **Why.** §16.2's reading — generation is hurt by heterogeneous cores, because
 ggml waits for the slowest thread at every barrier — explains seven of eight
@@ -189,7 +204,21 @@ checkout moved to upstream.
 
 ---
 
-## 8. Offline `_R4` repack for MXFP4
+## 8. ~~Offline `_R4` repack for MXFP4~~ — OBSOLETE 2026-08-17, wrong direction
+
+> §21 settled this by accident. `_R4` types have **no CUDA kernel at all** (0 files
+> under `ggml/src/ggml-cuda/`, 7 under `ggml/src/iqk/`), so baking a repack into
+> the file does not merely trade disk for load time — it **pins those experts to
+> the CPU permanently**, which is the strategy that lost 3x on this machine.
+>
+> The existing `step-3.7-flash-q4-r4` profile is the same trap already sprung: it
+> runs `-rtr 0` and still computes on the CPU, because the repack is in the file.
+> Its 114 GB GGUF is a candidate for deletion (see item 12).
+>
+> Original reasoning below; it was sound about disk and load time, and simply did
+> not know that the choice of layout is also the choice of processor.
+
+## 8 (historical). Offline `_R4` repack for MXFP4
 
 Every kvram profile carries `-rtr`, which forces `--no-mmap` and re-reads the
 model at every start (~30 s warm here, minutes cold). §1.7 shows the gain can be
@@ -479,15 +508,32 @@ Next, in order:
 
 ---
 
-## 10. Why does `-rtr` shrink the CUDA compute buffer?
+## 10. ~~Why does `-rtr` shrink the CUDA compute buffer?~~ — ANSWERED 2026-08-19
 
-> **DOUBTFUL as stated, 2026-08-17.** The `gpu-experts` profile runs *without*
-> `-rtr` at `-ub 4096` and reports a 3520.02 MiB compute buffer — which is exactly
-> `0.859 x 4096`, the same per-unit rate measured *with* `-rtr` (§18.3). So `-rtr`
-> does not shrink the buffer in general. The 1760-vs-2496 pair below was measured
-> at `--n-cpu-moe` 17 vs 18 as well, so placement is a confound that was not
-> controlled. Re-measure at fixed `-ub` and fixed `-ncmoe` before treating this as
-> real.
+> **It does not.** Nine measurements already in the logs fit
+> `buffer = max(rate(context) x ub, floor(-rtr))`, with rate 0.859 MiB/unit at
+> 131072 and 1.359 at 262144, and a ~2496 MiB floor present only when `-rtr` is
+> off. That floor is staging space for the expert tensors the GPU computes once
+> the repack is not pinning them to the CPU — §21's mechanism seen from the
+> allocator (RESULTS §28).
+>
+> It also explains why the effect kept appearing and vanishing: at `-ub 2048` the
+> floor exceeds the proportional term and is visible; above `-ub` ~2900 it is not.
+> Every shipped profile runs well above that crossover, so the floor never decides
+> anything, and the question is closed without modelling its exact size.
+
+> **2026-08-19: the effect is real and my doubt was wrong.** Controlled at fixed
+> `--n-cpu-moe 18` and `-ub 2048`, byte-identical weights: **1760.01 MiB with
+> `-rtr`, 2496.01 without**, +42 %. The "DOUBTFUL" note added on 2026-08-17 was
+> based on an uncontrolled comparison and has been removed.
+>
+> What that investigation did turn up is that the buffer scales with **context**
+> as well as `-ub`: 7040 MiB at 131072 against 11 136 at 262144, same `-ub 8192`.
+> So §18.3's 0.859 MiB-per-unit is a 131072-only law (RESULTS §27.2).
+>
+> Still open: *why* the repack changes the CUDA graph's scratch at all, when the
+> tensors it rewrites live on the host.
+
 
 Discovered while setting up bisect step 3 for item 9, and not something the
 profile's own documentation predicted.
@@ -518,7 +564,16 @@ should say so plainly.
 
 ---
 
-## 11. Tune the `gpu-experts` regime — it starts 3x ahead and untuned
+## 11. ~~Tune the `gpu-experts` regime~~ — DONE 2026-08-17, one thing owed
+
+> All four steps are complete and shipped: `-nkvo` cannot be dropped (§22.3),
+> `--n-cpu-moe` wants the floor at 19 (§22.2), `-ub 8192` / `-b 8192` is worth
+> +17 % at depth (§22.4), threads were already right (§22.5). The 262144 profile
+> was converted the same way on 2026-08-19 (§27.3).
+>
+> What is still owed is not tuning but the stability soak, which is item 9.
+
+## 11 (historical). Tune the `gpu-experts` regime — it starts 3x ahead and untuned
 
 New profile `deepseek-v4-flash-gpu-experts-128k` (RESULTS §21). Experts stay in
 host RAM but are computed **on the GPU**, which is what happens as soon as `-rtr`
@@ -652,4 +707,191 @@ characterised entirely in the `-rtr` CPU path. `-ub 4096` here is far above the
 `-ub 2048` that aborts there, but it is a different code path and proves nothing
 either way. It needs its own soak — one abort per 100-330k prefilled tokens was
 the rate in the other path, and at ~1500 tok/s that band is reached in minutes.
+
+---
+
+## 12. Unfinished measurements — one answered since, two need re-planning
+
+Each of these got exactly one data point before the session running it went away.
+**The machine has since changed twice**, so this is not simply "resume": the RAM
+went 122 -> 91 -> 244 GiB, which moves every headroom figure the plans below were
+built on. Re-derive before running.
+
+All three need the GPU for roughly an hour in total, and each got exactly one
+data point before the session that started it went away. The single points are
+recorded so nobody re-derives them, but none of them decides anything.
+
+### 12.1 ~~Does RAM latency matter?~~ — ANSWERED, and the kit is gone
+
+**Answered by §26 rather than by finishing this run.** Three bandwidth points on
+the same machine now say generation tracks MT/s and nothing else:
+
+| MT/s | bandwidth | tg at 32k |
+|---:|---:|---:|
+| 6267 | 100.3 GB/s | 19.18 |
+| 6400 | 102.4 | **19.18** |
+| 7400 (dual DIMM) | 118.4 | 20.22 |
+
++2 % of bandwidth bought 0 %; +18 % bought 5.4 %. Capacity, rank count and the
+move from four DIMMs to two changed nothing on their own.
+
+The two partial readings taken on the tight-timing kit agree: 4k came out at
+1356.6 pp / 21.08 tg on one attempt and 1384.4 / 21.39 on the next, against
+1382.1 / 21.23 for the looser kit at the same 7400 — i.e. **the two runs of the
+same kit differ by more than the two kits differ**, which is what "no effect"
+looks like.
+
+Cannot be finished as designed regardless: that kit is no longer in the machine.
+If it ever matters, the honest version needs both kits present and several
+repeats, because the effect being looked for is smaller than the noise.
+
+**Practical conclusion for buying memory for this workload: MT/s is the only
+number that matters.** CAS can be ignored; capacity buys context and
+`--n-cpu-moe` headroom, not speed.
+
+### 12.2 ~~Convert the 256k profile~~ — DONE 2026-08-19, shipped at n21 / ub 8192
+
+`deepseek-v4-flash-256k-kvram` still runs `-rtr 1` at `--n-cpu-moe 18`,
+`-ub 2048` — the CPU path. Same model and quant as the 128k profile, which gained
+**3.7x** from the conversion (§21), so this is the largest unclaimed win in the
+repository.
+
+Baseline measured before the interruption: **4k -> 455.8 pp / 21.17 tg**.
+
+**The VRAM headroom below still holds** — it is a function of the card, not the
+system RAM — but the *host* side has changed completely. These arms were planned
+when the machine had 91 GiB and `--n-cpu-moe` was capped by system memory as much
+as by VRAM. At 244 GiB that constraint is gone: even `--n-cpu-moe 24` (76.5 GiB of
+host weights) leaves ~165 GiB free, so the sweep can go higher than planned if the
+VRAM side allows it.
+
+Host weights follow `1010 + n * 3264` MiB, so at `-ub 8192` (compute buffer 7040):
+
+| `--n-cpu-moe` | free VRAM | spare |
+|---:|---:|---:|
+| 18 | 8 520 | 1 480 — too thin |
+| 19 | 11 784 | 4 744 — exactly what survived at 128k |
+| 20 | 15 048 | 8 008 |
+| 21 | 18 312 | 11 272 |
+
+    ./tools/sweep.sh deepseek-v4-flash-256k-kvram 4096,32768,128000 \
+        "baseline rtr n18 ub2048:" \
+        "gpu-experts n19 ub8192:IK_RTR=0,IK_NCMOE=19,IK_UBATCH=8192,IK_BATCH=8192,IK_EXTRA_ARGS=-mla 3 -fidx --reasoning-format deepseek -nkvo" \
+        "gpu-experts n20 ub8192:…" "gpu-experts n21 ub8192:…"
+
+### 12.3 ~~The MTP variants~~ — DONE 2026-08-19, they do not fit (RESULTS §27.4)
+
+`deepseek-v4-flash-128k-kvram-mtp` and `-256k-kvram-mtp` also carry `-rtr 1`.
+Converting them is worth testing but **the hypothesis is different**: they exist
+for speculative decoding, i.e. for *generation*, and `gpu-experts` costs 3-7 % of
+generation while buying prefill (§21). So the conversion may improve the axis
+these profiles do not care about and damage the one they do.
+
+Judge them on **tg, not pp**. If tg drops, leave them on `-rtr` and say so in the
+profile, which is a useful result rather than a failed one.
+
+Two things to recompute first, both learned the hard way:
+
+* the draft model is 5.5 GB and sits in VRAM (`-ngld 99`), so it comes off the
+  headroom before the compute buffer does. At `-ub 8192` that pushes the floor to
+  `--n-cpu-moe 21`, not 19 — plan an arm at `-ub 4096` too, in case 8192 will not
+  fit at all.
+* do **not** override `IK_EXTRA_ARGS` for these arms. It carries
+  `--spec-type mtp:n_max=1,p_min=0.0`, which contains a comma, and `sweep.sh`
+  splits overrides on commas — the result would quietly be a run with no
+  speculative decoding at all, measured as if it were MTP.
+
+### 12.4 Also open: delete the 114 GB `_R4` GGUF?
+
+`step-3.7-flash-q4-r4` needs `Step-3.7-Flash-UD-Q4_K_XL-R4-*.gguf`, 114 GB, beside
+the 114 GB non-R4 file that `step-3.7-flash-q4` uses — the same model twice,
+differing only in weight layout. On this hardware the R4 copy is dominated (item
+8), so the disk is arguably wasted. Not deleted: it is irreversible and a repack
+costs hours. Matt's call.
+
+---
+
+## 13. ~~Do context checkpoints cost prefill throughput?~~ — YES, 11-27 % (RESULTS §30)
+
+> Measured on the 262144 profile: `-ctx-ckpt 0` is worth +26.8 % prefill at 4k,
+> +15.0 % at 32k, +11.3 % at 128k, and ~8 % of generation at every depth. A third
+> arm showed the **prompt cache costs nothing** — the whole toll is checkpoint
+> creation.
+>
+> Not acted on, because `depthbench` salts every prompt and therefore measures the
+> cost with none of the benefit (§11.3: checkpoints are what make a re-send free).
+> Whether to keep them depends on prefix-reuse rate — see item 14.
+
+## 13 (historical). Do context checkpoints cost prefill throughput?
+
+§29.5 noticed that the 524288 profile out-prefills the 262144 one at both 32k and
+128k (1721 vs 1637, 1335 vs 1259) **despite four more expert layers in host RAM**,
+which §22.2 prices at ~7.6 %. Something is paying that back and then some.
+
+The one configuration difference is that the 512k profile ships `-ctx-ckpt 0
+--cache-ram 0` while the 256k profile leaves both on. Building a checkpoint is
+~872 MiB of copying at 131072 and ~1744 at 262144, and it happens during prefill.
+
+**One run settles it**: the 256k profile with `-ctx-ckpt 0` added, against its own
+current numbers. If prefill jumps, checkpoints have a throughput cost that §11.3
+never measured — it only measured what they buy on a re-send — and every profile's
+`-ctx-ckpt` becomes a real trade rather than a default.
+
+---
+
+## 14. ~~Prefix-reuse rate of Hermes traffic~~ — ANSWERED 2026-08-19, keep checkpoints
+
+> `tools/ckpt-value.sh` (new) prices the trade in seconds off the server's own log.
+> Two real Hermes runs:
+>
+>     created  372  costing  117.7 s
+>     restored  17  costing    1.1 s
+>     prefill avoided  609 870 tokens = 1105.6 s
+>     net  +987 s
+>
+> Only **4.6 % of checkpoints are ever used** — but creation is cheap and constant
+> (~320 ms) while a restore returns work proportional to depth (one recovered
+> 52 655 tokens, over 90 s of prefill). The ratio is 8.4 : 1 in favour of keeping
+> them, so §30's cost figure must not be acted on alone: `depthbench` salts every
+> prompt and measures the cost with none of the benefit.
+>
+> **Nothing changed.** A trap worth recording: summing `n_past_prompt` gives 75.3 %
+> "reuse", which is the wrong measure — ordinary conversation continuation reuses
+> the slot's KV for free and needs no checkpoint. The source only consults
+> checkpoints on prompt *divergence*, so only `restored context checkpoint` lines
+> count.
+
+§30 turned `-ctx-ckpt` into a real trade rather than a default: checkpoints cost
+11-27 % of prefill throughput and ~8 % of generation, and buy up to 100 % of
+prefill back on any prompt whose prefix repeats. Which side wins is a property of
+the workload, and this repository has never measured it.
+
+It does not need a benchmark. A normal working day's `logs/server-*.log` already
+contains it — every request logs `n_past_prompt` (how much of the prompt was
+already resident) against `prompt_n` (how much had to be prefilled). The ratio
+over a day is the answer.
+
+    reuse rate > ~20 %  ->  keep checkpoints, they pay for themselves
+    reuse rate < ~20 %  ->  -ctx-ckpt 0 on every profile, worth 11-27 % prefill
+
+Worth doing on real Hermes traffic rather than a synthetic run, since the whole
+question is about how much agent conversations actually share.
+
+---
+
+## 15. Give 131072 the same `--cache-ram` ceiling as 262144?
+
+§31.3 added `--cache-ram 32768` to the 262144 profile after a 524288 arm with no
+ceiling reached 231 GiB RSS and was OOM-killed along with the editor. The 131072
+profile still runs the upstream default of 8192 MiB, which upstream does not
+enforce when the cache holds one prompt (that is the #2320 bug our local patch
+fixes).
+
+At 131072 a checkpoint is 872 MiB, so the default 32 authorises ~27 GiB. That is
+survivable on 244 GiB and has never caused trouble, so this is tidiness rather
+than urgency — but the profile currently relies on the workload never filling it,
+which is the same assumption that failed at 524288.
+
+Cheap to settle: pick a ceiling that keeps ~19 checkpoints (~16 GiB) and confirm
+with `tools/ckpt-value.sh` that the restore rate does not fall.
 

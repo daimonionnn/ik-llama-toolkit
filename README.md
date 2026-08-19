@@ -220,7 +220,7 @@ VRAM at launch. Starting with 20 GiB free instead of 95 GiB silently pushes
 ./serve-deepseek-v4-flash-mxfp4-kvram-mtp-128k.sh         # same, MTP: 24 tok/s tg, less prefill
 ./serve-deepseek-v4-flash-mxfp4-kvram-256k.sh             # same treatment at 256k: 406 pp
 ./serve-deepseek-v4-flash-mxfp4-kvram-mtp-256k.sh         # 256k + MTP: 20.5 tok/s tg (+26 %)
-./serve-deepseek-v4-flash-mxfp4-gpu-cpu-512k.sh           # half-million ctx, KV in RAM, ~16 tok/s
+./serve-deepseek-v4-flash-mxfp4-gpu-experts-512k.sh       # half-million ctx: 1721 tok/s pp at 32k
 ./serve-step-3.7-flash-q8.sh            # Step-3.7-Flash Q8_K_XL quality reference, ~13 tok/s
 ./serve.sh --list                       # what profiles exist
 ./serve.sh --ctx 131072                 # override context length
@@ -244,6 +244,14 @@ any `serve.sh` flag. Their names spell out quant, placement and context:
   **entirely on the GPU** (no DDR5 spill) with a 5.5 GiB MTP draft on top:
   **~87 tok/s at 65536 ctx**, the fastest coherent DeepSeek config here. 131072
   does not fit alongside the draft.
+- **`serve-deepseek-v4-flash-mxfp4-gpu-experts-256k.sh`** →
+  `serve.sh deepseek-v4-flash-gpu-experts-256k`. The 262144 sibling of the wrapper
+  below, converted 2026-08-19: **1101 / 1637 / 1259 tok/s prefill at 4k / 32k /
+  128k**, 2.4–3.5× the `-rtr` version it replaces, for ~10 % less generation
+  (RESULTS §27.3). Needs `--n-cpu-moe 21` rather than 19, because the compute
+  buffer scales with context as well as micro-batch — 11 136 MiB here against
+  7040 at 131072 (§27.2). `deepseek-v4-flash-256k-kvram` is the same context on
+  the `-rtr` path, kept as the fallback.
 - **`serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh`** →
   `serve.sh deepseek-v4-flash-gpu-experts-128k`. **A different principle from
   every other wrapper here.** The others decide where weights *live*; this decides
@@ -278,7 +286,7 @@ any `serve.sh` flag. Their names spell out quant, placement and context:
   21.3 / 499 without (RESULTS §14). A straight prefill-for-generation swap on
   identical weights — long prompts want the wrapper above, long answers want
   this one.
-- **`serve-deepseek-v4-flash-mxfp4-gpu-cpu-512k.sh`** → `serve.sh deepseek-v4-flash-512k`.
+- **`serve-deepseek-v4-flash-mxfp4-gpu-experts-512k.sh`** → `serve.sh deepseek-v4-flash-512k`.
   The same quant at **524288 context**, with the placement inverted: the KV goes
   to RAM (`-nkvo`) and the VRAM it frees goes to experts (`--n-cpu-moe 19`,
   no `--fit`). Worth **+22 % generation and +35 % prefill** over `--fit` at that
@@ -374,9 +382,10 @@ ik-llama-toolkit/
 ├── serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh
 │                         wrapper: DeepSeek MXFP4, experts in DDR5, ~21 tok/s
 ├── serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh
+├── serve-deepseek-v4-flash-mxfp4-gpu-experts-256k.sh
 ├── serve-deepseek-v4-flash-mxfp4-kvram-128k.sh
 │                         wrapper: fast-prefill 128k variant, 484 tok/s pp
-├── serve-deepseek-v4-flash-mxfp4-gpu-cpu-512k.sh
+├── serve-deepseek-v4-flash-mxfp4-gpu-experts-512k.sh
 │                         wrapper: DeepSeek MXFP4 at 512k, KV in RAM, ~16 tok/s
 ├── serve-step-3.7-flash-q8.sh  wrapper: Step-3.7-Flash Q8 quality reference
 ├── stop.sh               stop any running server (any profile/port)

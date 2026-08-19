@@ -65,6 +65,18 @@ for arm in "$@"; do
         sleep 5
     done
 
+    # -ub above -b is clamped down SILENTLY, so an arm can measure a different
+    # configuration than its label claims. This cost one wasted sweep on
+    # 2026-08-19: a profile with no IK_BATCH line inherited -b 4096 from
+    # default.env and quietly ran -ub 8192 as 4096, ~20 % of prefill at depth.
+    if [ "$ok" -eq 0 ]; then
+        want_ub=$(sed -n 's/.*IK_UBATCH=\([0-9]*\).*/\1/p' <<< "$vars")
+        got_ub=$(grep -aoE 'n_ubatch += [0-9]+' "$log" | head -1 | grep -oE '[0-9]+$')
+        if [ -n "$want_ub" ] && [ "$want_ub" != "$got_ub" ]; then
+            echo "  $label: WARNING asked for -ub $want_ub, server reports $got_ub (clamped by -b?)"
+        fi
+    fi
+
     if [ "$ok" -ne 0 ]; then
         reason=$(grep -aoE 'out of memory|failed to allocate[^,]*|unknown argument[^ ]*' "$log" | head -1)
         printf '| %s | %s | — | — | %s |\n' "$label" "${vars:-(profile defaults)}" \

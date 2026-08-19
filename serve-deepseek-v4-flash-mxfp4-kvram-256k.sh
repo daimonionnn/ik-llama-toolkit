@@ -17,7 +17,7 @@
 #     this one     402.5 pp / 13.38 tg      +73 % prefill, +8 % generation
 #
 # Pick by window: 131072 is enough -> the kvram-128k wrapper is faster still
-# (484 pp / 21 tg). Need more than 262144 -> the gpu-cpu-512k wrapper.
+# (484 pp / 21 tg). Need more than 262144 -> the gpu-experts-512k wrapper.
 # Robustness caveats as ever with kvram: manual placement (~3 GiB VRAM free),
 # and -rtr re-reads the model at every start.
 #

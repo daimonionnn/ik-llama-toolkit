@@ -261,3 +261,30 @@ Upstream references:
 
 - [`ik_llama.cpp/docs/parameters.md`](../ik_llama.cpp/docs/parameters.md) — every flag
 - [ik_llama.cpp issues](https://github.com/ikawrakow/ik_llama.cpp/issues)
+
+### PCIe AER "Receiver Error" bursts on port `80:1d.4` — expected, not a fault
+
+`ras-mc-ctl --summary` reports thousands of corrected PCIe errors, mostly
+`Receiver Error`, on PCH Root Port #13. Counts climb day over day (7 -> 59 -> 25
+-> 356 -> 469 -> 1213 across 2026-08-14..19), which looks alarming.
+
+**It is the eGPU cable, and it is benign.** Behind that port is the Radeon AI PRO
+R9700, which is not in the motherboard at all: it sits in a Minisforum DEG2
+external box, reached over a ~0.6 m OCuLink cable. At PCIe 4.0 that length is
+marginal — the signal crosses a board connector, the cable, and a second
+connector, and each one spends margin. The jump on 2026-08-17 is the day the card
+was moved there.
+
+Why it is not worth chasing:
+
+* the errors are **corrected** — the link retries and the data arrives; the only
+  cost is a little bandwidth on a link this toolkit never uses, since the build is
+  CUDA-only and never touches the AMD card;
+* they appear at idle too, because a PCIe link exchanges DLLPs continuously;
+* `ras-mc-ctl --errors` says **"No Memory errors"** throughout, including under a
+  DDR5 overclock — so these say nothing about RAM stability, which is the reason
+  one usually runs that tool here.
+
+If it ever needs reducing without buying a case: a shorter cable helps more than
+anything else, and the port can be pinned to gen3 to widen the margin.
+
