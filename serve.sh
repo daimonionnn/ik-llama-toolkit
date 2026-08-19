@@ -94,8 +94,58 @@ LOG_FILE="$LOG_DIR/server-$(date +%Y%m%d-%H%M%S).log"
 log "logging to $LOG_FILE"
 echo >&2
 
+# --- IK_GDB: run under gdb so an abort leaves a backtrace ---------------------
+# The NaN-logits abort (RESULTS §19, §32) has fired nine times and not once left
+# a stack trace, which is most of why it is still open.
+#
+# The reason is not that ggml does not try. GGML_ABORT calls ggml_print_backtrace,
+# which forks and runs `gdb --batch -ex "attach <parent pid>"` -- a CHILD
+# attaching to its PARENT. Yama's ptrace_scope=1 (the default on Ubuntu, and what
+# this box runs) permits tracing only descendants, so it is refused. gdb then
+# reports it as "ptrace: Inappropriate ioctl for device", which is an Ubuntu patch
+# clobbering errno to ENOTTY before perror -- the real error is EPERM.
+#
+# ggml has a fallback for exactly this, backtrace_symbols_fd, gated on gdb exiting
+# EXIT_FAILURE. Measured: gdb exits 0 after a refused attach. So the fallback never
+# runs, and on any ptrace_scope=1 system the abort prints no backtrace at all.
+#
+# Starting the server UNDER gdb inverts the relationship -- gdb is the parent, and
+# Yama has no objection. No root, and no loosening ptrace_scope machine-wide.
+#
+# gdb sits waiting for the whole run, so the expected cost is nothing until
+# something aborts -- but that is an expectation, NOT a measurement: ptrace does
+# intercept signals and thread creation. If a benchmark here ever disagrees with a
+# stored result by more than the ~2 % noise floor, check this first, and note that
+# tools/ all go through serve.sh so they inherit it too.
+#
+# Set IK_GDB=0 to turn it off.
+: "${IK_GDB:=1}"
+GDB_PREFIX=()
+if [[ ${IK_GDB} == 1 ]]; then
+    if command -v gdb >/dev/null 2>&1; then
+        # SIGTERM must pass STRAIGHT through. Without the handle, stop.sh leaves a
+        # full backtrace in every log -- gdb stops on the signal, runs the bt
+        # commands, then kills the inferior, so an ordinary stop is indistinguishable
+        # from a crash at a glance and the server never runs its shutdown path.
+        # Verified both ways: abort still yields the stack, stop yields none.
+        GDB_PREFIX=(gdb --batch
+            -ex "set confirm off"
+            -ex "set debuginfod enabled off"
+            -ex "handle SIGINT nostop pass noprint"
+            -ex "handle SIGTERM nostop pass noprint"
+            -ex run
+            -ex "bt -frame-info source-and-location"
+            -ex "thread apply all bt"
+            -ex quit --args)
+        log "running under gdb: an abort will leave a backtrace in the log (IK_GDB=0 disables)"
+    else
+        warn "IK_GDB=1 but gdb is not installed -- an abort will leave no backtrace"
+        warn "  sudo apt install gdb"
+    fi
+fi
+
 # Piped through tee so the run is logged; PIPESTATUS carries the server's own
 # exit code rather than tee's.
 # shellcheck disable=SC2086
-${PIN:+$PIN} "$SERVER" "${SERVER_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
+${PIN:+$PIN} "${GDB_PREFIX[@]}" "$SERVER" "${SERVER_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
 exit "${PIPESTATUS[0]}"

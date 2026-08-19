@@ -227,10 +227,17 @@ fi
 
 JOBS="${IK_BUILD_JOBS:-$(nproc)}"
 
+# RelWithDebInfo is Release plus -g: same optimisation, same speed, but the
+# binary carries line numbers. That matters here because the NaN abort (RESULTS
+# §32) is open and serve.sh now runs the server under gdb to catch its stack --
+# and a stripped Release build gives function names only, no lines. Set
+# IK_BUILD_TYPE=Release to go back to the smaller binary.
+: "${IK_BUILD_TYPE:=RelWithDebInfo}"
+
 CMAKE_ARGS=(
     -S "$IK_SRC"
     -B "$IK_BUILD"
-    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_BUILD_TYPE="$IK_BUILD_TYPE"
     -DGGML_CUDA=ON
     -DCMAKE_CUDA_ARCHITECTURES="$IK_CUDA_ARCH"
     -DCMAKE_CUDA_COMPILER="$NVCC"
