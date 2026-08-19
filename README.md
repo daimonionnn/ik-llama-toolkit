@@ -31,6 +31,42 @@ Docker containers tend to occupy — override with `--port` if you prefer.)
 
 ---
 
+## What tuning bought on this box
+
+DeepSeek-V4-Flash MXFP4 at three context sizes, all measured with
+`tools/depthbench.sh` and `tools/sweep.sh` on the same machine, same build, same
+quant — `max_tokens` 160, temperature 0, a salt unique per request so nothing is
+served from cache:
+
+| context | prefill @32k | generation @32k | checkpoints |
+|---|---:|---:|---|
+| **131072** *(default)* | **1830 tok/s** | 19.3 t/s | on, upstream defaults |
+| 262144 | 1637 | 17.4 | on, `--cache-ram 32768` ceiling |
+| 524288 | 1721 | 16.3 | off — twice the cost at this size |
+
+The 131072 profile started this work at **486 tok/s**. It is now **3.8× faster**,
+and the model, the quant and the answers are unchanged — every gain is placement,
+batching or scheduling.
+
+Three findings did nearly all of it:
+
+* **`-rtr` was computing the experts on the wrong processor** (§21). It repacks
+  host-resident experts into `MXFP4_R8`, a type with no CUDA kernel, which pins
+  that work to the CPU. Dropping it hands the experts back to the GPU and is worth
+  **~3×**. This one came from comparing against another toolkit, not from tuning.
+* **The micro-batch has to be large enough to amortise weight streaming** (§22.4).
+  `-ub 8192` over 2048 is +17 % at depth; `-b` must be raised with it or it is
+  silently clamped.
+* **An upstream f16 overflow in DSA attention** (§24) was causing an
+  intermittent all-`nan` abort roughly every 100–330 k prefilled tokens. Fixed in
+  `ff141691`; our checkout predated it by three and a half hours.
+
+Two of those three came from looking outside this repository. The full
+measurements, including the negative results and three conclusions that were
+measured correctly and read wrongly, are in [docs/RESULTS.md](docs/RESULTS.md).
+
+---
+
 ## The reference machine
 
 These are the specs the shipped defaults are tuned for. On different hardware

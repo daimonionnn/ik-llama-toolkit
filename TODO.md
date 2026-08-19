@@ -879,7 +879,15 @@ question is about how much agent conversations actually share.
 
 ---
 
-## 15. Give 131072 the same `--cache-ram` ceiling as 262144?
+## 15. ~~Give 131072 the same `--cache-ram` ceiling as 262144?~~ — NO, 2026-08-19
+
+> Matt's call, and a reasonable one: at 131072 a checkpoint is 872 MiB, so even
+> the full default 32 is ~27 GiB on a 244 GiB machine, and the profile has never
+> come close to trouble. The ceiling on 262144 exists because a checkpoint there
+> is twice the size and the 524288 arm proved what happens without one; that
+> argument does not carry down to 131072.
+
+## 15 (historical). Give 131072 the same `--cache-ram` ceiling as 262144?
 
 §31.3 added `--cache-ram 32768` to the 262144 profile after a 524288 arm with no
 ceiling reached 231 GiB RSS and was OOM-killed along with the editor. The 131072
