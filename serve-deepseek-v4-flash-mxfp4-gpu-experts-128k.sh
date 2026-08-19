@@ -34,8 +34,9 @@
 #
 # THIS IS NOW THE DEFAULT PROFILE (config/default.env), so `./serve.sh` with no
 # arguments does the same thing. The wrapper stays for the explicit name.
-# Provisional: see RESULTS §24 for why the abort that blocked it is believed
-# fixed upstream, and what verification is still owed.
+# Provisional: the NaN abort that blocked it is still OPEN (RESULTS §32). The
+# upstream DSA fix did not stop it, and no other profile here is known to be
+# safer from it. Expect a restart every few hours of heavy use.
 #
 # Two deliberate defaults (same as the other wrappers):
 #   * Port 8090, not 8080 -- LM Studio's API server usually holds 8080.

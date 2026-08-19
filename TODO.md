@@ -232,9 +232,19 @@ suits one profile. Revisit if startup time ever starts to hurt.
 
 ---
 
-## 9. NaN logits abort — very likely fixed upstream, verification owed
+## 9. NaN logits abort — OPEN, cause unknown
 
-> **2026-08-17: probably solved, see RESULTS §24.** Our checkout predated
+> **2026-08-19: not solved. See RESULTS §32.** The fix below is in the running
+> build and the abort came back anyway — twice, at a rate real traffic cannot
+> tell apart from before it (1 per 3.7 h against 1 per 3.3 h). Two hypotheses
+> drawn from the crash logs were tested and both failed: checkpoint-adjacency is
+> vacuous at 293 checkpoints per 422 tasks, and the `n_past` mismatch occurs in
+> 12 % of ordinary restores and is absent from the newest crash. Nine aborts now
+> span two builds, both expert strategies and `-ub` 1024/2048/8192. Next step is
+> upstream, with `docs/external/crashes/crash8`/`crash9` attached.
+>
+> **2026-08-17, kept because it is where the mistake is legible: "probably
+> solved, see RESULTS §24."** Our checkout predated
 > `ff141691` "Use f32 accumulation in CUDA DSA implementation" by three and a half
 > hours — merged the afternoon of the first abort. f16 overflow in the attention
 > accumulator produces inf, then NaN, then a poisoned output tensor, which matches

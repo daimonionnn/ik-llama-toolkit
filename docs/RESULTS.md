@@ -1840,6 +1840,10 @@ shipped them to a Blackwell (§21).
 
 ## 24. The abort was very likely an upstream f16 overflow in DSA (2026-08-17)
 
+> **Superseded by §32.** The fix went in, and the abort came back anyway on
+> real traffic at an unchanged rate. The reasoning below is left intact
+> because it is where the mistake is legible.
+
 Seven aborts were chased across two days and five configuration variables. The
 answer appears to have been sitting in upstream since the afternoon of the first
 one.
@@ -1906,6 +1910,10 @@ look exonerated for an hour on 2026-08-14.
 
 What is still owed is real traffic: Hermes, over a day, at the rate that produced
 seven aborts in two.
+
+**That debt was paid on 2026-08-19 and the answer was no** (§32). Note what this
+paragraph got right and still lost: it named the correct outstanding test, and
+the profile shipped as default anyway on the strength of the synthetic run.
 
 ### 24.4 The lesson, which is not a technical one
 
@@ -2443,3 +2451,80 @@ not been run.
   comment on ikawrakow/ik_llama.cpp#2320.
 * **131072**: unchanged, checkpoints on at defaults.
 
+
+---
+
+## 32. The DSA fix did not stop the abort (2026-08-19)
+
+§24 concluded the NaN abort was "very likely" an upstream f16 overflow in DSA,
+fixed by `ff141691`. Real traffic disagrees. That section stays as written —
+including its reasoning, which still looks sound — because the correction is
+worth more next to the claim than in place of it.
+
+### 32.1 What happened
+
+195 minutes of Hermes traffic on `8337e4cd`, 422 tasks, the shipped
+`gpu-experts-128k` profile. Aborted at depth 16 934:
+
+    slot create_check: created context checkpoint 18 of 32 (pos_max = 16933, ...)
+    kv cache rm [p0, end) ... p0=16934
+    =============================== Failed to sample token
+    llama-sampling.cpp:745: Fatal error
+
+Same signature as the seven before it: 40 of 40 candidates NaN, same degenerate
+token order. Saved as `crash9`.
+
+Checking the other logs on this build turned up a **second** abort nobody had
+noticed, on 2026-08-18 at depth 92 008, immediately after a checkpoint restore.
+Saved as `crash8`; its `probabilities.txt` was already overwritten by crash9,
+since that file is written to the working directory under a fixed name.
+
+### 32.2 The fix is genuinely in the build
+
+Not a stale binary, and not the wrong commit:
+
+    git -C ik_llama.cpp merge-base --is-ancestor ff141691 HEAD   -> yes
+    binary is 56 s newer than the last source change
+
+### 32.3 The rate did not move
+
+| build | serving time | tasks | aborts | rate |
+|---|---:|---:|---:|---|
+| `2cda8d2d` / `7ebbb906`, before the fix | 23.0 h | 518 | 7 | 1 per 3.3 h |
+| `8337e4cd`, with the fix | 7.4 h | 634 | 2 | 1 per 3.7 h |
+
+Within noise of each other. **Two events cannot measure a rate** — the interval
+around 1-per-3.7 h is enormous, and this table cannot exclude a large real
+improvement. What it does exclude is the thing §24 needed: that the abort was
+gone. It is not.
+
+### 32.4 What this rules in and out
+
+The abort now spans **both** builds, **both** expert strategies (`-rtr` on for
+five, off for four) and `-ub` 1024, 2048 and 8192. Every configuration bisect in
+§19 came back negative, and the engine change that was supposed to explain that
+does not.
+
+Two patterns were tested against this log and **both failed**, which is the only
+reason they are recorded — each looked convincing from the crash excerpts alone:
+
+* *A checkpoint operation immediately precedes every abort.* True, and nearly
+  vacuous: 293 checkpoints were created across 422 tasks. Almost anything is
+  immediately preceded by a checkpoint operation here.
+* *The prompt cache reports `n_past != n_past_prompt` before the abort.* Present
+  in four of the older excerpts and it looks like an off-by-N. But it occurs in
+  12 % of ordinary cache restores, and crash9 does not have it (15 803 = 15 803).
+
+### 32.5 Standing
+
+The abort is **open**, not fixed. `stress.sh` clearing 610 k tokens (§24.2)
+turned out to be a synthetic run agreeing with a hypothesis rather than testing
+it; the honest reading now is that it does not reproduce the abort, so it cannot
+clear a build either.
+
+Nothing here is a reason to move off the profile: it is roughly one abort per
+several hours of heavy use, the server restarts, and the alternative costs 3.8x
+prefill. But `default.env` should stop describing the cause as understood.
+
+Worth filing upstream, with crash8/crash9 attached — the earlier reports were
+against a build that has since been fixed, so they were arguably answered.
