@@ -1,7 +1,9 @@
 # Issue prepared for ikawrakow/ik_llama.cpp
 
-*(Not yet filed. Title: "DeepSeek-V4-Flash: all-NaN logits abort under sustained
-server load, survives the f32 DSA fix". Attach `docs/external/crashes/`.)*
+*Filed 2026-08-20 as [ikawrakow/ik_llama.cpp#2344](https://github.com/ikawrakow/ik_llama.cpp/issues/2344).
+What went upstream is a short version of this — the abort, the rate table, the
+sm_120 lead and the unreachable handler — with links back here for everything
+else. This file stays as the long form.*
 
 ---
 

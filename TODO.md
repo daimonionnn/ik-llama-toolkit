@@ -232,7 +232,12 @@ suits one profile. Revisit if startup time ever starts to hurt.
 
 ---
 
-## 9. NaN logits abort — OPEN, cause unknown
+## 9. NaN logits abort — OPEN, filed upstream 2026-08-20
+
+> **[ikawrakow/ik_llama.cpp#2344](https://github.com/ikawrakow/ik_llama.cpp/issues/2344).**
+> Thirteen aborts, cause still unknown. The abort is no longer fatal here
+> (RESULTS §33), so this is now a correctness question rather than an
+> availability one.
 
 > **2026-08-19: not solved. See RESULTS §32.** The fix below is in the running
 > build and the abort came back anyway — twice, at a rate real traffic cannot
