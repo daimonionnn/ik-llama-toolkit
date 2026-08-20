@@ -973,9 +973,9 @@ happens to run the same `-ub 1024` and the same n17 and is faster on both counts
 (478 / 486 pp, 21.70 / 20.32 tg) — but it computes experts on the CPU via `-rtr`,
 a different code path, so it tests something else.
 
-The profile file has since been deleted; the numbers above are the whole of
-what it produced, which is why they are recorded here rather than left in a
-config comment. Everything needed to rebuild it is in this section: `-ub 1024`,
+Kept as `config/models/deepseek-v4-flash-gpu-experts-128k-ub1024.env` and its
+wrapper, uncommitted. The numbers are recorded here rather than only in that
+file's header so the section stands on its own if it is ever deleted: `-ub 1024`,
 `--n-cpu-moe 17`, otherwise identical to `deepseek-v4-flash-gpu-experts-128k`.
 
 ### 16.2 What would still settle it
