@@ -2731,3 +2731,231 @@ looser at 2 DIMMs per channel. If that is what caps the four-DIMM configurations
 MT/s alone would not predict across the two, and §26.1's single-variable law
 would hold only within a DIMM count. Settling it needs 2 vs 4 DIMMs at the same
 MT/s, which needs hardware not on hand.
+
+---
+
+## 35. ~~The abort is an f16 overflow in the K·Q GEMM~~ — MEASURED AND WRONG (2026-08-20)
+
+A confident, well-supported hypothesis, killed in ten minutes by measuring the
+one number it depended on. Kept in full because the reasoning is worth reading
+and the mistake is worth not repeating.
+
+### 35.1 The measurement that ended it
+
+The claim below was that the raw, unscaled `K·Q` dot products overflow f16
+(65504) in `dsa_attn.cu` line 347. `kq16` is a `half` buffer, so any overflow is
+already `inf` by the time it can be read — the GEMM was therefore made to write
+f32, the magnitudes measured, and a kernel converted down for the rest:
+
+    max_abs = 366.4    (f16 ceiling 65504, headroom 179x)
+    over    = 0        of 5 905 580 032 values
+
+**Two orders of magnitude below the ceiling, across nearly six billion values,
+covering both short prompts and a 6000-line one.** Nothing there overflows. The
+hypothesis is dead, and both the diagnosis and the patch built on it are
+withdrawn.
+
+(The probe run ended in a CUDA error — `cudaStreamSynchronize` and
+`cudaMemcpyFromSymbol` are not allowed during CUDA graph capture. That is a bug
+in the instrumentation, not a finding; the data it collected first is valid.)
+
+### 35.2 Why it was worth measuring rather than soaking
+
+The plan was an 11-hour soak on real traffic. That would have "confirmed" this by
+absence of aborts, and been wrong — exactly the §24 failure again, one section
+after writing that §24 was a standing reminder not to repeat it. The measurement
+cost one build and ten minutes and answered in the other direction.
+
+**Generalising: prefer measuring the quantity a hypothesis depends on over
+waiting to see whether the symptom returns.** Absence-of-symptom evidence is slow
+and confirms whatever you already believe.
+
+### 35.3 What was right, and still stands
+
+Two findings from the comparison survive, independent of the overflow claim.
+
+**Mainline llama.cpp has no such abort in its code at all.** `Failed to sample
+token`, the dump and the `GGML_ABORT` are ik_llama additions:
+
+| | ik_llama | mainline |
+|---|---|---|
+| pick a token | cumulative array + `upper_bound` | `std::discrete_distribution` |
+| given all-NaN logits | finds nothing → **aborts, dumps** | returns an index → **carries on silently** |
+
+So mainline not crashing is not evidence that mainline does not produce NaN. It
+is evidence that it would not say so. This matters for anyone treating it as the
+reference.
+
+**#2311 did leave one GEMM in f16 accumulation** — line 347, `K·Q`, against 360
+and 367 which it converted. That remains true. It is simply not where the NaN
+comes from, since the values there have 179x of headroom.
+
+### 35.4 The original reasoning, for the record
+
+§32 left the NaN abort open with the cause unknown. Comparing against mainline
+llama.cpp — which Matt runs in `multi-gpu-llm-toolkit` and which does not show
+this — found a mechanism that fits every observation.
+
+#### The premise, as first stated
+
+"Mainline does not have this problem" turns out to mean something weaker than it
+sounds. **Mainline has no such abort in its code at all.** The `Failed to sample
+token` message, the `probabilities.txt` dump and the `GGML_ABORT` are ik_llama
+additions. The two sample differently:
+
+| | ik_llama | mainline |
+|---|---|---|
+| pick a token | manual cumulative array + `upper_bound` | `std::discrete_distribution` |
+| given all-NaN logits | finds nothing → **aborts, dumps** | returns some index → **carries on silently** |
+
+So mainline not crashing is not evidence that mainline does not produce NaN. It
+is evidence that it would not tell you. Worth remembering before treating it as
+the reference implementation.
+
+#### The mechanism (refuted by 35.1)
+
+DSA attention in `ggml-cuda/dsa_attn.cu` runs two GEMMs:
+
+| line | computes | accumulation | fixed by #2311? |
+|---|---|---|---|
+| 347 | `K·Q` → scores | **f16** | **no** |
+| 360, 367 | `V·softmax(KQ)` | f32 | yes |
+
+`cublasHgemmStridedBatched` is f16 in, **f16 accumulate**, f16 out. The reduction
+runs over `n_embd_head_k = 512`. And `scale` is not applied there — the softmax
+below does it, at `scale*__half2float(x[ix])`. So the **raw, unscaled** dot
+product is what lands in an accumulator that saturates at 65504.
+
+One overflow poisons everything downstream:
+
+    kq16 = inf  ->  val = scale*inf = inf  ->  max_val = inf
+                ->  expf(val - max_val) = expf(inf - inf) = nan
+
+which gives **all** logits NaN, not some — the signature in all twelve dumps.
+
+It also explains the rest of §32: why #2311 did not help (it fixed the *other*
+GEMM), why mainline does not hit it (WMMA fragment with a `float` accumulator in
+`ggml-cuda/lightning-indexer.cu`), why it tracks prefilled volume, and why every
+configuration bisect came back negative — this is in attention, which does not
+care where the experts are computed.
+
+#### The patch, and its cost (withdrawn)
+
+Same change #2311 made to the other GEMM: `cublasGemmStridedBatchedEx` with
+`CUDA_R_32F` compute. (The patch file was removed when the hypothesis was refuted; the change is the same one #2311 made to the other GEMM.)
+
+| depth | before | with f32 K·Q | prefill | generation |
+|---:|---|---|---:|---:|
+| 4k | 1363.1 / 19.60 | 1371.5 / 20.03 | +0.6 % | +2.2 % |
+| 16k | 1908.9 / 19.42 | 1926.6 / 19.79 | +0.9 % | +1.9 % |
+| 32k | 1825.8 / 18.66 | 1830.1 / 18.70 | +0.2 % | +0.2 % |
+| 128k | 1349.1 / 16.95 | 1352.3 / 17.14 | +0.2 % | +1.1 % |
+
+Every depth neutral-to-positive. **Read this as "costs nothing", not "is
+faster"**: generation's between-run noise is ±1.4 % (§34.3) and the +1.36 %
+average sits inside it. Prefill's +0.5 % is marginally above its ±0.2 %, which is
+suggestive at best. Plausibly `CUBLAS_GEMM_DEFAULT_TENSOR_OP` asks for tensor
+cores explicitly where `Hgemm` left the choice to cuBLAS.
+
+#### A first correction: the patch was narrower than claimed
+
+`kq16` is `ggml_cuda_pool_alloc<half>`: the GEMM's **output buffer is f16
+whatever the compute type**. `CUDA_R_32F` changes how partial sums are
+accumulated; the result is still converted to f16 on the way out.
+
+| | accumulate | store | protects against |
+|---|---|---|---|
+| original `Hgemm` | f16 | f16 | nothing |
+| the patch here | f32 | **f16** | overflow in *partial sums* only |
+| an actual fix | f32 | f32 | both |
+
+So if the full dot product exceeds 65504, `inf` still appears. The patch only
+helps where a running sum transiently leaves f16 range while the final value
+would fit — real with split-k tensor-core accumulation, but much narrower than
+§35.2 suggests on its own. Written down because it was stated too broadly first
+and the code says otherwise.
+
+Which makes the measurement below the thing that decides it, rather than the
+soak.
+
+#### What was not established — and turned out to be false
+
+**No overflow has been caught in the act.** What is established is that the
+mechanism is present, unguarded, and consistent with every observation. The proof
+would be hours of the traffic that used to abort, coming back clean — which is
+now running, and which §24 is a standing reminder not to call early.
+
+§24 made exactly this mistake once: a correct-looking mechanism, a clean
+synthetic run, and a conclusion that did not survive real traffic. The difference
+this time is that the mechanism is a specific unfixed line rather than an
+inference about a commit — but that was true in §24 as well.
+
+---
+
+## 36. The NaN originates in `FLASH_ATTN_EXT` at layer 0 (2026-08-21)
+
+Thirteen aborts had been chased through configuration bisects, an upstream commit
+audit and one refuted overflow hypothesis (§35), all without ever seeing where the
+NaN came from — because the abort is reported by the sampler, and `llama_decode`
+has long returned by then.
+
+A probe in `ggml_cuda_compute_forward` now checks each node's output and records
+the first that contains a NaN, reading the flag back after graph capture ends
+(`IK_NAN_CHECK=1`). Three aborts later it answers.
+
+### 36.1 The accounting is exact
+
+486 hits across the run, and they partition perfectly:
+
+* **3 × 162**, three identical blocks
+* **zero hits before the first `FLASH_ATTN_EXT`** — there is no second origin
+* 3 aborts, 3 origins, one-to-one
+
+Each block:
+
+    node 14   FLASH_ATTN_EXT   fattn-0        <- origin
+    node  0   MUL_MAT          qr-1
+    node  0   MUL_MAT          qr-2
+     ...                                       161 nodes, layer by layer
+    node  0   MUL_MULTI_ADD    ffn_moe_out-42
+              -> all logits NaN -> abort
+
+So one poisoned tensor in layer 0 propagates through all 43 layers to the logits.
+That is why the dumps show **all** candidates NaN and never some.
+
+### 36.2 It is not where anyone was looking
+
+Every hypothesis so far pointed at DSA (`dsa_attn.cu`) — §24's f16 accumulation,
+§35's K·Q overflow, the sm_120 branch divergence of #2317. The origin is ordinary
+flash attention, `GGML_OP_FLASH_ATTN_EXT`, in the *first* layer.
+
+    op     : FLASH_ATTN_EXT
+    tensor : fattn-0                         f32   512 x 64 x 4223
+    src[0] : q_rope-0                        f32   512 x 4223 x 64
+    src[1] : raw_k-0                         f16   512 x 4352 x 1
+    src[2] : raw_k-0                         f16   512 x 4352 x 1
+    src[3] : dsv4_raw_mask_padded-0          f16   4352 x 4224 x 1
+    src[4] : blk.0.attn_sinks.weight         f32   64
+
+### 36.3 What this does NOT yet establish
+
+**Whether that op produces the NaN or merely reads it.** The probe checks node
+*outputs*. `raw_k-0` comes from the KV cache, which no node in this graph
+produces, so it was never in view — an op propagating someone else's NaN looks
+identical to the op that made it.
+
+The suspicion is concrete rather than theoretical: `SET_ROWS csa_k_write-2`, a KV
+cache *write*, appears among the propagation hits. And a poisoned cache would fit
+what §33 already showed — that dropping the slot's cache after an abort stopped
+the immediate recurrence.
+
+The probe has been extended to check the inputs of the offending node and print
+`(clean)` or `<== ALREADY NaN` against each. The next abort answers it.
+
+### 36.4 Why this took thirteen aborts
+
+The three configuration variables that were bisected (`-rtr`, `-ub`, placement)
+could never have found it: none of them touches layer-0 attention. §24's lesson
+was to look outside the repository; this section's is narrower and more useful —
+**instrument the failing path rather than bisecting the configuration around it.**
+The probe cost one build and answered on the first abort it saw.

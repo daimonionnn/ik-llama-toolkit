@@ -1,0 +1,148 @@
+diff --git a/ggml/src/ggml-cuda.cu b/ggml/src/ggml-cuda.cu
+index 232f765a..846eb132 100644
+--- a/ggml/src/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda.cu
+@@ -3633,6 +3633,125 @@ static inline bool ops_are_same_device(const ggml_cgraph * cgraph, int first, in
+     return true;
+ }
+ 
++
++// ===== NaN probe (IK_NAN_CHECK=1) =====================================
++// The all-NaN logits abort (RESULTS 32, upstream #2344) is reported by the
++// sampler, which is only where it becomes fatal -- llama_decode has long
++// returned by then, so no stack has ever named the producer. This checks each
++// node's output as the graph runs and records the FIRST one that contains a
++// NaN or inf.
++//
++// It never synchronises inside the graph loop: a NaN sets a device flag, and the
++// flag is read back in ggml_backend_cuda_graph_compute, after capture has ended.
++// Synchronising or cudaMemcpyFromSymbol during CUDA graph capture is illegal and
++// fails with "operation failed due to a previous error during capture" -- which
++// is exactly how a previous attempt at this died.
++//
++// Costs a reduction per node, so it is off unless IK_NAN_CHECK=1.
++__device__ int g_nan_node = -1;
++__device__ int g_nan_kind = 0;   // 1 = nan
++
++static __global__ void k_nan_probe_f32(const float * x, int64_t n, int node_idx) {
++    int64_t i = (int64_t)blockIdx.x*blockDim.x + threadIdx.x;
++    if (i >= n) return;
++    float v = x[i];
++    // NaN only. inf is NOT an error here: attention masks are built out of
++    // -INFINITY, so flagging inf produced 1386 hits on a single healthy request
++    // -- from SCALE and FILL nodes doing exactly what they should.
++    if (isnan(v)) { atomicCAS(&g_nan_node, -1, node_idx); atomicExch(&g_nan_kind, 1); }
++}
++
++static __global__ void k_nan_probe_f16(const half * x, int64_t n, int node_idx) {
++    int64_t i = (int64_t)blockIdx.x*blockDim.x + threadIdx.x;
++    if (i >= n) return;
++    float v = __half2float(x[i]);
++    // NaN only. inf is NOT an error here: attention masks are built out of
++    // -INFINITY, so flagging inf produced 1386 hits on a single healthy request
++    // -- from SCALE and FILL nodes doing exactly what they should.
++    if (isnan(v)) { atomicCAS(&g_nan_node, -1, node_idx); atomicExch(&g_nan_kind, 1); }
++}
++
++static bool ik_nan_check_enabled() {
++    static int on = -1;
++    if (on < 0) { const char * e = getenv("IK_NAN_CHECK"); on = (e && atoi(e)) ? 1 : 0; }
++    return on == 1;
++}
++
++// Returns true if the tensor contains a NaN. Synchronous, so ONLY call it from
++// ik_nan_report -- after capture has ended.
++static bool ik_tensor_has_nan(ggml_backend_cuda_context & ctx, const ggml_tensor * t) {
++    if (!t || !t->data) return false;
++    if (t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16) return false;
++    const int64_t n = ggml_nelements(t);
++    if (n <= 0) return false;
++    int reset = -1;
++    CUDA_CHECK(cudaMemcpyToSymbol(g_nan_node, &reset, sizeof(reset)));
++    const int64_t block = 256, grid = (n + block - 1)/block;
++    if (grid > 2147483647LL) return false;
++    if (t->type == GGML_TYPE_F32) k_nan_probe_f32<<<grid, block, 0, ctx.stream()>>>((const float *) t->data, n, 1);
++    else                          k_nan_probe_f16<<<grid, block, 0, ctx.stream()>>>((const half  *) t->data, n, 1);
++    CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
++    int hit = -1;
++    CUDA_CHECK(cudaMemcpyFromSymbol(&hit, g_nan_node, sizeof(hit)));
++    return hit >= 0;
++}
++
++static void ik_nan_probe(ggml_backend_cuda_context & ctx, const ggml_tensor * dst, int node_idx) {
++    if (!ik_nan_check_enabled() || !dst || !dst->data) return;
++    const int64_t n = ggml_nelements(dst);
++    if (n <= 0) return;
++    const int64_t block = 256, grid = (n + block - 1)/block;
++    if (grid > 2147483647LL) return;
++    if (dst->type == GGML_TYPE_F32) {
++        k_nan_probe_f32<<<grid, block, 0, ctx.stream()>>>((const float *) dst->data, n, node_idx);
++    } else if (dst->type == GGML_TYPE_F16) {
++        k_nan_probe_f16<<<grid, block, 0, ctx.stream()>>>((const half *) dst->data, n, node_idx);
++    }
++}
++
++// Called after the graph has finished -- never during capture.
++static void ik_nan_report(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph) {
++    if (!ik_nan_check_enabled()) return;
++    int node = -1, kind = 0;
++    CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
++    CUDA_CHECK(cudaMemcpyFromSymbol(&node, g_nan_node, sizeof(node)));
++    if (node < 0) return;
++    (void) kind;
++    const char * what = "NaN";
++    if (cgraph && node < cgraph->n_nodes) {
++        const ggml_tensor * t = cgraph->nodes[node];
++        fprintf(stderr, "\n=============================== IK_NAN_CHECK: first %s at node %d\n"
++                        "  op       : %s\n  tensor   : %s\n  type     : %s\n  shape    : %lld x %lld x %lld x %lld\n",
++                what, node, ggml_op_name(t->op), t->name, ggml_type_name(t->type),
++                (long long)t->ne[0], (long long)t->ne[1], (long long)t->ne[2], (long long)t->ne[3]);
++        // Are the INPUTS already poisoned? This is the question the probe could
++        // not answer on its own: it only ever saw node outputs, so a tensor read
++        // from the KV cache -- which no node in this graph produces -- was
++        // invisible. Without this, an op that merely propagates someone else's
++        // NaN looks exactly like the op that made it.
++        for (int k = 0; k < GGML_MAX_SRC; ++k) {
++            if (!t->src[k]) continue;
++            const char * verdict = "";
++            if (t->src[k]->type == GGML_TYPE_F32 || t->src[k]->type == GGML_TYPE_F16) {
++                verdict = ik_tensor_has_nan(ctx, t->src[k]) ? "  <== ALREADY NaN" : "  (clean)";
++            } else {
++                verdict = "  (not checked: quantised)";
++            }
++            fprintf(stderr, "  src[%d]   : %-28s %-10s %lld x %lld x %lld x %lld%s\n", k,
++                    t->src[k]->name, ggml_type_name(t->src[k]->type),
++                    (long long)t->src[k]->ne[0], (long long)t->src[k]->ne[1],
++                    (long long)t->src[k]->ne[2], (long long)t->src[k]->ne[3], verdict);
++        }
++        fflush(stderr);
++    }
++    // Reset so the next graph can report again -- the first hit per graph is
++    // what identifies the producer; later ones are just propagation.
++    int reset = -1, zero = 0;
++    CUDA_CHECK(cudaMemcpyToSymbol(g_nan_node, &reset, sizeof(reset)));
++    CUDA_CHECK(cudaMemcpyToSymbol(g_nan_kind, &zero,  sizeof(zero)));
++}
++// ===== end NaN probe ==================================================
++
+ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst, const ggml_cgraph * cgraph, int & i) {
+ 
+ #if IK_PRINT_TIMING
+@@ -4251,6 +4370,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+     printf("%s(%s): %d us\n", ggml_op_name(dst->op), dst->name, (int)(tim2 - tim1));
+ #endif
+ 
++    ik_nan_probe(ctx, dst, i);
++
+     return true;
+ }
+ 
+@@ -4772,6 +4893,8 @@ GGML_CALL static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t
+ 
+     evaluate_and_capture_cuda_graph(cuda_ctx, cgraph, graph_evaluated_or_captured, use_cuda_graph, cuda_graph_update_required);
+ 
++    ik_nan_report(*cuda_ctx, cgraph);
++
+     return GGML_STATUS_SUCCESS;
+ }
+ 
