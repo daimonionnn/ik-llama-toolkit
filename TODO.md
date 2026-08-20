@@ -232,43 +232,6 @@ suits one profile. Revisit if startup time ever starts to hurt.
 
 ---
 
-## 13. Does `-ub` bear on the NaN abort after all? — OPEN (2026-08-20)
-
-Matt's impression that it started aborting more often prompted a look at abort
-incidence per unit of *work* rather than per hour, since a small `-ub` prefills
-far fewer tokens per hour and would look safer for that reason alone.
-
-| `-ub` | prefill tokens | aborts |
-|---:|---:|---:|
-| ≤ 1024 | 7.04 M | **0** |
-| ≥ 2048 | 15.10 M | 10 |
-
-All ten aborts are at 2048 or above. §19 bisected `-ub` and called it negative;
-that was on far less data, and the kvram profile ships `-ub 1024` precisely
-because 2048 was implicated once.
-
-**It is not established.** Restricted to the period where aborts occur at all
-(from 08-13, so the comparison is not against pre-bug traffic), low `-ub` has
-3.65 M tokens against a rate of 1 per 2.45 M — 1.5 aborts expected, 0 observed,
-which happens **22.5 %** of the time by chance. Over the whole dataset it is
-5.6 %, but that includes days before the first abort. Suggestive, not a finding.
-
-Confounds checked: low `-ub` traffic is NOT confined to an early period — it
-appears on 08-13, 08-14, 08-17 and 08-19 alongside high-`-ub` traffic. It spans
-both `-rtr` regimes. What it does not have is volume.
-
-**Also worth recording: "it aborts more since yesterday" does not hold per
-token.** 08-19 carried 12.64 M prefilled tokens for one abort — 1 per 12.6 M,
-five times better than the average. The absolute count per day rose because the
-box is being used far harder, not because the rate did.
-
-To settle it: run `-ub 4096` over a comparable volume (~4 M prefilled tokens) and
-compare. Not worth doing now — `-ub 8192` is what buys 1830 tok/s over 486, the
-hypothesis is unproven, and since RESULTS §33 an abort costs one 500 and a
-re-prefill rather than the server.
-
----
-
 ## 9. NaN logits abort — OPEN, cause unknown
 
 > **2026-08-19: not solved. See RESULTS §32.** The fix below is in the running
@@ -950,3 +913,80 @@ which is the same assumption that failed at 524288.
 Cheap to settle: pick a ceiling that keeps ~19 checkpoints (~16 GiB) and confirm
 with `tools/ckpt-value.sh` that the restore rate does not fall.
 
+---
+
+## 16. Does `-ub` bear on the NaN abort after all? — OPEN (2026-08-20)
+
+Matt's impression that it started aborting more often prompted a look at abort
+incidence per unit of *work* rather than per hour, since a small `-ub` prefills
+far fewer tokens per hour and would look safer for that reason alone.
+
+| `-ub` | prefill tokens | aborts |
+|---:|---:|---:|
+| ≤ 1024 | 7.04 M | **0** |
+| ≥ 2048 | 15.10 M | 10 |
+
+All ten aborts are at 2048 or above. §19 bisected `-ub` and called it negative;
+that was on far less data, and the kvram profile ships `-ub 1024` precisely
+because 2048 was implicated once.
+
+**It is not established.** Restricted to the period where aborts occur at all
+(from 08-13, so the comparison is not against pre-bug traffic), low `-ub` has
+3.65 M tokens against a rate of 1 per 2.45 M — 1.5 aborts expected, 0 observed,
+which happens **22.5 %** of the time by chance. Over the whole dataset it is
+5.6 %, but that includes days before the first abort. Suggestive, not a finding.
+
+Confounds checked: low `-ub` traffic is NOT confined to an early period — it
+appears on 08-13, 08-14, 08-17 and 08-19 alongside high-`-ub` traffic. It spans
+both `-rtr` regimes. What it does not have is volume.
+
+**Also worth recording: "it aborts more since yesterday" does not hold per
+token.** 08-19 carried 12.64 M prefilled tokens for one abort — 1 per 12.6 M,
+five times better than the average. The absolute count per day rose because the
+box is being used far harder, not because the rate did.
+
+### 16.1 Measured 2026-08-20: `-ub 1024` is not a usable way to test this
+
+A profile was built to accumulate that volume on the same code path as the
+default — `-ub 1024` with `--n-cpu-moe` re-floored to 17 (16 and 15 both OOM, so
+17 is the floor, worth +9 % prefill and +8 % generation over leaving it at 19).
+Then it was measured, and the trade turned out to be far worse than the ~2x the
+earlier sweep suggested:
+
+| depth | `-ub 1024` n17 | `-ub 8192` n19 | prefill | generation |
+|---:|---|---|---:|---:|
+| 4k | 371.9 / **21.42** | 1354.3 / 19.97 | −73 % | +7 % |
+| 16k | 375.6 / **21.15** | 1901.0 / 19.46 | −80 % | +9 % |
+| 32k | ~369 / 20.16 | 1813.5 / 18.59 | −80 % | +8 % |
+
+128k was cut short deliberately; three depths already answer it. A 32k prompt
+costs 89 s of prefill instead of 18. Generation is genuinely better, 7–9 %, but
+not at that price.
+
+**And it re-confirms why this strategy needs a large `-ub`:** prefill is flat
+across 4k, 16k and 32k — 372 / 376 / 369. At `-ub 8192` it climbs to 1813 with
+depth. Once the micro-batch is small, the bottleneck is shipping expert weights
+across PCIe, which is paid per micro-batch no matter how long the prompt is.
+
+Note the pairing that is NOT interchangeable: `deepseek-v4-flash-128k-kvram`
+happens to run the same `-ub 1024` and the same n17 and is faster on both counts
+(478 / 486 pp, 21.70 / 20.32 tg) — but it computes experts on the CPU via `-rtr`,
+a different code path, so it tests something else.
+
+The profile file has since been deleted; the numbers above are the whole of
+what it produced, which is why they are recorded here rather than left in a
+config comment. Everything needed to rebuild it is in this section: `-ub 1024`,
+`--n-cpu-moe 17`, otherwise identical to `deepseek-v4-flash-gpu-experts-128k`.
+
+### 16.2 What would still settle it
+
+`-ub 4096`, which has **1 614 066 prefilled tokens and no abort** on this code
+path and costs ~15 % of prefill rather than 80 %:
+
+    IK_UBATCH=4096 IK_NCMOE=18 ./serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh
+
+Not urgent. `-ub 8192` is what buys 1813 tok/s over 371, the hypothesis is
+unproven, and since RESULTS §33 an abort costs one 500 and a re-prefill rather
+than the server.
+
+---
