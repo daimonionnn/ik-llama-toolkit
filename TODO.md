@@ -232,6 +232,43 @@ suits one profile. Revisit if startup time ever starts to hurt.
 
 ---
 
+## 13. Does `-ub` bear on the NaN abort after all? — OPEN (2026-08-20)
+
+Matt's impression that it started aborting more often prompted a look at abort
+incidence per unit of *work* rather than per hour, since a small `-ub` prefills
+far fewer tokens per hour and would look safer for that reason alone.
+
+| `-ub` | prefill tokens | aborts |
+|---:|---:|---:|
+| ≤ 1024 | 7.04 M | **0** |
+| ≥ 2048 | 15.10 M | 10 |
+
+All ten aborts are at 2048 or above. §19 bisected `-ub` and called it negative;
+that was on far less data, and the kvram profile ships `-ub 1024` precisely
+because 2048 was implicated once.
+
+**It is not established.** Restricted to the period where aborts occur at all
+(from 08-13, so the comparison is not against pre-bug traffic), low `-ub` has
+3.65 M tokens against a rate of 1 per 2.45 M — 1.5 aborts expected, 0 observed,
+which happens **22.5 %** of the time by chance. Over the whole dataset it is
+5.6 %, but that includes days before the first abort. Suggestive, not a finding.
+
+Confounds checked: low `-ub` traffic is NOT confined to an early period — it
+appears on 08-13, 08-14, 08-17 and 08-19 alongside high-`-ub` traffic. It spans
+both `-rtr` regimes. What it does not have is volume.
+
+**Also worth recording: "it aborts more since yesterday" does not hold per
+token.** 08-19 carried 12.64 M prefilled tokens for one abort — 1 per 12.6 M,
+five times better than the average. The absolute count per day rose because the
+box is being used far harder, not because the rate did.
+
+To settle it: run `-ub 4096` over a comparable volume (~4 M prefilled tokens) and
+compare. Not worth doing now — `-ub 8192` is what buys 1830 tok/s over 486, the
+hypothesis is unproven, and since RESULTS §33 an abort costs one 500 and a
+re-prefill rather than the server.
+
+---
+
 ## 9. NaN logits abort — OPEN, cause unknown
 
 > **2026-08-19: not solved. See RESULTS §32.** The fix below is in the running

@@ -46,7 +46,12 @@ are also only comparable at equal `max_tokens` — see §15.1.
 | ik_llama.cpp | `7ebbb906` (2026-08-10) for §8–§16; re-checked on `2cda8d2d` (2026-08-13) — 494.1 pp / 21.07 tg against the 499 / 21.3 baseline, unchanged |
 | GPU | RTX PRO 6000 Blackwell Workstation, 96 GiB, `sm_120` |
 | CPU | Intel Core Ultra 7 270K Plus — 8 P-cores (0–7) + 16 E-cores (8–23) |
-| RAM | 224 GiB DDR5-6267, dual channel |
+| RAM | 256 GB DDR5-6667 (4×64), dual channel — **current**; 244 GiB visible |
+
+The memory has changed four times during these measurements, and each section
+states the kit it ran on: 224 GiB at 6267 (§20 and everything before it), 2×48
+at 7400 (§25), 4×64 at 6400 (§26), then the same kit at 6667. Do not read the
+row above onto an older section.
 
 The driver version matters for more than provenance: §13 turns on
 `cudaDevAttrHostRegisterReadOnlySupported` reading **0** here, and §16.2 on the
@@ -215,8 +220,9 @@ Real server, 262 144 ctx, `--fit`, q8_0 KV:
 | coherent output                 | yes (verified)          |
 
 **Exactly half of Q4's generation speed** — Q8 forces ~2× the bytes over DDR5
-per token (~29 CPU layers instead of ~22). It nearly fills the 224 GiB of RAM.
-Use it as a quality reference, not a daily driver.
+per token (~29 CPU layers instead of ~22). It nearly filled the 224 GiB of RAM
+this was measured on; the box now has 256 GB, so it is less tight than the
+number suggests. Use it as a quality reference, not a daily driver.
 
 ### Q4 vs Q8 side by side (262 144 ctx)
 
@@ -2004,6 +2010,8 @@ repository so the numbers quoted above can be checked against their source:
 | §23 head-to-head depths | `sweep-…-20260817-185348.md` |
 | §24 updated build | `sweep-…-20260817-193021.md` |
 | §25 DDR5-7400 | `sweep-…-20260817-232449.md` |
+| §34 DDR5-6667, under gdb | `depthbench-ub8192-20260820-102351.md` |
+| §34 DDR5-6667, `IK_GDB=0` control | `depthbench-ub8192-20260820-103046.md` |
 
 (`sweep-…` is `sweep-deepseek-v4-flash-gpu-experts-128k-`.)
 
@@ -2528,3 +2536,198 @@ prefill. But `default.env` should stop describing the cause as understood.
 
 Worth filing upstream, with crash8/crash9 attached — the earlier reports were
 against a build that has since been fixed, so they were arguably answered.
+
+---
+
+## 33. A backtrace at last, and the abort made survivable (2026-08-20)
+
+### 33.1 The tenth abort, and the first stack
+
+Abort #10 came 5.8 minutes after a restart, on the second task, at depth 29 228 —
+the fastest yet. Same signature as the other nine: 40 of 40 candidates NaN, same
+degenerate token order. The rate on the fixed build is now 1 per 2.5 h across
+7.6 h, which is if anything worse than before #2311, though three events still
+measure nothing.
+
+It was the first caught with `IK_GDB=1`, so there is finally a stack:
+
+    #5  ggml_abort (file="llama-sampling.cpp", line=745) at ggml.c:266
+    #6  llama_sample_token_with_rng_impl at llama-sampling.cpp:745
+    #8  llama_sampling_sample_impl (idx=4) at common/sampling.cpp:556
+    #10 server_context::process_batch_tokens (n_batch=8192) at server-context.cpp:4791
+    #11 server_context::update_slots at server-context.cpp:4998
+
+**It does not locate the cause**, and was never going to: `llama_decode` has
+returned by then. It confirms only what the dumps already said — the logits
+arrive poisoned, the sampler is the messenger.
+
+### 33.2 What it did show
+
+`server-context.cpp:4790` already wraps the sampling call in try/catch: log
+"sampling failed, releasing slot", return a 500 for that request, release the
+slot, carry on. **That handler has never been reachable.** `GGML_ABORT` →
+`ggml_abort` → `abort()` is not a C++ exception; frame #4 in the stack is
+`__GI_abort`. A condition the server knows how to survive was killing the
+process, and every other in-flight request with it.
+
+`docs/external/local-sampler-throw.patch` makes it throw instead. Verified by
+calling the sampler directly with 40 NaN candidates, exactly what the dumps show:
+the exception is caught, the process lives.
+
+The dump filename is now unique per abort. It was a fixed path in the working
+directory, so each abort destroyed the previous evidence — which is how the dump
+from abort #8 was lost.
+
+**The test caught a bug in the patch before it shipped.** The first version keyed
+the name on seconds plus a static counter; the counter is per-process, so two
+servers aborting in the same second would collide. Three separate runs produced
+one file. Switched to microseconds: three runs, three files.
+
+### 33.3 Surviving is not enough: the poisoned state has to go
+
+`slot.release()` resets the slot but keeps `cache_tokens`, the KV cells and the
+checkpoints. So the state that had just produced NaN would be reused by the next
+request carrying the same prefix — and a retry is exactly what an agent client
+does with a 500. Either it aborts again and the agent spins, or it does not and
+the answer is quietly degraded. The second is worse, because nothing reports it.
+
+The handler now erases that slot's state with the same sequence the `SLOT_ERASE`
+task uses: `llama_kv_cache_seq_rm`, `cache_tokens.keep_first(0)`, checkpoints and
+data cleared, sampler reset. Cost is one full prefill on the retry.
+
+### 33.4 Verified against a running server, not just compiled
+
+A temporary `IK_TEST_NAN_AT` hook was added to fire the failure path on the Nth
+sample, 11 requests were driven through a real server, and the hook was then
+removed and the binary checked to confirm nothing of it remained.
+
+    ERR sampling failed, releasing slot   id_task=254 error="...all candidate logits are NaN (dump: ...)"
+    ERR task error                        id_task=254
+    INFO request ... status=500
+    ERR NaN logits -- dropped this slot's cached state, the next request will
+        prefill from scratch   id_slot=0 cache_tokens_erased=45 checkpoints_erased=0
+    INFO slot released                    n_past=0 n_cache_tokens=0
+
+`n_past=0, n_cache_tokens=0` is the proof the cache actually went. The next
+request then shows `cache_size = 0` and `kv cache rm p0=0` — a prefill from
+scratch, not from the poisoned state. Answers after the failure were correct
+("Paris", "42"). Tally: 10 × 200, 1 × 500, process alive.
+
+    grep -a 'NaN logits' logs/server-*.log
+
+One thing a patch cannot repair: if this fires mid-generation with
+`stream: true`, tokens already sent stay sent, so the client gets a truncated
+answer followed by an error.
+
+The first attempt at this test measured nothing — at `temperature 0` the sampler
+takes the greedy branch and never reaches `llama_sample_token_with_rng`, so the
+hook never fired and four requests all returned 200. The real aborts all come
+through the temperature branch.
+
+### 33.5 It fired in production the same morning, twice
+
+Two aborts during three hours of ordinary Hermes work, 2026-08-20 at 09:54 and
+10:08 (crash11, crash12 — same 40-token signature as the other ten). **The server
+survived both.**
+
+| | 09:54 | 10:08 |
+|---|---:|---:|
+| `cache_tokens_erased` | 44 872 | 29 556 |
+| `checkpoints_erased` | 32 | 25 |
+| next request | `cache_size = 0`, 44 864 tok at 1648 tok/s, **200** | `cache_size = 0`, 29 558 tok at 1723 tok/s, **200** |
+
+So the retry re-prefilled from scratch at full speed and returned a correct
+answer. That is the whole design working end to end on traffic nobody staged:
+one 500, one re-prefill, no restart, no lost session. Before the patch this
+morning would have been two dead servers.
+
+### 33.6 And it refutes the VRAM hypothesis
+
+`tools/vramwatch.sh` was sampling every second across both. Free VRAM at the
+abort second: **727 MiB**, against 705–729 MiB over 1694 samples spanning the
+whole session. Flat. No dip, no exhaustion, and `nvidia-smi --query-compute-apps`
+shows llama-server alone on the card the entire time — no squatter.
+
+Combined with the absence of any `out of memory` / `cuMemCreate` / `CUDA error`
+line in all twelve crash logs, and with the fact that the run holding the LARGEST
+headroom (4829 MiB) aborted too, memory pressure is out.
+
+### 33.7 What this is not
+
+It does not fix, diagnose or hide the NaN. §32 stands and TODO 9 stays open. It
+converts "the server dies every few hours" into "one request returned a 500 and
+the next one prefilled from scratch", which is worth having whether or not the
+cause is ever found, and prejudges nothing about what the cause is.
+
+---
+
+## 34. DDR5-6400 → 6667: nothing measurable, and a lesson about the noise floor (2026-08-20)
+
+Fourth memory configuration, same 4 × 64 GB kit as §26 pushed from 6400 to
+6667 MT/s. Same tool, same profile, same depths, `-r 2`. Two full runs were taken
+because the first disagreed with §26 and the disagreement turned out to be the
+interesting part.
+
+### 34.1 Prefill
+
+| depth | 6400 (§26) | 6667 +gdb | 6667 −gdb | gdb effect | 6667 vs 6400 |
+|---:|---:|---:|---:|---:|---:|
+| 4k | 1354.8 | 1354.3 | **1366.3** | +0.9 % | +0.8 % |
+| 16k | 1888.0 | 1899.3 | **1901.0** | +0.1 % | +0.7 % |
+| 32k | 1802.1 | 1812.9 | **1813.5** | −0.0 % | +0.6 % |
+| 128k | 1335.1 | 1340.2 | **1339.8** | −0.0 % | +0.4 % |
+
++0.6 % on average, and unusually tight: every depth lands between +0.4 and
++0.8 %. Small enough to be nothing, consistent enough to be worth stating as
+"not negative".
+
+### 34.2 Generation
+
+| depth | 6400 (§26) | 6667 +gdb | 6667 −gdb | gdb effect | 6667 vs 6400 |
+|---:|---:|---:|---:|---:|---:|
+| 4k | 20.05 | 19.58 | **19.97** | +2.0 % | −0.4 % |
+| 16k | 19.84 | 19.35 | **19.46** | +0.6 % | −1.9 % |
+| 32k | 19.18 | 18.77 | **18.59** | **−1.0 %** | −3.1 % |
+| 128k | 17.14 | 16.77 | **16.97** | +1.2 % | −1.0 % |
+
+−1.6 % on average with a −0.4 to −3.1 % spread. That spread is the finding, not
+the average.
+
+### 34.3 Two things this run corrected
+
+**gdb is not costing anything.** `serve.sh` runs the server under gdb since §33
+and the comment there says the overhead is expected-but-unmeasured, so it was the
+first suspect. It is not: the effect changes sign — at 32k the run WITHOUT gdb is
+1.0 % slower — and on prefill it is +0.2 % across the board. `IK_GDB=1` stays on
+by default, now with a measurement behind it rather than an assumption.
+
+**The reported spread understates the real noise floor.** Two runs of the same
+configuration, same binary, half an hour apart, differ by up to 2 % on
+generation. `depthbench` reported within-run spreads of 0.5–1.1 % for those same
+points. So **between-run variance is larger than the within-run figure the tool
+prints**, and §16's ~2 % noise floor applies to *sessions*, not repeats.
+
+That matters retroactively: comparing one fresh run against a number stored days
+earlier — which is what §25, §26 and this section all do — cannot resolve
+anything under a few percent. The first read of this run called −2.3 % across
+four depths "too regular to be noise". The control run showed it was.
+
+Prefill does not have this problem: ±0.2 % between runs against generation's
+±1.4 %. It is bulk GPU work; generation is memory-bound and shares the machine
+with everything else.
+
+### 34.4 The answer
+
+**The overclock bought nothing that can be measured here.** Prefill +0.6 %,
+generation inside the noise. Consistent with §26 finding zero for 6267 → 6400.
+
+§25's model — generation tracks bandwidth alone — predicts +1.3 % of generation
+for 6667's +4.2 % of bandwidth. That is below what this method resolves, so the
+model is neither confirmed nor contradicted.
+
+One hypothesis worth recording, untested: §25's +5.5 % came from a **two-DIMM**
+kit at 7400. 6267, 6400 and 6667 are all four-DIMM, and a memory controller runs
+looser at 2 DIMMs per channel. If that is what caps the four-DIMM configurations,
+MT/s alone would not predict across the two, and §26.1's single-variable law
+would hold only within a DIMM count. Settling it needs 2 vs 4 DIMMs at the same
+MT/s, which needs hardware not on hand.

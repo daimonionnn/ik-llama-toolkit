@@ -12,6 +12,13 @@ results/
 # Transient crash dump, rewritten by the server on every abort. The copies that
 # matter are archived by hand under docs/external/crashes/ with a date.
 probabilities.txt
+# ...and the unique-per-abort names the local sampler patch now writes
+# (docs/external/local-sampler-throw.patch). The fixed name used to mean each
+# abort destroyed the previous dump; that cost us the evidence from abort #8.
+probabilities-*.txt
+# ...but NOT the ones deliberately archived as evidence. Without this the
+# pattern above swallows them, which it did the moment it was added.
+!docs/external/crashes/probabilities-*.txt
 
 # Crash records are evidence, not noise: the *.log rule above would swallow the
 # context excerpt saved with every abort, leaving the probabilities dump without

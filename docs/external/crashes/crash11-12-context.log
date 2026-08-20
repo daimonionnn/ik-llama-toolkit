@@ -1,0 +1,63 @@
+======== Cache: cache_size = 42952, n_past =  42952, n_past_prompt = 42944
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="140737347833856" timestamp=1787212443 id_slot=0 id_task=6660 p0=42952
+[New Thread 0x7fd4c1ae4000 (LWP 266298)]
+[New Thread 0x7fd4c22e5000 (LWP 266299)]
+[New Thread 0x7fd4c2ae6000 (LWP 266300)]
+[New Thread 0x7fd4c32e7000 (LWP 266301)]
+[New Thread 0x7fd4c8783000 (LWP 266302)]
+[New Thread 0x7fd4c7f82000 (LWP 266303)]
+[New Thread 0x7fd4c7781000 (LWP 266304)]
+[New Thread 0x7fd4c6f80000 (LWP 266305)]
+[New Thread 0x7fd4c677f000 (LWP 266306)]
+[New Thread 0x7fd4c5f7e000 (LWP 266307)]
+[New Thread 0x7fd4c577d000 (LWP 266308)]
+[Thread 0x7fd4c8783000 (LWP 266302) exited]
+[Thread 0x7fd4c677f000 (LWP 266306) exited]
+[Thread 0x7fd4c7f82000 (LWP 266303) exited]
+[Thread 0x7fd4c577d000 (LWP 266308) exited]
+[Thread 0x7fd4c6f80000 (LWP 266305) exited]
+[Thread 0x7fd4c32e7000 (LWP 266301) exited]
+[Thread 0x7fd4c22e5000 (LWP 266299) exited]
+[Thread 0x7fd4c5f7e000 (LWP 266307) exited]
+[Thread 0x7fd4c7781000 (LWP 266304) exited]
+[Thread 0x7fd4c2ae6000 (LWP 266300) exited]
+[Thread 0x7fd4c1ae4000 (LWP 266298) exited]
+slot create_check: id  0 | task 6660 | erasing old context checkpoint (pos_min = 0, pos_max = 42864, n_tokens = 42865, size = 871.968 MiB)
+slot create_check: id  0 | task 6660 | created context checkpoint 32 of 32 (pos_min = 0, pos_max = 44866, n_tokens = 44867, size = 871.984 MiB, took 317.14 ms)
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="140737347833856" timestamp=1787212445 id_slot=0 id_task=6660 p0=44867
+=============================== Failed to sample token
+Data has been stored in probabilities-6122840673-1.txt
+Create an issue with full log and attach that file to the issue
+ ERR [    process_batch_tokens] sampling failed, releasing slot | tid="140737347833856" timestamp=1787212445 id_slot=0 id_task=6660 error="failed to sample token: all candidate logits are NaN (dump: probabilities-6122840673-1.txt)"
+--
+slot apply_checkp: id  0 | task 20054 | erased invalidated context checkpoint (pos_min = 0, pos_max = 22311, size = 871.812 MiB)
+slot apply_checkp: id  0 | task 20054 | erased invalidated context checkpoint (pos_min = 0, pos_max = 22477, size = 871.813 MiB)
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="140737347833856" timestamp=1787213334 id_slot=0 id_task=20054 p0=21494
+[New Thread 0x7fd4c1a95000 (LWP 315883)]
+[New Thread 0x7fd4c429a000 (LWP 315884)]
+[New Thread 0x7fd4c4a9b000 (LWP 315885)]
+[New Thread 0x7fd4c529c000 (LWP 315886)]
+[New Thread 0x7fd4c6a9f000 (LWP 315887)]
+[New Thread 0x7fd4c629e000 (LWP 315888)]
+[New Thread 0x7fd4c5a9d000 (LWP 315889)]
+[New Thread 0x7fd4c3a99000 (LWP 315890)]
+[New Thread 0x7fd4c3298000 (LWP 315891)]
+[New Thread 0x7fd4c2a97000 (LWP 315892)]
+[New Thread 0x7fd4c2296000 (LWP 315893)]
+[Thread 0x7fd4c2296000 (LWP 315893) exited]
+[Thread 0x7fd4c629e000 (LWP 315888) exited]
+[Thread 0x7fd4c5a9d000 (LWP 315889) exited]
+[Thread 0x7fd4c529c000 (LWP 315886) exited]
+[Thread 0x7fd4c4a9b000 (LWP 315885) exited]
+[Thread 0x7fd4c3a99000 (LWP 315890) exited]
+[Thread 0x7fd4c6a9f000 (LWP 315887) exited]
+[Thread 0x7fd4c429a000 (LWP 315884) exited]
+[Thread 0x7fd4c2a97000 (LWP 315892) exited]
+[Thread 0x7fd4c3298000 (LWP 315891) exited]
+[Thread 0x7fd4c1a95000 (LWP 315883) exited]
+slot create_check: id  0 | task 20054 | created context checkpoint 25 of 32 (pos_min = 0, pos_max = 29550, n_tokens = 29551, size = 871.867 MiB, took 319.43 ms)
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="140737347833856" timestamp=1787213339 id_slot=0 id_task=20054 p0=29551
+=============================== Failed to sample token
+Data has been stored in probabilities-7017119930-2.txt
+Create an issue with full log and attach that file to the issue
+ ERR [    process_batch_tokens] sampling failed, releasing slot | tid="140737347833856" timestamp=1787213339 id_slot=0 id_task=20054 error="failed to sample token: all candidate logits are NaN (dump: probabilities-7017119930-2.txt)"

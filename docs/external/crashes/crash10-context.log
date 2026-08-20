@@ -1,0 +1,41 @@
+[Thread 0x7fd4c577d000 (LWP 67334) exited]
+slot create_check: id  0 | task 0 | created context checkpoint 4 of 32 (pos_min = 0, pos_max = 26639, n_tokens = 26640, size = 871.845 MiB, took 305.14 ms)
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="140737347833856" timestamp=1787207937 id_slot=0 id_task=0 p0=26640
+INFO [      log_server_request] request | tid="140552024182784" timestamp=1787207937 remote_addr="127.0.0.1" remote_port=36022 status=200 method="POST" path="/v1/chat/completions" params={}
+slot create_check: id  0 | task 0 | created context checkpoint 5 of 32 (pos_min = 0, pos_max = 26645, n_tokens = 26646, size = 871.845 MiB, took 302.28 ms)
+slot print_timing: id  0 | task 0 | 
+prompt eval time =   16546.24 ms / 26645 tokens (    0.62 ms per token,  1610.34 tokens per second)
+       eval time =    8158.99 ms /   157 tokens (   51.97 ms per token,    19.24 tokens per second)
+      total time =   24705.23 ms / 26802 tokens
+slot create_check: id  0 | task 0 | created context checkpoint 6 of 32 (pos_min = 0, pos_max = 26800, n_tokens = 26801, size = 871.846 MiB, took 310.32 ms)
+INFO [           release_slots] slot released | tid="140737347833856" timestamp=1787207946 id_slot=0 id_task=0 n_ctx=131072 n_past=26801 n_system_tokens=0 n_cache_tokens=26801 truncated=false
+INFO [              slots_idle] all slots are idle | tid="140737347833856" timestamp=1787207946
+======== Prompt cache: cache size: 26801, n_keep: 0, n_discarded_prompt: 0, cache_ram_n_min: 0, f_keep: 1.00, cache_ram_similarity: 0.50
+INFO [   launch_slot_with_task] slot is processing task | tid="140737347833856" timestamp=1787207946 id_slot=0 id_task=162
+======== Cache: cache_size = 26801, n_past =  26801, n_past_prompt = 26801
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="140737347833856" timestamp=1787207946 id_slot=0 id_task=162 p0=26801
+[New Thread 0x7fd4c577d000 (LWP 67820)]
+[New Thread 0x7fd4c5f7e000 (LWP 67821)]
+[New Thread 0x7fd4c677f000 (LWP 67822)]
+[New Thread 0x7fd4c6f80000 (LWP 67823)]
+[New Thread 0x7fd4c8783000 (LWP 67824)]
+[New Thread 0x7fd4c7f82000 (LWP 67825)]
+[New Thread 0x7fd4c7781000 (LWP 67826)]
+[New Thread 0x7fd4c4f7c000 (LWP 67827)]
+[New Thread 0x7fd4c477b000 (LWP 67828)]
+[New Thread 0x7fd4c3f7a000 (LWP 67829)]
+[New Thread 0x7fd4c3779000 (LWP 67830)]
+[Thread 0x7fd4c3f7a000 (LWP 67829) exited]
+[Thread 0x7fd4c477b000 (LWP 67828) exited]
+[Thread 0x7fd4c5f7e000 (LWP 67821) exited]
+[Thread 0x7fd4c577d000 (LWP 67820) exited]
+[Thread 0x7fd4c8783000 (LWP 67824) exited]
+[Thread 0x7fd4c677f000 (LWP 67822) exited]
+[Thread 0x7fd4c6f80000 (LWP 67823) exited]
+[Thread 0x7fd4c7f82000 (LWP 67825) exited]
+[Thread 0x7fd4c7781000 (LWP 67826) exited]
+[Thread 0x7fd4c4f7c000 (LWP 67827) exited]
+[Thread 0x7fd4c3779000 (LWP 67830) exited]
+slot create_check: id  0 | task 162 | created context checkpoint 7 of 32 (pos_min = 0, pos_max = 29227, n_tokens = 29228, size = 871.864 MiB, took 310.63 ms)
+INFO [    batch_pending_prompt] kv cache rm [p0, end) | tid="140737347833856" timestamp=1787207947 id_slot=0 id_task=162 p0=29228
+=============================== Failed to sample token

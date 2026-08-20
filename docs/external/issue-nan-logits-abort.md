@@ -20,9 +20,9 @@ the negative results included, so that nobody repeats them.
     Data has been stored in probabilities.txt
     llama-sampling.cpp:745: Fatal error
 
-Eight `probabilities.txt` dumps survive (the ninth was overwritten — the file is
-written to the working directory under a fixed name, so a second abort destroys
-the first). All eight are the same:
+Nine of the ten `probabilities.txt` dumps survive; #8's was lost because the file
+is written to the working directory under a fixed name, so the next abort
+destroys it. All nine are the same:
 
     candidates->size: 40
     max  = nan
@@ -33,14 +33,14 @@ the first). All eight are the same:
     2  10  nan  nan
     ...
 
-Same 40 token ids, in the same order, in all eight — `38 22 10 34 26 18 20 4 24
+Same 40 token ids, in the same order, in all nine — `38 22 10 34 26 18 20 4 24
 12 …`, which is what a partial sort leaves behind when every comparison is false.
 
 **The logit column is already NaN.** The poison arrives at the sampler; it is not
 produced by it. So this is a decode-side problem and top-k/temperature are only
 where it becomes fatal.
 
-## The nine aborts
+## The ten aborts
 
 | # | started | build | `-rtr` | `-ub` | `n_ctx` | depth at abort | uptime | tasks |
 |---|---|---|---|---:|---:|---:|---:|---:|
@@ -53,6 +53,7 @@ where it becomes fatal.
 | 7 | 08-17 18:06 | `2cda8d2d` | off | 8192 | 131072 | 39 518 | 0.5 h | 71 |
 | 8 | 08-18 12:53 | `8337e4cd` | off | 8192 | 131072 | 92 008 | 0.1 h | 12 |
 | 9 | 08-19 18:50 | `8337e4cd` | off | 8192 | 131072 | 16 934 | 3.3 h | 105 |
+| 10 | 08-20 08:33 | `8337e4cd` | off | 8192 | 131072 | 29 228 | 0.1 h | 2 |
 
 Depth at abort spans 11 k to 92 k and correlates with nothing. It is not a
 context-limit effect: `n_ctx` is 131072 throughout.
@@ -67,9 +68,9 @@ context-limit effect: `n_ctx` is 131072 throughout.
 | build | serving time | tasks | aborts | rate |
 |---|---:|---:|---:|---|
 | `2cda8d2d` / `7ebbb906` | 23.0 h | 518 | 7 | 1 per 3.3 h |
-| `8337e4cd` | 7.4 h | 634 | 2 | 1 per 3.7 h |
+| `8337e4cd` | 7.6 h | 636 | 3 | 1 per 2.5 h |
 
-**Two events cannot measure a rate.** The interval around 1-per-3.7 h is wide
+**Three events cannot measure a rate.** The interval around 1-per-2.5 h is wide
 enough that a large real improvement is entirely possible, and this table does
 not exclude one. It excludes only the strong claim: the abort is not gone.
 
@@ -79,6 +80,59 @@ a poisoned tensor propagates to every logit — which matches all-NaN rather tha
 some-NaN, and matches the abort appearing in configurations that differ in
 everything except attention. That reasoning still looks right in shape. It just
 does not appear to be this code path, or not only this one.
+
+## A backtrace, at last -- and what it shows
+
+Abort #10 was the first caught with the server running under gdb, so there is
+finally a stack. (`GGML_ABORT` does try: it forks gdb to attach to its own
+parent, which Yama's ptrace_scope=1 refuses. The fallback to
+`backtrace_symbols_fd` is gated on gdb exiting `EXIT_FAILURE`, and gdb exits 0
+after a refused attach -- so on any ptrace_scope=1 host an abort prints nothing.
+That is a small separate wart, and it is why reports 1-9 have no stack.)
+
+```
+#5  ggml_abort (file="...llama-sampling.cpp", line=745, fmt="Fatal error") at ggml.c:266
+#6  llama_sample_token_with_rng_impl (...) at llama-sampling.cpp:745
+#7  llama_sample_token_with_rng (...) at llama.cpp:12758
+#8  llama_sampling_sample_impl (..., idx=4, ...) at common/sampling.cpp:556
+#9  common_sampler_sample (...) at common/sampling.cpp:704
+#10 server_context::process_batch_tokens (..., n_batch=8192) at server-context.cpp:4791
+#11 server_context::update_slots (...) at server-context.cpp:4998
+```
+
+It confirms the logits arrive poisoned rather than being spoiled by the sampler,
+which was already the reading from the dumps. It does not locate the producer --
+`llama_decode` has returned by then.
+
+**But it shows something worth acting on independently of the root cause.** The
+call site at `server-context.cpp:4790` is already wrapped:
+
+```cpp
+try {
+    id = common_sampler_sample(slot.ctx_sampling, ctx, tok_idx);
+    common_sampler_accept(slot.ctx_sampling, ctx, id, true);
+} catch (const std::exception & e) {
+    LOG_ERROR("sampling failed, releasing slot", {...});
+    send_error(slot, std::string("sampling error: ") + e.what(), ERROR_TYPE_SERVER);
+    slot.release();
+    ...
+}
+```
+
+The server is *designed* to survive a failed sample: log it, fail that one
+request, release the slot, carry on. That handler can never run, because the
+failure path calls `GGML_ABORT` -> `ggml_abort` -> `abort()`, which is not a C++
+exception. Frame #4 in the stack is `__GI_abort`.
+
+So a condition the server already knows how to handle takes the whole process
+down, and every other in-flight request with it. Throwing from
+`llama_sample_token_with_rng_impl` instead of aborting -- or returning a sentinel
+the caller turns into a throw -- would make the existing handler reachable and
+turn "the server dies every few hours" into "one request returned a 500". The
+dump to `probabilities.txt` can stay exactly as it is.
+
+That is worth doing whether or not the NaN is ever explained, and it does not
+prejudge the cause.
 
 ## A lead: #2311 may simply not reach this GPU
 
@@ -168,9 +222,10 @@ thousands of tokens, heavy prompt-cache reuse.
 
 ## Attached
 
-`crash-20260813-1204` through `crash9` context logs and eight `probabilities.txt` dumps. Full server
-logs for any of the nine are available on request — they are large, so they are
-not attached by default.
+`crash-20260813-1204` through `crash10` context logs and nine
+`probabilities.txt` dumps, plus `crash10-backtrace.log` -- the full stack, all 54
+threads. Full server logs for any of the ten are available on request; they are
+large, so they are not attached by default.
 
 Happy to run patches, instrumented builds, or a bisect here; the machine
 reproduces this every few hours without any effort, which makes it a reasonable
