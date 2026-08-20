@@ -97,7 +97,7 @@ everything still works — you just re-run `./bench.sh` to re-pick the split
 |----------|-----|
 | GPU      | NVIDIA RTX PRO 6000 Blackwell Workstation — 96 GiB, `sm_120`, ~1.8 TB/s |
 | CPU      | Intel Core Ultra 7 270K Plus — 8 P-cores + 16 E-cores = **24 cores**, no SMT |
-| RAM      | 224 GiB DDR5 (2×48 + 2×64 GiB) at 6267 MT/s, dual channel — ~100 GB/s |
+| RAM      | 256 GB DDR5 (4×64 GiB) at 6667 MT/s, dual channel — ~107 GB/s; 244 GiB visible |
 | Storage  | NVMe, 1.8 TB free |
 | OS       | Ubuntu 26.04 LTS (`resolute`), kernel 7.0.0-29-generic, glibc 2.43 |
 | Driver   | NVIDIA **595.84** (CUDA runtime 13.2); also verified on **610.43.02** / UMD 13.3 — no change |

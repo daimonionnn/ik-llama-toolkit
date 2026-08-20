@@ -187,7 +187,10 @@ much — all measured, all bottlenecked elsewhere. Generation is limited by
    lever. ik_llama supports it natively (`-sm layer`, `-ts`).
 2. **Fewer experts on the CPU** — shorter `IK_CTX`, or `q4_0` KV to free VRAM,
    or a smaller quant. Trades context/quality for speed.
-3. **Faster RAM** — DDR5-6333 → 7000 (~+10% bandwidth) ≈ +7–10% on tg at 262k.
+3. **Faster RAM** — was the third lever here and has since been spent: this box
+   went 6267 → 6400 → 6667, and RESULTS §25/§26 measured generation tracking
+   MT/s almost exactly (+5.5 % for +18 % of bandwidth). Further gains need a
+   kit above 6667, and the return is proportional, not dramatic.
 4. Faster CPU cores / more GPU power / faster PCIe — **near-zero** here.
 
 The full reasoning is in [TUNING.md §7](TUNING.md).

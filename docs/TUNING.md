@@ -110,7 +110,9 @@ Per token, each CPU-resident layer must read its 8 active experts:
 8 experts × 3 matrices × 4096 × 1280 × ~0.56 bytes/param ≈ 70 MiB
 ```
 
-At a realistic ~75 GB/s of achievable DDR5-6333 bandwidth that is **~0.95 ms
+At a realistic ~75 GB/s achievable (this box now runs DDR5-6667, ~107 GB/s
+theoretical; the achievable figure was measured on the older 6267 kit and the
+ceiling below is therefore conservative) that is **~0.95 ms
 per layer per token**. Ten layers ≈ 10 ms ≈ a ceiling near 100 tok/s from
 memory alone, before any compute, sync or sampling overhead. The same 10 layers
 on the GPU would cost ~0.4 ms *in total*.
@@ -249,7 +251,7 @@ If a run dies during warmup with a CUDA OOM, halve `IK_UBATCH` first.
   but the cost reappears as stalls during the first responses. Off by default
   since a server starts once and runs for hours; turn it on if you restart
   constantly while experimenting.
-- **`--mlock`** — with ~30 GiB of CPU experts and 224 GiB of RAM, the page cache
+- **`--mlock`** — with ~30 GiB of CPU experts and 244 GiB of RAM, the page cache
   keeps them resident anyway, and `mlock` needs a raised `ulimit -l`.
 - **`-amb`** — caps attention scratch size. Useful when attention buffers blow
   up; with 8 KV heads and a 512-token window they do not.
