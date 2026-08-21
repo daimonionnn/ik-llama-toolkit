@@ -2892,7 +2892,7 @@ inference about a commit — but that was true in §24 as well.
 
 ---
 
-## 36. The NaN originates in `FLASH_ATTN_EXT` at layer 0 (2026-08-21)
+## 36. The NaN surfaces at `FLASH_ATTN_EXT` layer 0 — and arrives from the KV cache (2026-08-21)
 
 Thirteen aborts had been chased through configuration bisects, an upstream commit
 audit and one refuted overflow hypothesis (§35), all without ever seeing where the
@@ -2952,7 +2952,48 @@ the immediate recurrence.
 The probe has been extended to check the inputs of the offending node and print
 `(clean)` or `<== ALREADY NaN` against each. The next abort answers it.
 
-### 36.4 Why this took thirteen aborts
+### 36.4 Answered overnight: it reads the NaN, it does not make it
+
+§36.3 asked whether that op produces the NaN or merely reads it. The probe was
+extended to check the inputs of the offending node, and the fourteenth abort
+answered on the first try:
+
+    op     : FLASH_ATTN_EXT   fattn-0        f32   512 x 64 x 1378
+    src[0] : q_rope-0                        f32   (clean)
+    src[1] : raw_k-0                         f16   <== ALREADY NaN
+    src[2] : raw_k-0                         f16   <== ALREADY NaN
+    src[3] : dsv4_raw_mask_padded-0          f16   <== ALREADY NaN
+    src[4] : blk.0.attn_sinks.weight         f32   (clean)
+
+**So the heading this section was first given was wrong.** Flash attention is
+where the poison becomes visible — the first node in the graph that reads from
+the cache — not where it comes from. The query and the model weight are clean, so
+nothing is wrong with the input to the model.
+
+### 36.5 And it does not appear to be computed at all
+
+The stronger result is what the probe did **not** see. Across 4.6 h and 33
+requests it logged exactly one block of 162 hits, the one at the abort. No node
+output was ever NaN before that. Yet the cache was already poisoned when that
+graph began.
+
+If something had *computed* a NaN, the probe would have caught it as a node
+output. It did not. That points at memory that was never written rather than a
+value that was miscalculated — and both poisoned tensors are padded past the end
+of the real data:
+
+    prompt        1378 tokens
+    raw_k-0       512 x 1536      158 elements beyond
+    mask_padded   1536 x 1392     the name says it
+
+The probe now reports the flat index, row and column of the first NaN and how
+many there are. If they all sit past the logical end, uninitialised padding is
+established. That is the next abort's job.
+
+Recorded as a hypothesis, not a finding — §35 is one section away as a reminder
+of what a convincing mechanism is worth before it is measured.
+
+### 36.6 Why this took thirteen aborts
 
 The three configuration variables that were bisected (`-rtr`, `-ub`, placement)
 could never have found it: none of them touches layer-0 attention. §24's lesson

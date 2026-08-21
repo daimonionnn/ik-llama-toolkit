@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-cuda.cu b/ggml/src/ggml-cuda.cu
-index 232f765a..846eb132 100644
+index 232f765a..85e0b967 100644
 --- a/ggml/src/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda.cu
-@@ -3633,6 +3633,125 @@ static inline bool ops_are_same_device(const ggml_cgraph * cgraph, int first, in
+@@ -3633,6 +3633,156 @@ static inline bool ops_are_same_device(const ggml_cgraph * cgraph, int first, in
      return true;
  }
  
@@ -23,6 +23,8 @@ index 232f765a..846eb132 100644
 +// Costs a reduction per node, so it is off unless IK_NAN_CHECK=1.
 +__device__ int g_nan_node = -1;
 +__device__ int g_nan_kind = 0;   // 1 = nan
++__device__ int g_nan_first_idx = 2147483647;   // lowest flat index holding a NaN
++__device__ int g_nan_count = 0;
 +
 +static __global__ void k_nan_probe_f32(const float * x, int64_t n, int node_idx) {
 +    int64_t i = (int64_t)blockIdx.x*blockDim.x + threadIdx.x;
@@ -31,7 +33,14 @@ index 232f765a..846eb132 100644
 +    // NaN only. inf is NOT an error here: attention masks are built out of
 +    // -INFINITY, so flagging inf produced 1386 hits on a single healthy request
 +    // -- from SCALE and FILL nodes doing exactly what they should.
-+    if (isnan(v)) { atomicCAS(&g_nan_node, -1, node_idx); atomicExch(&g_nan_kind, 1); }
++    if (isnan(v)) {
++        atomicCAS(&g_nan_node, -1, node_idx); atomicExch(&g_nan_kind, 1);
++        // WHERE in the tensor, not just whether: if every NaN sits past the
++        // logical end of the data, this is uninitialised padding being read
++        // rather than a poisoned value being computed.
++        atomicMin(&g_nan_first_idx, (int) i);
++        atomicAdd(&g_nan_count, 1);
++    }
 +}
 +
 +static __global__ void k_nan_probe_f16(const half * x, int64_t n, int node_idx) {
@@ -41,7 +50,14 @@ index 232f765a..846eb132 100644
 +    // NaN only. inf is NOT an error here: attention masks are built out of
 +    // -INFINITY, so flagging inf produced 1386 hits on a single healthy request
 +    // -- from SCALE and FILL nodes doing exactly what they should.
-+    if (isnan(v)) { atomicCAS(&g_nan_node, -1, node_idx); atomicExch(&g_nan_kind, 1); }
++    if (isnan(v)) {
++        atomicCAS(&g_nan_node, -1, node_idx); atomicExch(&g_nan_kind, 1);
++        // WHERE in the tensor, not just whether: if every NaN sits past the
++        // logical end of the data, this is uninitialised padding being read
++        // rather than a poisoned value being computed.
++        atomicMin(&g_nan_first_idx, (int) i);
++        atomicAdd(&g_nan_count, 1);
++    }
 +}
 +
 +static bool ik_nan_check_enabled() {
@@ -57,8 +73,10 @@ index 232f765a..846eb132 100644
 +    if (t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16) return false;
 +    const int64_t n = ggml_nelements(t);
 +    if (n <= 0) return false;
-+    int reset = -1;
++    int reset = -1, big = 2147483647, zero = 0;
 +    CUDA_CHECK(cudaMemcpyToSymbol(g_nan_node, &reset, sizeof(reset)));
++    CUDA_CHECK(cudaMemcpyToSymbol(g_nan_first_idx, &big, sizeof(big)));
++    CUDA_CHECK(cudaMemcpyToSymbol(g_nan_count, &zero, sizeof(zero)));
 +    const int64_t block = 256, grid = (n + block - 1)/block;
 +    if (grid > 2147483647LL) return false;
 +    if (t->type == GGML_TYPE_F32) k_nan_probe_f32<<<grid, block, 0, ctx.stream()>>>((const float *) t->data, n, 1);
@@ -106,7 +124,20 @@ index 232f765a..846eb132 100644
 +            if (!t->src[k]) continue;
 +            const char * verdict = "";
 +            if (t->src[k]->type == GGML_TYPE_F32 || t->src[k]->type == GGML_TYPE_F16) {
-+                verdict = ik_tensor_has_nan(ctx, t->src[k]) ? "  <== ALREADY NaN" : "  (clean)";
++                static char buf[160];
++                if (ik_tensor_has_nan(ctx, t->src[k])) {
++                    int first = 0, cnt = 0;
++                    CUDA_CHECK(cudaMemcpyFromSymbol(&first, g_nan_first_idx, sizeof(first)));
++                    CUDA_CHECK(cudaMemcpyFromSymbol(&cnt,   g_nan_count,     sizeof(cnt)));
++                    const long long ne0 = t->src[k]->ne[0];
++                    snprintf(buf, sizeof(buf),
++                             "  <== ALREADY NaN: first at flat %d (row %lld col %lld), %d of %lld elems",
++                             first, ne0 ? first/ne0 : -1LL, ne0 ? first%ne0 : -1LL,
++                             cnt, (long long) ggml_nelements(t->src[k]));
++                    verdict = buf;
++                } else {
++                    verdict = "  (clean)";
++                }
 +            } else {
 +                verdict = "  (not checked: quantised)";
 +            }
@@ -128,7 +159,7 @@ index 232f765a..846eb132 100644
  static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst, const ggml_cgraph * cgraph, int & i) {
  
  #if IK_PRINT_TIMING
-@@ -4251,6 +4370,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+@@ -4251,6 +4401,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
      printf("%s(%s): %d us\n", ggml_op_name(dst->op), dst->name, (int)(tim2 - tim1));
  #endif
  
@@ -137,7 +168,7 @@ index 232f765a..846eb132 100644
      return true;
  }
  
-@@ -4772,6 +4893,8 @@ GGML_CALL static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t
+@@ -4772,6 +4924,8 @@ GGML_CALL static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t
  
      evaluate_and_capture_cuda_graph(cuda_ctx, cgraph, graph_evaluated_or_captured, use_cuda_graph, cuda_graph_update_required);
  
