@@ -1,0 +1,13 @@
+=============================== IK_NAN_CHECK: first NaN at node 14
+  op       : FLASH_ATTN_EXT
+  tensor   : fattn-0
+  type     : f32
+  shape    : 512 x 64 x 2128 x 1
+  src[0]   : q_rope-0 (view) (permuted)   f32        512 x 2128 x 64 x 1  (clean)
+  src[1]   : CUDA0#raw_k-0 (view) (permuted)#0 f16        512 x 2304 x 1 x 1  <== ALREADY NaN: first at flat 142 (row 0 col 142), 62573 of 1179648 elems
+  src[2]   : CUDA0#raw_k-0 (view) (permuted)#0 f16        512 x 2304 x 1 x 1  <== ALREADY NaN: first at flat 154 (row 0 col 154), 62669 of 1179648 elems
+  src[3]   : CUDA0#dsv4_raw_mask_padded-0 (view)#0 f16        2304 x 2128 x 1 x 1  <== ALREADY NaN: first at flat 2 (row 0 col 2), 75623 of 4902912 elems
+  src[4]   : blk.0.attn_sinks.weight      f32        64 x 1 x 1 x 1  (clean)
+
+=============================== IK_NAN_CHECK: first NaN at node 0
+  op       : MUL_MAT

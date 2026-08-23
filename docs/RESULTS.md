@@ -2012,6 +2012,8 @@ repository so the numbers quoted above can be checked against their source:
 | §25 DDR5-7400 | `sweep-…-20260817-232449.md` |
 | §34 DDR5-6667, under gdb | `depthbench-ub8192-20260820-102351.md` |
 | §34 DDR5-6667, `IK_GDB=0` control | `depthbench-ub8192-20260820-103046.md` |
+| §37 probes + scan, graphs off | `depthbench-ub8192-20260821-160945.md` |
+| §37 probes + scan, graphs on | `depthbench-ub8192-20260821-161648.md` |
 
 (`sweep-…` is `sweep-deepseek-v4-flash-gpu-experts-128k-`.)
 
@@ -2993,10 +2995,675 @@ established. That is the next abort's job.
 Recorded as a hypothesis, not a finding — §35 is one section away as a reminder
 of what a convincing mechanism is worth before it is measured.
 
-### 36.6 Why this took thirteen aborts
+### 36.6 Measured: it is NOT uninitialised padding
+
+The fifteenth abort answered §36.5 on the first try, and the answer is no.
+
+    prompt 2414 tokens, raw_k-0 is 512 x 2560
+
+    raw_k-0   first NaN at flat 36 (row 0, col 36)   93 119 of 1 310 720
+    mask      first NaN at flat 86 (row 0, col 86)   95 671 of 6 184 960
+
+`row = flat/ne0` with `ne0 = 512`, the head dimension. So the first NaN sits in
+**token 0's key vector, at dimension 36** — the very start of real data, as far
+from the padding as it is possible to be.
+
+The counts say the same thing independently:
+
+| | elements | share |
+|---|---:|---:|
+| whole tensor | 1 310 720 | |
+| real data | 1 235 968 | 94.3 % |
+| padding | 74 752 | 5.7 % |
+| **NaN** | **93 119** | **7.1 %** |
+
+**There is more NaN than there is padding** — 18 367 elements more. Even a wholly
+corrupt pad region could not account for it. The poison is scattered through the
+real data, about 7 % of the tensor.
+
+Static analysis had already made it unlikely, and is recorded because it cost
+nothing and narrowed the field before the abort arrived:
+
+* `dsv4_pad_raw_mask_to` fills with `-INFINITY` — and its `Oops, padding mask`
+  printf appears **zero** times in any log, so it never ran at all.
+* `dsv4_pad_mask_tokens` also fills `-INFINITY`, which is inf, not NaN.
+* `dsv4_pad_raw_k_to` zeroes its pad via `ggml_scale(row0, 0.0f)`. That would
+  propagate rather than clear a NaN or inf in row 0 — but it needs row 0 to be
+  bad already, which is the question, not the answer.
+
+### 36.7 What that leaves
+
+The KV cache for layer 0 is wholesale poisoned before the graph that reads it
+begins, and no node output was NaN earlier in that graph. So it is persistent
+state that went bad, not arithmetic in this forward pass.
+
+One observation, deliberately marked as weak. The abort followed a checkpoint
+creation at `pos_max = 75190` and a `kv cache rm p0=75191`. §32.4 dismissed
+checkpoint-adjacency as vacuous, and on frequency alone it still is — 151
+creations in this run. What has changed is that the poison is now known to live
+**in the KV cache**, which is exactly what checkpoints read and write. That moves
+it from coincidence to a mechanism worth testing, and no further.
+
+Against it, twice over. There was **no restore** anywhere near the abort — 13 in
+the whole run, none in the preceding 60 lines. And the invalidation path, which
+the count of 132 made look like the remaining candidate, does not touch the KV
+cache at all: `server-context.cpp:3736` only erases entries from
+`slot.server_cached_prompt.checkpoints`, a host-side vector of saved copies.
+
+So of the three checkpoint operations, creation reads the cache, invalidation
+drops host copies, and restore writes the cache but did not run. **None of them
+is a route by which the cache gets NaN in it.** The checkpoint lead is close to
+dead on the same evidence that raised it; it is left written down only so the
+next person does not re-raise it.
+
+§35 remains one section away. This is a lead, not a finding.
+
+### 36.8 `raw_k` is a VIEW of the cache, not a computation — which explains §36.5
+
+§36.5 made much of the probe never seeing a node output go NaN, and read that as
+evidence for memory never written. The real explanation is duller and does not
+need CUDA graphs. In `dsv4_raw_get_k`:
+
+```c
+if (n_stream == 1 && lctx->kv_self.n == raw_k_read_idxs->ne[0]) {
+    return ggml_view_3d(ctx, cache, n_embd_head, n_head_kv, n_kv, ...);
+}
+```
+
+On this path `raw_k` is **a `ggml_view_3d` straight into `kv_self.k_l[il]`**. A
+view is not a node; nothing is computed, so there is no node output for the probe
+to flag. The NaN is physically in the KV cache and `raw_k` is a window onto it.
+
+That resolves the paradox without the graph-replay hypothesis. It does not
+resolve where the NaN comes from — it only says the producer was never going to
+show up in a scan of node outputs, so §36.5's "not computed at all" was reading
+too much into a blind spot.
+
+The other branch of the same function is worth noting for later: it gathers rows
+with `ggml_get_rows(cache_2d, raw_k_read_idxs)` over `n_kv = max(256,
+GGML_PAD(n_kv_visible, 256))` rows — more rows than are visible, using whatever
+indices sit in `raw_k_read_idxs` past the end. That path was **not** the one
+taken here, and is recorded as somewhere to look, not as a claim.
+
+### 36.9 The first KV scan was measuring nothing — a correction
+
+The scan added to `llama_decode_internal` reported a clean cache through an abort
+in which attention demonstrably read NaN out of that very tensor. Both cannot be
+true, and the scan was wrong: it covered `max(kv.head, kv.used)` cells, but
+DeepSeek-V4 compacts and windows rows (`kv.row_count`, `size_swa`, `head_swa`),
+so `head`/`used` does not describe layer 0's occupancy at all.
+
+It now scans the whole tensor, counts NaN inside and beyond the live rows
+separately, and prints a heartbeat:
+
+    IK_KV_SCAN: alive, decode #1, scanned 67108864 elems (131072 live rows), 0 NaN (0 live)
+
+The heartbeat exists because the first version could not distinguish *found
+nothing* from *never ran*, and that distinction cost an abort's worth of
+evidence. Any probe that reports only on failure needs one.
+
+Cost: 67 M f16 reads per decode. Acceptable while hunting, not otherwise.
+
+### 36.10 Why this took thirteen aborts
 
 The three configuration variables that were bisected (`-rtr`, `-ub`, placement)
 could never have found it: none of them touches layer-0 attention. §24's lesson
 was to look outside the repository; this section's is narrower and more useful —
 **instrument the failing path rather than bisecting the configuration around it.**
 The probe cost one build and answered on the first abort it saw.
+
+---
+
+## 37. What the NaN hunt costs, and CUDA graphs are not it (2026-08-21)
+
+The diagnostic build carries three things the shipped one does not: the node NaN
+probe (§36.1), the KV cache scan (§36.9) and `GGML_CUDA_DISABLE_GRAPHS=1`. Two
+arms, same tool and depths, `-r 2`, against the reference run from earlier the
+same day.
+
+| depth | reference | probes + scan, graphs **off** | probes + scan, graphs **on** |
+|---:|---|---|---|
+| 4k | 1363.1 / 19.60 | 1310.4 / **13.17** | 1285.2 / 13.42 |
+| 32k | 1825.8 / 18.66 | 1735.2 / **12.79** | 1700.0 / 12.98 |
+
+Against the reference: prefill −3.9 % and −5.0 %, generation **−32.8 % and
+−31.5 %**.
+
+### 37.1 CUDA graphs are worth about 2 %, not 30
+
+| depth | graphs on vs off |
+|---|---|
+| 4k | prefill −1.9 %, generation **+1.9 %** |
+| 32k | prefill −2.0 %, generation **+1.5 %** |
+
+Enabling graphs buys 1.5–2 % of generation and makes prefill marginally worse,
+which is inside the 3.2 % within-run spread at 4k. So turning them off — done to
+remove the probe's blind spot during replay — costs about two percent of
+generation, not the thirty that the diagnostic build loses overall.
+
+That also disposes of the idea that graph replay is expensive enough to matter
+here either way.
+
+### 37.2 The scan dominates, and the asymmetry says why
+
+The NaN probe alone was measured at −5.3 % prefill and −7.0 % generation when it
+was added. Graphs account for ~2 %. The remaining ~25 points of generation are
+the KV scan.
+
+The split between prefill and generation is the tell: the scan runs **once per
+decode**, reading 67 M f16 values. Prefill amortises that over thousands of
+tokens in a batch; generation pays it in full for every single token. Hence 5 %
+against 32 %.
+
+Two cheaper variants exist — scan every Nth decode, or scan only during prefill,
+since the poisoning shows up while a prompt is being processed. Neither was
+adopted: Matt's call was to keep the full scan while the cause is open, and take
+the generation hit.
+
+---
+
+## 38. Two aborts, two layers, one suspect: `CUDA0#raw_k-N` (2026-08-21)
+
+The corrected scan (§36.9) ran through three aborts and produced a contradiction
+worth more than either half on its own.
+
+### 38.1 The host cache is clean; the device copy is not
+
+    IK_KV_SCAN   layer-0 K cache, whole tensor, every decode:  0 NaN, ever
+    IK_NAN_CHECK 348 blocks across the same run
+
+The scan is not silently broken — its heartbeat prints every 500 decodes and
+reports 67 108 864 elements scanned. So the host-resident KV cache was clean
+entering the decode in which attention read NaN.
+
+### 38.2 The origin of each abort names the same kind of tensor
+
+Only the **first** block of each burst is the origin; the rest is propagation,
+and counting all of them is what made an earlier pass conclude that poisoned
+tensors are mostly not scheduler copies. Restricted to origins:
+
+| burst | origin op | poisoned input | clean inputs |
+|---|---|---|---|
+| 1 | `FLASH_ATTN_EXT`, layer 0 | `CUDA0#raw_k-0 (view) (permuted)#0` | `q_rope-0`, `blk.0.attn_sinks.weight` |
+| 2 | `CONCAT`, layer 4 | `CUDA0#raw_k-4 (view)#0` | `csa_k-4` |
+
+Different op, different layer, same shape of culprit: **`CUDA0#raw_k-N (view)#N`**,
+which the `%s#%s#%d` naming in `ggml-backend.cpp` identifies as a scheduler-made
+copy of a tensor into the CUDA backend. Everything computed natively on the
+device is clean.
+
+### 38.3 Where that points, and what is not yet shown
+
+Two facts sit next to each other:
+
+* `dsv4_raw_get_k` returns `ggml_view_3d(cache, n_embd_head, n_head_kv, n_kv)`
+  with `n_kv = max(256, GGML_PAD(n_kv_visible, 256))` — the view **deliberately
+  extends past the live rows**, to give attention a stable 256-row-aligned shape.
+* the CUDA copy is a flat `cudaMemcpyAsync(dst->data, src->data,
+  ggml_nbytes(dst), ...)` (`ggml-cuda.cu:4483`) — bytes, no strides.
+
+So the copy faithfully brings whatever occupies those beyond-live cache rows onto
+the device. If they were never written, that is uninitialised memory.
+
+**What contradicts the simple version:** the host scan covers the whole of
+`k_l[0]`, beyond-live rows included, and never saw a NaN — while burst 1 is
+layer 0. Either the poison is not in `k_l[0]` at all and `raw_k-0` resolves to a
+different buffer, or it appears between the scan at the end of one decode and the
+copy in the next.
+
+Recorded as the state of the evidence, not as a mechanism. The next step is to
+check the host tensor **at the moment the probe finds the device copy poisoned**,
+rather than at the end of the previous decode — a direct comparison instead of an
+inference across two points in time. §35 is the standing reminder of what happens
+when a plausible mechanism is written up before that comparison is made.
+
+### 38.4 Answered: the host cache is clean at the moment before the graph
+
+§38.3 listed three ways the contradiction could resolve. The next abort picked
+the third, and cleanly:
+
+    IK_KV_SCAN [pre]  poisoned: 0
+    IK_KV_SCAN [post] poisoned: 0
+    IK_NAN_CHECK    : 162 blocks
+    sampler abort   : 1
+
+The `[pre]` scan runs after `ggml_backend_sched_alloc_graph` and immediately
+before the graph is computed, so the gap in which the server can restore a
+checkpoint, run `kv_cache_seq_rm` or defrag is now covered. The host-resident
+`k_l[0]` was clean going in, clean coming out, and the device copy was NaN in
+between.
+
+Two ways of being wrong were checked and neither holds:
+
+* **Wrong tensor.** All three branches in `build_deepseek4.cpp` build `raw_k`
+  from `kv_self.k_l[il]`, including the `raw_compacted` and `read_idxs` paths.
+  The scan is watching what attention reads.
+* **A stale second copy.** `GGML_SCHED_MAX_COPIES` is 1, so `sched->n_copies` is
+  1 whatever `pipeline_parallel` says. There is no older device buffer to read by
+  mistake.
+
+That leaves the transfer itself. `ggml-backend.cpp:2133` copies split inputs with
+a flat `ggml_backend_tensor_set_async(..., input->data, 0, ggml_nbytes(input))` —
+and `input` here is `raw_k-N (view) (permuted)`, not a contiguous tensor.
+
+### 38.5 The probe that decides it
+
+`IK_COPY_CHECK=1` scans the **exact bytes about to be sent, at the moment of
+sending**, on the host side of that call. It ends the practice of comparing a
+host scan at one point in time against a device state at another.
+
+| outcome | conclusion |
+|---|---|
+| `HOST source already NaN` fires | the poison is in the cache and the whole-tensor scan is missing it — wrong offset or range |
+| silent, while `IK_NAN_CHECK` still fires | the poison is introduced **by the host→device transfer** |
+
+Verified not to fire on healthy traffic before being left to run.
+
+### 38.6 Four instrumented copy paths, none of them carries `raw_k`
+
+`IK_COPY_CHECK` was placed, in turn, on:
+
+1. the `only_active_experts` + `BUFFER_USAGE_WEIGHTS` branch in
+   `ggml_backend_sched_copy_inputs` — expert streaming, not the KV cache;
+2. the general input-copy branch in the same function;
+3. `ggml_backend_tensor_copy`;
+4. `ggml_backend_tensor_copy_async` and `ggml_backend_tensor_set_async`.
+
+Every one reports the same after a 35 007-token prefill:
+
+    IK_COPY_CHECK: alive, 1 copies seen, 0 host-f16 scanned
+
+So `CUDA0#raw_k-0` is not filled through any of them. The mechanism assumed in
+§38.3 — a flat byte copy of a permuted view — is not what happens.
+
+**The heartbeat is the only reason this is known.** Without it, four separate runs
+would have been read as "the host source is clean", and the fourth would have
+been written up. What the counter actually says is "this path is not used". §36.9
+recorded that lesson after the first KV scan; it took four more misses before it
+was applied without being reminded.
+
+### 38.7 The possibility that fits everything
+
+If nothing ever copies into `CUDA0#raw_k-N`, it holds whatever the allocator left
+in that device memory. That would account for the whole picture at once: a clean
+host cache, a poisoned device tensor, no node that computes it, and no copy that
+can be caught in the act.
+
+Cheap to test: log the names in `split->inputs[]` and see whether `raw_k-N` is
+among them at all. If it is not, the tensor is allocated and never written.
+
+Not tested yet — recorded as the next step, not as a finding.
+
+### 38.8 The contradiction was mine, three times over
+
+§38.6 reported four instrumented copy paths seeing no traffic, and §38.7 built a
+hypothesis on it. Both were wrong, and for the same reason each time: **a probe
+that had not run was read as a probe reporting zero.**
+
+| # | what was read | what it meant |
+|---|---|---|
+| 1 | KV scan: no poisoning | scanned `max(head, used)` cells; DeepSeek-V4 compacts and windows rows, so that range describes nothing (§36.9) |
+| 2 | branch tags: only `try_async` ever taken | two of three `str.replace` calls silently matched nothing — they had no `assert`, unlike every other edit |
+| 3 | copy check: "1 copies seen" | the *first* heartbeat, printed at call #1; the next was due at 50 000 and short tests never reached it |
+
+With the tags actually present, every input takes `try_async` **and then falls
+back**: 253 distinct names through `tensor_copy`, 23 through `copy_early`. That
+matches the static reading — `ggml_backend_buffer_is_cuda` compares against the
+*device* buffer's `get_name`, and the KV cache is `CUDA_Host`, so
+`cpy_tensor_async` returns false for all of them.
+
+With a readable heartbeat, the copy check turns out to have been working all
+along:
+
+    IK_COPY_CHECK: alive, 20000 copies seen, 10646 host-f16 scanned
+
+### 38.9 What is now actually established
+
+`raw_k-N` reaches the device through:
+
+    ggml_backend_tensor_copy(src, dst)
+      -> ggml_backend_buffer_is_host(src->buffer)          // true, CUDA_Host
+      -> ggml_backend_tensor_set(dst, src->data, 0, ggml_nbytes(src))
+
+a flat byte copy of a **permuted view**, and the check on it reports nothing over
+10 646 host-f16 copies of healthy traffic.
+
+So the decisive comparison is finally armed rather than assumed: at the next
+abort, either the host bytes are dirty at the moment of the copy — and the
+whole-tensor scan is missing them — or they are clean and the poison is
+introduced in transit.
+
+**The lesson, since it cost more than any hypothesis here:** a probe that only
+reports on failure is indistinguishable from a probe that never ran. Every one
+needs a liveness signal, and every edit that inserts one needs to be verified
+against the file rather than the script's own success message.
+
+---
+
+## 39. Found: the host KV cache is poisoned, in layers 3–42 (2026-08-22)
+
+The seventeenth abort answered §38.9 on the first try, and the answer is the
+first branch: **the host bytes are already NaN at the moment of the copy.**
+
+    IK_COPY_CHECK [tensor_copy]: HOST source already NaN: raw_k-4 (view) -> CUDA0#raw_k-4 (view)#0,
+                                 530432 of 655360 f16, first at 0
+
+157 such reports in one abort, across **40 distinct layers**, and the shape of it
+is what makes it a finding rather than another observation:
+
+| layer | NaN | share | first at |
+|---:|---:|---:|---:|
+| 0, 1, 2 | — | — | never reported |
+| 3 | 12 288 of 655 360 | 1.9 % | element 1024 (row 2) |
+| 4 … 42 | **530 432 of 655 360** | **80.9 %** | element 0 (row 0) |
+
+Byte-identical counts across thirty-nine layers. 655 360 f16 is 1280 rows of 512;
+1036 rows are NaN and 244 are clean, the same split every time. Uniformity like
+that is memory that was never written, not arithmetic that went wrong.
+
+### 39.1 Why every previous scan missed it
+
+`IK_KV_SCAN` reported a clean cache through four aborts. It was not broken and it
+was not the wrong range this time — **it only ever scanned `k_l[0]`**, and layer 0
+is one of the three layers that is never poisoned. `raw_k-0` does not appear in
+any of the 157 reports.
+
+So §38's contradiction — clean host, poisoned device — was never real. Both
+probes were telling the truth about different layers.
+
+### 39.2 The one correlation, stated carefully
+
+The first poisoned copy follows a `restored context checkpoint` (task 57103,
+`pos_max = 33124`) by 108 log lines. Restores are rare enough for that to be worth
+noting: 15 in the whole run against 452 creations.
+
+**But 12 of those 15 restores produced no poisoning at all.** So a restore is not
+sufficient, and this is a lead rather than a mechanism. §32.4 dismissed
+checkpoint-adjacency as vacuous on frequency grounds and was right to; what has
+changed is that the poison is now known to be host-resident KV cache, which is
+exactly what a restore writes, and that a checkpoint is ~872 MiB against a 5504
+MiB cache — so a restore cannot be rewriting all of it.
+
+### 39.3 What to do next
+
+Scan **all** layers, not layer 0, and scan on both sides of a checkpoint restore.
+That turns "a restore preceded it" into "this restore left these rows unwritten",
+or kills the idea outright. The probe already exists; it needs its loop widened
+and a hook either side of `apply_checkp`.
+
+---
+
+## 40. The causal chain, end to end — and one step left (2026-08-22)
+
+The eighteenth abort, with the scan moved to layer 4, gives the whole sequence.
+
+### 40.1 The KV poisoning is a consequence, and the arithmetic is exact
+
+    IK_KV_SCAN [post] layer-4: CLEAN -> POISONED
+      decode #5800: batch of 3426 tokens, kv head=56648 used=56648
+      first NaN at cell 53222, 1 754 112 NaN (all inside live rows)
+
+| | |
+|---|---:|
+| `kv.head` before the batch | 56648 − 3426 = **53222** |
+| first poisoned cell | **53222** |
+| batch size | **3426** tokens |
+| poisoned cells | 1 754 112 / 512 = **3426** |
+
+The NaN starts exactly where the batch started and there are exactly as many
+poisoned cells as there were tokens. **This is not uninitialised memory** — §36.5
+and §39 both leaned that way. The K values *computed for that batch* were NaN and
+were duly stored.
+
+### 40.2 Layer 0 is the origin, and it fails differently
+
+| probe | side | layers reported |
+|---|---|---|
+| `IK_COPY_CHECK` | host, at copy time | 3 … 42 — **never 0** |
+| `IK_NAN_CHECK` | device, as graph input | `CUDA0#raw_k-0` already NaN |
+
+For layers 3–42 the host cache is poisoned, which §40.1 explains as the stored
+result. For **layer 0 the host is clean and the device copy is NaN** — a
+different failure, and the only one that is not accounted for by something
+upstream of it.
+
+Chronology confirms the direction. First event of the run: the NaN probe at layer
+0. Then the copy check on layers 3+. Then the layer-4 cache flips to poisoned.
+
+### 40.3 The chain
+
+    CUDA0#raw_k-0 is NaN on the device, host source clean   <-- unexplained
+      -> fattn-0 reads it, output NaN
+      -> propagates through all 43 layers
+      -> K computed for the batch is NaN, stored to host cache (layers 3-42)
+      -> next decode reads poisoned host, aborts at the sampler
+
+Every step but the first is now measured rather than argued.
+
+### 40.4 What is NOT the explanation
+
+`raw_k` alternates permuted / not — 0, 1, 3, 5, 7 permuted, 2, 4, 6 not — so
+"permuted views are copied with a flat memcpy" does not separate the affected
+layers from the unaffected ones and is not the mechanism, however plausible it
+looked. Layers 0, 1 and 2 are the ones never poisoned in host memory, and what
+distinguishes them is `compress_ratios = [0, 0, 4, 128, ...]`: layers 0 and 1 are
+uncompressed.
+
+### 40.5 The one remaining question
+
+How does `CUDA0#raw_k-0` become NaN when the host bytes it is copied from are
+clean? The next probe reads the **destination** immediately after the copy and
+compares it with the source — the same instant, the same bytes, both sides.
+
+### 40.6 For the upstream comment: it only shows up with the cache split across RAM
+
+Worth stating plainly whenever this is reported, because it explains why almost
+nobody else would hit it.
+
+| KV cache | serving | prefilled tokens | aborts |
+|---|---:|---:|---:|
+| host RAM (`-nkvo`) | 74.1 h | 34 253 025 | **22** |
+| VRAM | 19.8 h | 3 724 240 | **0** |
+
+At the observed rate, 1.43 aborts would be expected in the VRAM runs and none
+happened. That is a ~24 % coincidence, so it is **suggestive, not established** —
+roughly three times the volume would be needed to claim it.
+
+The mechanism is the better argument. With the cache in VRAM there is **no
+host→device copy of `raw_k` at all**: attention reads it where it already lives.
+The poison appears exactly on that boundary — host clean, device copy NaN — so
+removing the transfer removes the place the fault occurs.
+
+Which makes this a bug that only bites configurations running a model too large
+for the card, with the KV cache in system RAM. Anyone with enough VRAM to hold
+the whole cache would never see it, and that is a plausible reason it has not
+been reported before.
+
+**And `-nkvo` is not a tuning preference — it is forced.** Worth spelling out in
+the report, because it decides whether the affected configuration reads as exotic
+or as the only way to run the model at all.
+
+The KV cache itself is small: 5504 MiB against 96 GiB of card. It is not there
+because it does not fit. It is there because **the attention scratch follows it**.
+With the cache on the GPU, §22.3 measured the CUDA compute buffer going from
+3520 MiB to **28 992 MiB** — 8.2x — since the score matrix for
+`tokens x kv_positions` is materialised where the cache lives. 86 103 MiB of
+weights plus 28 992 MiB of scratch does not fit in 96 GiB, and the model fails to
+load at `--n-cpu-moe` 19, 20 and 22 alike.
+
+So: a table five times the size of the notebook it works from. Anyone running a
+model larger than their card has no choice but `-nkvo`, which puts them on the
+one code path where this bug lives. That is not a corner case for them — it is
+the only configuration available.
+
+---
+
+## 41. A candidate cause: the allocator guard that never runs (2026-08-22)
+
+§40.5 left one question: how does `CUDA0#raw_k-0` become NaN when the host bytes
+it is copied from are clean and the copy is byte-perfect?
+
+`IK_DST_CHECK` settled the copy itself. Reading the destination back immediately
+after the transfer, over 50 reports and 1200 comparisons:
+
+    src_nan=926208  dst_nan=926208  (first 0)  differing=0 of 1048576
+
+Never once `src_nan=0` with `dst_nan>0`, and **never a single differing byte**.
+The transfer is faithful. So the poison arrives after it.
+
+### 41.1 The guard
+
+Both places where the scheduler makes a device copy of a split input read:
+
+```c
+if (sched->n_copies > 1) {
+    ggml_set_input(tensor_copy);
+    ggml_set_output(tensor_copy); // prevent ggml-alloc from overwriting the tensor
+}
+```
+
+`GGML_SCHED_MAX_COPIES` defaults to 1, so `sched->n_copies` is 1 and **this guard
+never runs**. Its own comment says what that leaves open.
+
+It fits every observation, including the ones that made no sense before: the host
+is clean because nothing writes there; the copy is faithful; the device buffer is
+NaN anyway; no node computed it, because it is a memory overwrite rather than
+arithmetic; and it is intermittent because the allocator's layout depends on the
+batch shape.
+
+### 41.2 Turning it on wholesale is not possible
+
+    compute buffer requested: 176 977 MiB   (against 7040)
+    cudaMalloc failed: out of memory
+
+25x. Narrowed to `raw_k` alone it costs **+536 MiB** — 7040 → 7576 — and the
+model loads, serves, and survives 4k, 32k and 128k without OOM on ~180 MiB of
+remaining headroom.
+
+| depth | reference | with the raw_k guard | prefill | generation |
+|---:|---|---|---:|---:|
+| 4k | 1363.1 / 19.60 | 1336.4 / 19.92 | −2.0 % | +1.6 % |
+| 32k | 1825.8 / 18.66 | 1798.3 / 18.94 | −1.5 % | +1.5 % |
+| 128k | 1349.1 / 16.95 | 1352.5 / 17.06 | +0.3 % | +0.6 % |
+
+−1.1 % of prefill on average, generation unchanged. `docs/external/local-rawk-alloc-guard.patch`,
+switchable at runtime with `IK_RAWK_GUARD=0`.
+
+### 41.3 Worth it even before it is proven
+
+| | prefill lost | other cost |
+|---|---:|---|
+| with the guard | **1.1 %** | none |
+| without | **3.9 %** | one 500 to the client, ~56 s of re-prefill |
+
+The abort discards ~101 000 tokens of cache (measured across eight events:
+97 080 to 109 893) at one abort per ~2.6 M prefilled tokens. So the guard is
+cheaper than the fault it may prevent — provided it prevents it.
+
+### 41.4 What the overlap check does and does not show
+
+`IK_OVERLAP` walks every tensor with storage after allocation and reports
+intersecting byte ranges:
+
+| | compute buffer | `raw_k` overlaps |
+|---|---:|---:|
+| guard off (upstream) | 7040.03 | **73 423** |
+| guard on | 7576.28 | **1** |
+
+That confirms the guard does exactly what is intended. **It does not show a
+bug.** Memory reuse is the graph allocator's entire purpose: tensors whose
+lifetimes do not overlap are *supposed* to share storage. An intersecting address
+range is normal operation, not a fault.
+
+Demonstrating the fault needs a *lifetime* conflict — `raw_k`'s storage handed to
+another tensor while `raw_k` is still to be read. Reading `CUDA0#raw_k-0` back
+both immediately after the copy and again just before attention consumes it would
+show that directly; a difference between the two is the proof.
+
+Recorded as a candidate with strong circumstantial support. §35 is four sections
+back and remains the reason for the wording.
+
+### 41.5 The direct proof was attempted and did not arrive
+
+Three probes, each fixing the flaw in the one before, and the honest answer is
+that the lifetime conflict was **not** observed.
+
+| attempt | result | why it did not answer |
+|---|---|---|
+| overlapping address ranges | 73 423 overlaps | sharing storage is what the allocator is *for* |
+| same address, content changed | 32 of 1500 | the map was not cleared between graphs |
+| same, cleared per graph | 30 of 3000 | reported `q_b-N` — a **different tensor** at a former `raw_k` address, i.e. correct reuse after last use |
+| **same tensor, content changed** | **0 of 5500** | this is the right measurement, and it found nothing |
+
+So on healthy traffic no `raw_k` copy is ever overwritten between the copy and
+its use. The mechanism §41.1 proposes is not happening routinely.
+
+That leaves two readings, and the evidence does not choose between them:
+
+1. the conflict occurs only in the rare graph shapes that end in an abort — those
+   three requests were ~100 k tokens against one abort per ~2.6 M;
+2. it does not occur at all, and the guard's 1.1 % buys nothing.
+
+Distinguishing them needs `IK_LIFETIME` running with the guard **off** until an
+abort arrives. That is still better than waiting for absence: it would catch the
+conflict at the moment it happens, which is positive evidence rather than the
+negative kind §35 warns about.
+
+Recorded here rather than quietly dropped because three of these four probes
+produced numbers that looked like findings and were not. The pattern — a probe
+answering a slightly different question than the one asked — has now cost more
+time in this investigation than any wrong hypothesis.
+
+---
+
+## 42. PR #2347 does not stop it (2026-08-23)
+
+`sayap` opened [#2347](https://github.com/ikawrakow/ik_llama.cpp/pull/2347) on the
+issue. Applied here on top of `8337e4cd`, with the local `raw_k` guard **off** so
+the PR is what is being tested.
+
+    338 509 prefilled tokens, 1.8 h  ->  1 abort
+    "failed to sample token: all candidate logits are NaN"
+
+Same signature. That is sooner than the observed mean of one per ~2.6 M tokens,
+so it is not a marginal survival — though one event is one event.
+
+Cost, measured the same way as everything else:
+
+| depth | reference | with #2347 | prefill | generation |
+|---:|---|---|---:|---:|
+| 4k | 1363.1 / 19.60 | 1336.4 / 20.00 | −2.0 % | +2.0 % |
+| 32k | 1825.8 / 18.66 | 1773.2 / 18.79 | −2.9 % | +0.7 % |
+| 128k | 1349.1 / 16.95 | 1319.6 / 16.93 | −2.2 % | −0.1 % |
+
+−2.3 % of prefill, generation unchanged, no OOM at any depth despite KQ now
+holding an f32 buffer.
+
+### 42.1 The stated rationale does not match what is measured here
+
+The PR describes "Q·K logits overflow fp16 (65504), saturating the KQ GEMM output
+to inf/NaN". §35.1 measured that quantity directly, by making the GEMM write f32
+and reading the magnitudes before the softmax:
+
+    max_abs = 366.4    (f16 ceiling 65504, headroom 179x)
+    over    = 0        of 5 905 580 032 values
+
+Two orders of magnitude of headroom over nearly six billion values, covering
+short prompts and a 6000-line one. Nothing there overflows on this box.
+
+The PR's second change — `cublasSetStream(ctx.cublas_handle(), ctx.stream())`,
+so the GEMMs stop racing kernels on the backend stream — fits the observations
+much better (intermittent, host clean while the device copy is NaN, no node
+producing it). It did not stop the abort either, but it is the half worth
+keeping attention on.
+
+### 42.2 And a note on why our own probes could never have found a race
+
+Every probe here that read device memory back — `IK_DST_CHECK`, `IK_LIFETIME`,
+the KV scan — does so through `ggml_backend_tensor_get`, which synchronises. So
+does `GGML_CUDA_DISABLE_GRAPHS=1`, which most of these runs used. Both serialise
+the streams and would **suppress** a race.
+
+283 000 lifetime verifications found nothing (§41.5). If the cause is a stream
+race, that result was never capable of being anything else. Worth recording as a
+methodological limit rather than as evidence.

@@ -1,0 +1,263 @@
+diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index a6a394c4..9fb5bd13 100644
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -208,7 +208,107 @@ size_t ggml_backend_get_max_size(ggml_backend_t backend) {
+     return ggml_backend_buft_get_max_size(ggml_backend_get_default_buffer_type(backend));
+ }
+ 
++// IK_COPY_CHECK -- placed on the two low-level entry points every copy funnels
++// through, after three attempts at guessing the right branch in the scheduler
++// each landed somewhere raw_k never goes. The heartbeat is what caught that: a
++// counter of 1 over 35 000 prefilled tokens meant "this path is not used", not
++// "the data is clean". RESULTS 36.9 and 38.6.
++// IK_DST_CHECK: read the DESTINATION back immediately after the copy and compare
++// it with the source. RESULTS 40.5: CUDA0#raw_k-0 is NaN on the device while the
++// host bytes it came from are clean, and that is the one step in the chain with
++// no measurement behind it. Only for the tensors that matter, because a device
++// readback per copy would be ruinous.
++static bool ik_dst_check_wanted(const struct ggml_tensor * src, const struct ggml_tensor * dst) {
++    static int on = -1;
++    if (on < 0) { const char * e = getenv("IK_DST_CHECK"); on = (e && atoi(e)) ? 1 : 0; }
++    if (on != 1 || !src || !dst) return false;
++    if (src->type != GGML_TYPE_F16) return false;
++    // layers 0 and 1 only -- the uncompressed ones, where the poison starts
++    return strncmp(src->name, "raw_k-0", 7) == 0 || strncmp(src->name, "raw_k-1", 7) == 0;
++}
++
++static void ik_dst_check_after(const struct ggml_tensor * src, const struct ggml_tensor * dst) {
++    const size_t nb = ggml_nbytes(src);
++    const size_t n16 = nb / 2;
++    std::vector<uint16_t> buf(n16);
++    ggml_backend_tensor_get(dst, buf.data(), 0, nb);
++
++    const uint16_t * h = (const uint16_t *) src->data;
++    size_t src_nan = 0, dst_nan = 0, first_dst = 0, diff = 0;
++    for (size_t i = 0; i < n16; ++i) {
++        const bool sn = (h[i]      & 0x7FFFu) > 0x7C00u;
++        const bool dn = (buf[i]    & 0x7FFFu) > 0x7C00u;
++        if (sn) ++src_nan;
++        if (dn) { if (dst_nan == 0) first_dst = i; ++dst_nan; }
++        if (h[i] != buf[i]) ++diff;
++    }
++    static long long calls = 0;
++    ++calls;
++    if (dst_nan || diff) {
++        fprintf(stderr, "IK_DST_CHECK: %s -> %s: src_nan=%zu dst_nan=%zu (first %zu) differing=%zu of %zu\n",
++                src->name, dst->name, src_nan, dst_nan, first_dst, diff, n16);
++        fflush(stderr);
++    }
++    if (calls == 1 || calls % 100 == 0) {
++        fprintf(stderr, "IK_DST_CHECK: alive, %lld destination reads compared\n", calls);
++        fflush(stderr);
++    }
++}
++
++static void ik_copy_check_src(const char * where, const struct ggml_tensor * t, const char * dstname) {
++    static int on = -1;
++    if (on < 0) { const char * e = getenv("IK_COPY_CHECK"); on = (e && atoi(e)) ? 1 : 0; }
++    if (on != 1 || !t || !t->data) return;
++
++    static long long calls = 0, checked = 0;
++    ++calls;
++    if (t->type == GGML_TYPE_F16 && t->buffer && ggml_backend_buffer_is_host(t->buffer)) {
++        ++checked;
++        const size_t n16 = ggml_nbytes(t) / 2;
++        const uint16_t * h = (const uint16_t *) t->data;
++        size_t first = 0, cnt = 0;
++        for (size_t i = 0; i < n16; ++i) {
++            if ((h[i] & 0x7FFFu) > 0x7C00u) { if (cnt == 0) first = i; ++cnt; }
++        }
++        if (cnt) {
++            fprintf(stderr, "IK_COPY_CHECK [%s]: HOST source already NaN: %s -> %s, %zu of %zu f16, first at %zu\n",
++                    where, t->name, dstname ? dstname : "?", cnt, n16, first);
++            fflush(stderr);
++        }
++    }
++    if (calls == 1 || calls % 2000 == 0) {
++        fprintf(stderr, "IK_COPY_CHECK: alive, %lld copies seen, %lld host-f16 scanned\n", calls, checked);
++        fflush(stderr);
++    }
++}
++
+ void ggml_backend_tensor_set_async(ggml_backend_t backend, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
++    // The source here is a raw pointer, so the destination's type is what tells
++    // us how to read it. This is the funnel the scheduler's split-input copies
++    // actually use -- the two tensor-level wrappers see almost no traffic.
++    {
++        static int on = -1;
++        if (on < 0) { const char * e = getenv("IK_COPY_CHECK"); on = (e && atoi(e)) ? 1 : 0; }
++        static long long calls = 0, checked = 0;
++        if (on == 1 && data && tensor && tensor->type == GGML_TYPE_F16) {
++            ++calls; ++checked;
++            const size_t n16 = size / 2;
++            const uint16_t * h = (const uint16_t *) data;
++            size_t first = 0, cnt = 0;
++            for (size_t i = 0; i < n16; ++i) {
++                if ((h[i] & 0x7FFFu) > 0x7C00u) { if (cnt == 0) first = i; ++cnt; }
++            }
++            if (cnt) {
++                fprintf(stderr, "IK_COPY_CHECK [set_async]: SOURCE already NaN -> %s, %zu of %zu f16, first at %zu\n",
++                        tensor->name, cnt, n16, first);
++                fflush(stderr);
++            }
++            if (calls == 1 || calls % 50000 == 0) {
++                fprintf(stderr, "IK_COPY_CHECK [set_async]: alive, %lld f16 copies scanned\n", calls);
++                fflush(stderr);
++            }
++        }
++    }
+     GGML_ASSERT(tensor->data != NULL && "tensor not allocated");
+     if (offset + size > ggml_nbytes(tensor)) fprintf(stderr, "%s(%s): offset = %zu, size = %zu, nbytes = %zu\n", __func__, tensor->name, offset, size, ggml_nbytes(tensor));
+     GGML_ASSERT(offset + size <= ggml_nbytes(tensor) && "tensor write out of bounds");
+@@ -361,6 +461,8 @@ static bool ggml_are_same_layout(const struct ggml_tensor * a, const struct ggml
+ }
+ 
+ void ggml_backend_tensor_copy(struct ggml_tensor * src, struct ggml_tensor * dst) {
++    ik_copy_check_src("tensor_copy", src, dst ? dst->name : nullptr);
++    const bool ik_dst_check = ik_dst_check_wanted(src, dst);
+     GGML_ASSERT(ggml_are_same_layout(src, dst) && "cannot copy tensors with different layouts");
+ 
+     if (src == dst) {
+@@ -369,6 +471,7 @@ void ggml_backend_tensor_copy(struct ggml_tensor * src, struct ggml_tensor * dst
+ 
+     if (ggml_backend_buffer_is_host(src->buffer)) {
+         ggml_backend_tensor_set(dst, src->data, 0, ggml_nbytes(src));
++        if (ik_dst_check) ik_dst_check_after(src, dst);
+     } else if (ggml_backend_buffer_is_host(dst->buffer)) {
+         ggml_backend_tensor_get(src, dst->data, 0, ggml_nbytes(src));
+     } else if (!ggml_backend_buffer_copy_tensor(src, dst)) {
+@@ -384,6 +487,7 @@ void ggml_backend_tensor_copy(struct ggml_tensor * src, struct ggml_tensor * dst
+ }
+ 
+ void ggml_backend_tensor_copy_async(ggml_backend_t backend_src, ggml_backend_t backend_dst, struct ggml_tensor * src, struct ggml_tensor * dst) {
++    ik_copy_check_src("copy_async", src, dst ? dst->name : nullptr);
+     GGML_ASSERT(ggml_are_same_layout(src, dst) && "cannot copy tensors with different layouts");
+ 
+     if (src == dst) {
+@@ -1823,7 +1927,16 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
+                                 tensor_copy = ggml_dup_tensor_layout(sched->ctx, src);
+                                 ggml_format_name(tensor_copy, "%s#%s#%d", ggml_backend_name(backend), src->name, c);
+                             }
+-                            if (sched->n_copies > 1) {
++                            // LOCAL PATCH (ik-llama-toolkit), RESULTS 41. The guard
++                            // below was `n_copies > 1`, and GGML_SCHED_MAX_COPIES is
++                            // 1, so it never ran -- leaving ggml-alloc free to give
++                            // this copy's memory to another tensor mid-graph.
++                            //
++                            // Applying it to EVERY split input asks for 176 977 MiB
++                            // of compute buffer against 7040, so it cannot simply be
++                            // turned on. Narrowed to raw_k, which is the tensor the
++                            // probes actually catch poisoned (RESULTS 40.2).
++                            if (sched->n_copies > 1 || strncmp(src->name, "raw_k-", 6) == 0) {
+                                 ggml_set_input(tensor_copy);
+                                 ggml_set_output(tensor_copy); // prevent ggml-alloc from overwriting the tensor
+                             }
+@@ -1850,7 +1963,16 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
+                         for (int c = 0; c < sched->n_copies; c++) {
+                             struct ggml_tensor * tensor_copy = ggml_dup_tensor_layout(sched->ctx, src);
+                             ggml_format_name(tensor_copy, "%s#%s#%d", ggml_backend_name(backend), src->name, c);
+-                            if (sched->n_copies > 1) {
++                            // LOCAL PATCH (ik-llama-toolkit), RESULTS 41. The guard
++                            // below was `n_copies > 1`, and GGML_SCHED_MAX_COPIES is
++                            // 1, so it never ran -- leaving ggml-alloc free to give
++                            // this copy's memory to another tensor mid-graph.
++                            //
++                            // Applying it to EVERY split input asks for 176 977 MiB
++                            // of compute buffer against 7040, so it cannot simply be
++                            // turned on. Narrowed to raw_k, which is the tensor the
++                            // probes actually catch poisoned (RESULTS 40.2).
++                            if (sched->n_copies > 1 || strncmp(src->name, "raw_k-", 6) == 0) {
+                                 ggml_set_input(tensor_copy);
+                                 ggml_set_output(tensor_copy); // prevent ggml-alloc from overwriting the tensor
+                             }
+@@ -2004,6 +2126,7 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
+     return true;
+ }
+ 
++
+ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_backend_sched_split * split, std::array<bool, GGML_SCHED_MAX_BACKENDS> & needs_sync,
+         std::vector<int32_t> & ids, std::vector<uint32_t> & unique_ids, ggml_tensor * last_ids_tensor) {
+     if (split->n_inputs < 1) return;
+@@ -2017,6 +2140,38 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+         struct ggml_tensor * input = split->inputs[j];
+         struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
+ 
++        // IK_INPUTS: is raw_k among the inputs the scheduler actually copies?
++        // Four instrumented copy paths never saw it (RESULTS 38.6). If it is not
++        // enumerated here either, the device tensor is allocated and never
++        // written -- which is 38.7. Prints once per distinct name.
++        {
++            static int on = -1;
++            if (on < 0) { const char * e = getenv("IK_INPUTS"); on = (e && atoi(e)) ? 1 : 0; }
++            if (on == 1 && input && input->name[0]) {
++                static std::set<std::string> seen;
++                std::string key = input->name;
++                if (seen.insert(key).second) {
++                    fprintf(stderr, "IK_INPUTS: split input %-46s -> %-46s  %s host=%d\n",
++                            input->name, input_cpy ? input_cpy->name : "(null)",
++                            ggml_type_name(input->type),
++                            input->buffer ? (int) ggml_backend_buffer_is_host(input->buffer) : -1);
++                    fflush(stderr);
++                }
++            }
++        }
++
++        auto ik_branch = [&](const char * tag) {
++            static int on = -1;
++            if (on < 0) { const char * e = getenv("IK_INPUTS"); on = (e && atoi(e)) ? 1 : 0; }
++            if (on != 1 || !input || !input->name[0]) return;
++            static std::set<std::string> seen_b;
++            std::string k = std::string(input->name) + "|" + tag;
++            if (seen_b.insert(k).second) {
++                fprintf(stderr, "IK_INPUTS: branch %-14s for %s\n", tag, input->name);
++                fflush(stderr);
++            }
++        };
++
+         if (input->flags & GGML_TENSOR_FLAG_INPUT) {
+             // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
+             // if there are multiple inputs for the split, and we have already synchronized this backend, no need to do it again.
+@@ -2028,6 +2183,7 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+                 }
+                 synced_on_input = true;
+             }
++            ik_branch("copy_early");
+             ggml_backend_tensor_copy(input, input_cpy);
+         } else {
+             // wait for the split backend to finish using the input before overwriting it
+@@ -2130,13 +2286,15 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+ 
+                 } else {
+                     auto copy_size = ggml_nbytes(input);
+-                    ggml_backend_tensor_set_async(split_backend, input_cpy, input->data, 0, copy_size);
++ik_branch("set_async");
++ggml_backend_tensor_set_async(split_backend, input_cpy, input->data, 0, copy_size);
+                 }
+ 
+             } else
+                 // try async copy, but if not possible, we can still use a sync copy without synchronizing the dst backend, since we handle the synchronization here with multiple copies and events
+                 // TODO: add public function to facilitate this, since applications do not have direct access to the backend interface
+-                if (!split_backend->iface.cpy_tensor_async || !split_backend->iface.cpy_tensor_async(input_backend, split_backend, input, input_cpy)) {
++                if (ik_branch("try_async"), !split_backend->iface.cpy_tensor_async ||
++                !split_backend->iface.cpy_tensor_async(input_backend, split_backend, input, input_cpy)) {
+                     ggml_backend_synchronize(input_backend);
+                     if (needs_sync[split_backend_id]) {
+                         if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
+@@ -2146,6 +2304,7 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+                         }
+                         needs_sync[split_backend_id] = k_set_sync;
+                     }
++                    ik_branch("tensor_copy");
+                     ggml_backend_tensor_copy(input, input_cpy);
+                 }
+         }
+@@ -2205,6 +2364,8 @@ static ggml_status ggml_backend_sched_eval(ggml_backend_sched_t sched, ggml_back
+     return GGML_STATUS_SUCCESS;
+ }
+ 
++
++
+ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
+ 
+     for (auto & item : sched->needs_sync) item = true;
