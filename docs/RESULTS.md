@@ -3667,3 +3667,86 @@ the streams and would **suppress** a race.
 283 000 lifetime verifications found nothing (§41.5). If the cause is a stream
 race, that result was never capable of being anything else. Worth recording as a
 methodological limit rather than as evidence.
+
+---
+
+## 43. Now testing CUDA 12.8 (2026-08-23, running)
+
+`sayap` also asked whether a CUDA 12.9 downgrade helps. It had never been tried:
+every one of the 25 aborts recorded here is from a CUDA 13.3 build
+(`libcudart.so.13`), so there was nothing to report either way.
+
+There is prior reason to take it seriously beyond the suggestion. `build-cuda12.sh`
+exists in this repo because a CUDA 13 build of *mainline* llama.cpp loses most of
+its throughput on sm_120 once the KV cache passes 8192 tokens, while the same
+source built with CUDA 12.8 does not (TUNING §9). A 12-vs-13 difference on
+Blackwell is already established here for something else.
+
+### 43.1 One variable, and it was verified rather than assumed
+
+| | |
+|---|---|
+| binary | CUDA **12.9.2** — `libcudart.so.12.9.79`, `libcublas.so.12.9.2.10` |
+| verified | `readlink /proc/PID/exe`, 44 libraries mapped from `build-cuda12`, cudart in the process maps |
+| #2347 | **reverted** — proven not to fix it (§42), so not worth its 2.3 % |
+| `raw_k` guard | **off** via `IK_RAWK_GUARD=0`, confirmed by compute buffer 7040 not 7576 |
+| probes | all off |
+| sampler patch | on — the abort must stay survivable and, more to the point, logged |
+
+Testing two candidates at once would say nothing about which mattered, which is
+why the guard is off despite being the cheaper of the two.
+
+### 43.1a A trap in the container build, now fixed
+
+`build-cuda12.sh` copied the container's CUDA libraries next to the binaries but
+never removed what was there before. Building 12.9 over an existing 12.8 tree
+left **both** sets in `bin/`:
+
+    libcudart.so.12.8.57   libcublas.so.12.8.3.14
+    libcudart.so.12.9.79   libcublas.so.12.9.2.10
+
+The `libcudart.so.12` symlink did point at 12.9, so the right one would have
+loaded — but that is a fact nobody had checked, and the whole point of this test
+is that only one variable moves. The stale files were deleted and the script now
+clears them before bundling.
+
+Verified afterwards from `/proc/PID/maps` rather than from what was built:
+`libcudart.so.12.9.79`, `libcublas.so.12.9.2.10`, `libcublasLt.so.12.9.2.10`.
+
+### 43.2 How it reads
+
+| outcome | conclusion |
+|---|---|
+| ~8 M prefilled tokens clean | CUDA 13 is implicated — reportable |
+| an abort arrives | CUDA is not it; next candidate is the `raw_k` guard at 1.1 % |
+
+The order was chosen on strength, not cost: §41.5 failed to find the lifetime
+conflict the guard predicts, while the CUDA difference on this hardware is
+already measured for another symptom.
+
+### 43.3 Answered: CUDA 12.9 does not fix it either
+
+    CUDA 12.9.79, #2347 reverted, raw_k guard off
+    527 387 prefilled tokens, 3.0 h  ->  1 abort, same signature
+
+Verified from `/proc/PID/maps` at the time (`libcudart.so.12.9.79`), with the
+guard confirmed off by the 7040 MiB compute buffer and #2347 confirmed absent
+from the source. One variable, and it was the one under test.
+
+So both of `sayap`'s suggestions are answered and both are negative. The
+CUDA 12-vs-13 difference on this box is real for throughput (TUNING §9) and has
+no bearing on this abort.
+
+Standing tally of candidates:
+
+| candidate | result |
+|---|---|
+| f16 overflow in `K·Q` | refuted by measurement, §35.1 |
+| PR #2347 | abort after 338 509 tokens, §42 |
+| CUDA 12.9 | abort after 527 387 tokens |
+| `raw_k` allocator guard | **now under test** — the direct proof failed (§41.5), but it is the last candidate and the cheapest at 1.1 % |
+
+A note for the next configuration switch: starting the new server immediately
+after stopping the old one failed with `cudaMalloc failed: out of memory` on the
+86 103 MiB weight buffer. The card had not finished releasing. That is not a
+property of the configuration being tested, and reads exactly like one.

@@ -52,6 +52,12 @@ cmake -S /src -B /src/build-cuda12 -G Ninja \
 cmake --build /src/build-cuda12 -j "$(nproc)" \
   --target llama-server --target llama-bench --target llama-sweep-bench 2>&1 | tail -2
 # The host has no CUDA 12 runtime; ship the ones the binaries were linked against.
+# Clear previously bundled CUDA libs first. Without this, building against a
+# different minor version leaves BOTH sets side by side -- 12.8 and 12.9 were
+# present together on 2026-08-23 -- and which one loads then rests on a symlink
+# nobody checked. One version in the directory, no ambiguity to resolve later.
+rm -f /src/build-cuda12/bin/libcudart.so.* /src/build-cuda12/bin/libcublas.so.* \
+      /src/build-cuda12/bin/libcublasLt.so.* /src/build-cuda12/bin/libnccl.so.* 2>/dev/null || true
 for lib in libcudart libcublas libcublasLt libnccl; do
     src="$(ldconfig -p | grep -oE "/[^ ]*${lib}\.so\.[0-9]+" | head -1)"
     [ -n "$src" ] && cp -a "$src"* /src/build-cuda12/bin/ 2>/dev/null || true
