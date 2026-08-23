@@ -3750,3 +3750,37 @@ A note for the next configuration switch: starting the new server immediately
 after stopping the old one failed with `cudaMalloc failed: out of memory` on the
 86 103 MiB weight buffer. The card had not finished releasing. That is not a
 property of the configuration being tested, and reads exactly like one.
+
+### 43.4 And the guard does not fix it either — the list is exhausted
+
+    CUDA 13.3, #2347 reverted, raw_k guard ON (compute buffer 7576 not 7040)
+    244 849 prefilled tokens, 0.8 h  ->  1 abort, same signature
+
+Sooner than any other configuration tested. §41's candidate is dead.
+
+This is the outcome §41.5 pointed at: the direct probe looked for the lifetime
+conflict the guard presumes and found **0 in 283 000 verifications**. That was
+recorded at the time as weakening the hypothesis, and it was weakening it
+correctly.
+
+The guard is therefore reverted, and good riddance — it matched on the string
+`"raw_k-"` inside the scheduler, which has no business knowing tensor names from
+one model's architecture. It was a hypothesis test wearing the shape of a fix,
+and it is worth being explicit that it never was one.
+
+| candidate | result |
+|---|---|
+| f16 overflow in `K·Q` | refuted by measurement, §35.1 |
+| PR #2347 | abort after 338 509 tokens, §42 |
+| CUDA 12.9 | abort after 527 387 tokens, §43.3 |
+| `raw_k` allocator guard | abort after 244 849 tokens |
+
+Four candidates, four negatives, each measured rather than argued. The cause is
+open and the list of ideas is empty. What survives from all of it is the chain in
+§40 — every step measured except the first, which remains: **`CUDA0#raw_k-0` is
+NaN on the device while the host bytes are clean and the copy is byte-perfect.**
+
+And §42.2 still stands as the limit on everything tried since: every probe here
+reads device memory back, which synchronises, so none of them could ever have
+caught a race. If that is what this is, nothing in this investigation was capable
+of finding it.
