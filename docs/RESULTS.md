@@ -3894,3 +3894,260 @@ latched flag is seen on a later call does it synchronise (the fault has already
 happened by then, so that sync is free). Verdict latency: one split. The
 concurrency window is restored to no-probe conditions, so the verdict should now
 arrive on the no-probe timescale — a few hundred thousand tokens.
+
+---
+
+## 45. THE VERDICT: H2 — an asynchronous writer poisons device memory mid-graph (2026-08-24)
+
+Three aborts on the input-probe build (456 k tokens, 2.0 h), 231 verdict lines
+in three clusters, one per abort. Read chronologically:
+
+**Cluster 2 is the conviction.** The first in-stream latch of the whole event is
+node 35, op **CONCAT** (`csa_k_all-4`): its `src[0]` — `CUDA0#raw_k-4`, the
+scheduler's device copy of host-cache K — carried NaN into the concat while the
+other source was clean and **no earlier node in the graph had produced NaN**.
+A concat only copies bytes. Therefore the `raw_k-4` device copy was poisoned
+*after* its deposit and *before* the concat read it. This is §40's claim
+resurrected with valid evidence: in-stream, at execution time, not a post-hoc
+readback of freed memory. Cluster 3 repeats the pattern (`hca_k_all-7`).
+
+**Cluster 1 fits the same writer.** `fattn-0` inputs verified clean by the probe
+kernel immediately before the node, output NaN — an asynchronous writer landing
+inside the probe→kernel window. A deterministic kernel bug (H1) cannot explain
+clusters 2/3: no kernel malfunction at layer 0 puts NaN into layer 4's K copy
+with every upstream producer clean.
+
+**Verdict: H2.** A device-side write that is not ordered against the compute
+stream corrupts input-copy regions while the graph runs. The mechanism verified
+in §44.3 predicts exactly this: during prefill `llama_decode` never drains
+(the post-compute sync is commented out, llama.cpp:6838), so while graph N's
+kernels still run, the host prepares ubatch N+1 and deposits its inputs via
+`cudaStreamPerThread` — which has **zero ordering** against the non-blocking
+compute stream — into arena addresses graph N is still using.
+
+### 45.1 The treatment test
+
+One line in `llama_decode_internal`: drain the scheduler immediately before
+`llama_set_inputs`, closing exactly the unordered-deposit window and nothing
+else (one sync per ubatch — far coarser than the per-split serialisation that
+throttled the fault in §44.6). Probes OFF for the soak: maximum fault pressure,
+and the readout is abort/no-abort. No-probe runs abort at median 154 k, max
+446 k; a clean run of several million tokens convicts the window.
+
+### 45.2 Refuted in under an hour — the set_inputs window is not the writer
+
+    drain before llama_set_inputs, probes off, CUDA graphs on
+    282 701 tokens -> abort, then two more back-to-back during the re-prefills
+    (an abort mid-prefill prints no timing line, hence the zero counts between)
+
+First abort squarely inside the untreated distribution (median 154 k, max
+446 k). The drain build was verified running: libllama.so newer than the last
+source edit, the call present, process started after the link. Zero effect.
+
+So the H2 verdict stands -- the in-stream evidence of raw_k-4 poisoned between
+deposit and read is untouched by this -- but the writer is not the next
+ubatch's input deposits. What §44.3 leaves as the remaining unordered window:
+within one copy_inputs call, expert-weight uploads stream on the COMPUTE stream
+un-waited while later inputs of the same split deposit via cudaStreamPerThread,
+concurrently -- the gate is consumed by the first input and never re-arms.
+Mainline re-drains before EVERY such deposit; ik elides it; upstream accepted
+that elision twice and reverted it twice. The one-line test is
+`k_set_sync = true` in ggml-backend.cpp, restoring mainline semantics exactly.
+The drain from 45.1 comes out first -- one variable.
+
+### 45.3 k_set_sync = true does not stop it either — but it may thin it
+
+    mainline deposit ordering, probes off, CUDA graphs on
+    727 682 tokens -> abort, then the usual two back-to-back on re-prefill
+
+First abort 1.6x beyond the untreated maximum (446 k) and 4.7x the median --
+suggestive of a partial effect (P ~4 % as tail luck, one sample), but partial is
+not fixed. Both scheduler-ordering windows from §44.3 are now refuted as the
+full explanation: the set_inputs drain (45.2, no effect at all) and the
+intra-split deposit elision (this).
+
+What today's origins say that nothing else has: every poisoning origin sits in
+the expert-streaming layer range. Cluster 1: layer 0. Cluster 2: raw_k-4,
+layer 4. Cluster 3: layer 7. Historical: raw_k-0 and mask-0, layer 0; host KV
+poisoning enters at layer 3. With --n-cpu-moe 19, layers 0-18 stream their
+expert weights from host per prefill batch -- layers 19+ never show an origin.
+Expert weights are quantised blocks, i.e. random-ish bytes, which also fits
+raw_k's 3-7 % NaN-as-f16 fraction better than the pure-f32 1.56 % the mask
+region showed post-hoc. The expert-upload path itself (and its prefetch engine,
+ggml_moe_prefetch_*) is now the prime suspect -- with k_set_sync=true its
+uploads are drained before later deposits, but any write it issues OUTSIDE the
+scheduler's deposit protocol is still unordered.
+
+### 45.4 The expert-upload machinery, read to the bottom (three verified readers)
+
+**The prefetch engine is exonerated.** ggml-moe-prefetch.cpp contains no cuda*
+call, no memcpy, no memset -- its workers only run mincore() and
+madvise(MADV_POPULATE_READ/WILLNEED/COLD), which move page residency, never
+bytes. It cannot touch the KV cache either: it refuses tensors outside the
+registered model-file mmaps, and the -nkvo cache is cudaMallocHost memory that
+cannot lie inside a file mmap. One residual flagged, not verified: MADV_COLD is
+issued on H2D source pages right after the async eval, potentially while the
+copy is in flight -- harmless under classic staging, driver-dependent under HMM.
+
+**The uploads cannot write out of bounds -- proven.** Every byte funnels through
+ggml_backend_tensor_set_async, which carries an unconditional
+GGML_ASSERT(offset + size <= ggml_nbytes) that has never fired; run boundaries
+are clamped; the "+512 B padding" writes the next expert's own true bytes at
+their correct offsets; the ids readback is host-synchronised on the producing
+stream before any offset is computed. The residue is aliasing, not overrun:
+with n_copies==1 the expert copies carry no OUTPUT flag, so galloc reuses their
+exact bytes for later tensors -- raw_k and K-assembly among them -- and nothing
+ever host-waits on the fire-and-forget uploads riding the compute stream.
+
+**What -no-ooae removes is exactly the suspicious branch and nothing else:**
+un-waited compute-stream deposits of expert SLICES sourced from pageable mmap
+memory, replaced by whole-tensor uploads on cudaStreamPerThread with an
+immediate sync -- the same boring primitive every other input uses. MoE matmuls
+for layers 0-18 stay on the GPU during prefill (the offload decision never
+reads only_active_experts), so the workload shape is preserved; prefill cost
+measured at -6 %. The prefetch engine keeps running, which is fine -- it is a
+page warmer, not a writer.
+
+The running -no-ooae soak therefore asks a single clean question: is the only
+fire-and-forget device writer in the system the poisoner? If aborts stop, the
+bisect inside the branch is ready (keep OOAE, synchronise the uploads). If they
+continue, the branch is exonerated wholesale and the candidates left are the
+allocator itself (the live-interval assert from §44.5) and the pageable/HMM
+residue above.
+
+## 45.5 CONVICTED: the expert-upload branch — and the bisection (2026-08-24)
+
+    -no-ooae, k_set_sync=true, probes off, CUDA graphs on
+    2 468 081 prefilled tokens, 6.4 h, 90 requests -> ZERO aborts
+
+Against the untreated rate measured over eleven no-probe runs (1 abort per
+246 767 tokens, 2.71 M tokens of data), ten aborts were expected. P(0 by
+chance) = **0.0045 %**. The expert-upload branch is the cause.
+
+It fits every constraint gathered over eight days: prefill only (expert
+streaming needs batch >= 32); origins only in layers 0-18 (the --n-cpu-moe
+range) and never 19+; foreign quantised bytes rather than computed NaN;
+sensitivity to added synchronisation; and §45.4's finding that these uploads are
+the only fire-and-forget device writer in the tree, whose bytes galloc then
+recycles for raw_k and the K-assembly tensors.
+
+**Now bisecting.** OOAE is back ON and a single `ggml_backend_synchronize` is
+added after the per-expert upload loop (env `IK_SYNC_EXPERT_UPLOADS`), keeping
+the slicing and the ids identical and removing only the fire-and-forget
+property. Prefill measured at 1707 t/s — indistinguishable from the 1709 t/s
+baseline, so if this is the fix it is a free one.
+
+* clean at 2.5 M -> asynchrony was the poison; the fix is ordering, and it costs nothing
+* abort -> the slicing or the ids are at fault, and a sync is not the fix
+
+### 45.6 Bisection answer: NOT the asynchrony — the slicing or the ids
+
+    OOAE on, IK_SYNC_EXPERT_UPLOADS=1 (verified in /proc/PID/environ),
+    build 21:36:42 / process 21:37:18
+    134 804 tokens -> abort, then the usual two on re-prefill
+
+Below the untreated median (154 k). Draining after the upload loop changes
+nothing, so the fire-and-forget property is NOT the poison — which also
+retires §44.3's whole ordering theory, since every ordering treatment has now
+failed (set_inputs drain, k_set_sync, this).
+
+What -no-ooae removes and this does not: the **slicing** (contiguous active-
+expert ranges plus the 512-byte over-copy) and the **ids** driving it. §45.4
+proved every byte lands inside input_cpy's allocation — the assert would have
+fired otherwise — so the write is in-bounds, and the fault must be in WHAT is
+written or WHAT IS NOT: with slicing, only active experts are deposited, and
+the untouched remainder of input_cpy keeps whatever the previous tensor left
+there. Under -no-ooae the whole tensor is written every time, overwriting all
+of it.
+
+That reframes the fault: not a stray writer at all, but stale bytes being READ
+from regions this branch deliberately skips. It fits what the probes saw --
+foreign quantised-looking bytes inside a device buffer whose live region was
+byte-perfect -- and it fits galloc recycling expert-copy blocks into raw_k and
+the K-assembly tensors. Next: test the reading side, i.e. whether a consumer
+touches expert rows that were never deposited this pass.
+
+### 45.7 The gaps are not read every time (weak negative)
+
+Painting the whole destination with 0xFF before the sliced deposits (env
+`IK_PAINT_EXPERT_GAPS`) produced no NaN, and the model answered correctly. The
+paint demonstrably ran -- prefill collapsed from 1700 to 24 t/s under the extra
+H2D traffic, and no CUDA error was logged.
+
+Honest limit: this refutes "the consumer reads the gaps on every pass" only.
+At 24 t/s a soak long enough to test "reads them rarely" is impractical, so the
+rare variant stands untested. Recorded as weak evidence, not a refutation.
+
+### 45.8 Isolating the slicing from the rest of the branch
+
+-no-ooae changes four things at once: the ids readback (a D2H of the expert ids
+plus the unique-expert bitmap), `ggml_moe_prefetch_wait`, a `needs_sync` side
+effect on the ids backend, and the sliced deposits. §45.6 blamed the slicing on
+reasoning alone, which is exactly the kind of step that produced §36-§40.
+
+Now running with all of the branch intact and only the deposits replaced by a
+single whole-tensor upload through the same primitive on the same stream
+(`IK_WHOLE_EXPERT_UPLOAD`, verified in /proc/PID/environ, no other switch set,
+OOAE on). Prefill 1577 t/s.
+
+* clean at ~2.5 M -> the partial deposit is the cause
+* abort -> the cause is the ids readback, prefetch_wait, or the needs_sync side effect
+
+### 45.9 The slicing is NOT the cause — and §45.6 was wrong
+
+    OOAE on, IK_WHOLE_EXPERT_UPLOAD=1 (verified in /proc/PID/environ),
+    no other switch set
+    290 713 tokens -> abort
+
+Inside the untreated distribution. The deposits were whole-tensor, byte for byte
+what -no-ooae uploads, through the same primitive on the same stream -- and it
+still aborts. So the partial deposit is exonerated, and with it the §45.6 story
+about stale bytes surviving in the gaps, which §45.7's paint test had already
+failed to support.
+
+That was a conclusion reached by reasoning rather than by measurement, and it
+was wrong -- the same failure mode as §36-§40. Worth stating plainly: in this
+investigation every hypothesis argued from code and refuted by experiment has
+been wrong, and the only durable results have come from measurement.
+
+**What is left in the branch**, now the sole remaining difference between the
+aborting build and the 2.47 M-clean -no-ooae run:
+
+| candidate | what it does |
+|---|---|
+| the ids readback | `ggml_backend_tensor_get_async(ids_backend, ids_tensor, ...)` + `ggml_backend_synchronize(ids_backend)` -- a D2H into a pageable `std::vector`, mid-copy_inputs |
+| `ggml_moe_prefetch_wait(input)` | host-side wait on the page-warming pool |
+| the `needs_sync` side effect | `needs_sync[ids_backend_id] = k_set_sync` at ggml-backend.cpp:2343 |
+
+Note `ids_backend` defaults to `split_backend` and is only corrected when the
+ids tensor is a LATER input of the same split -- so when the ids tensor lives on
+another backend, this reads it through the wrong backend's stream. That is the
+first thing to test, and it is testable by assertion rather than by soak.
+
+### 45.10 The ids readback holds up under assertion — and the branch is smaller than assumed
+
+Three tripwires on the ids readback (env `IK_IDS_CHECK`), with a liveness
+heartbeat because a probe that only speaks on failure cannot be told apart from
+one that never ran:
+
+1. `ids_backend` defaulting to `split_backend` when the ids tensor lives elsewhere
+2. the `ids` vector sized by `ggml_nbytes` while the loop indexes by `nb[1]`/`nb[0]`
+3. an expert id outside `[0, n_expert)`
+
+**201 verified readbacks, zero findings.** All three assumptions hold on the
+live workload. So the ids readback is not obviously broken, and candidate 1 of
+§45.9 is weakened (not eliminated -- 201 samples cannot exclude a rare event).
+
+Two facts worth recording, both contradicting what I had assumed:
+
+* The branch is entered for the ids of layers **24, 29, 36** -- not 0-18. With
+  `-ncmoe 19` the host-resident expert weights are in the UPPER layers on this
+  build, so §45.9's "origins cluster in 0-18 = the streaming range" reasoning
+  had the range backwards. The origins (layers 0-7) and the streamed layers
+  (24+) do not overlap at all.
+* It runs ~65 times per prefill of a 4000-line prompt, not once per split.
+
+The first point matters: it removes the layer-containment argument that made the
+expert branch look guilty in the first place. What still stands is purely
+experimental -- `-no-ooae` ran 2.47 M clean where 10 aborts were expected, and
+that is a fact about the branch as a whole, not about any story told over it.

@@ -26,6 +26,24 @@ cd "$(dirname "$(readlink -f "$0")")/.."
 LOG="${1:-$(ls -t logs/server-*.log 2>/dev/null | head -1)}"
 [ -n "$LOG" ] && [ -f "$LOG" ] || { echo "no log to watch"; exit 1; }
 
+# Sweep away balloons left by earlier runs. Notifications survive a server
+# restart and this watcher's own restart, so a balloon from yesterday's soak
+# still hangs there and reads exactly like a fresh hit -- that has now cost two
+# rounds of "is this a new abort or an old one?". After this sweep, anything on
+# screen was raised by THIS watcher.
+#
+# There is no "close all" in the spec, so this closes IDs by number. Closing an
+# id that does not exist is a documented no-op, so overshooting is harmless.
+# The ceiling is generous because one abort can raise a few hundred (a burst of
+# 231 was seen on 2026-08-24 before the VERDICT branch got rate limited).
+if command -v busctl >/dev/null 2>&1; then
+    for i in $(seq 1 10000); do
+        busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications \
+            org.freedesktop.Notifications CloseNotification u "$i" >/dev/null 2>&1
+    done
+    echo "  cleared stale notifications"
+fi
+
 echo "  watching $LOG"
 echo "  stop with: pkill -f 'nanwatc[h]\.sh'"
 
@@ -75,7 +93,18 @@ Probe named the producing op. One notification per burst; details in ${LOG##*/}.
             printf '\n>>> %s\n' "$line"
             ;;
         *"IK_NAN_CHECK VERDICT"*)
-            notify-send -u critical "ik-llama: VERDICT" "$line" 2>/dev/null
+            # Same rate limit as the first-NaN branch, and for the same reason:
+            # one abort event produced 231 VERDICT lines on 2026-08-24, which
+            # meant 231 desktop balloons that had to be closed by hand. One per
+            # burst tells the whole story; the log has the rest.
+            now=$(date +%s)
+            if [ $((now - LAST)) -ge 300 ]; then
+                LAST=$now
+                notify-send -u critical "ik-llama: VERDICT" \
+                    "$line
+
+One notification per burst; all verdicts in ${LOG##*/}." 2>/dev/null
+            fi
             printf '\n>>> %s\n' "$line"
             ;;
         *"sampling failed, releasing slot"*)
