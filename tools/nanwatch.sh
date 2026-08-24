@@ -74,6 +74,10 @@ Probe named the producing op. One notification per burst; details in ${LOG##*/}.
                 "$line" 2>/dev/null
             printf '\n>>> %s\n' "$line"
             ;;
+        *"IK_NAN_CHECK VERDICT"*)
+            notify-send -u critical "ik-llama: VERDICT" "$line" 2>/dev/null
+            printf '\n>>> %s\n' "$line"
+            ;;
         *"sampling failed, releasing slot"*)
             notify-send -u critical "ik-llama: sampler abort" \
                 "One request returned 500, slot cache dropped, server still up." 2>/dev/null

@@ -3784,3 +3784,113 @@ And §42.2 still stands as the limit on everything tried since: every probe here
 reads device memory back, which synchronises, so none of them could ever have
 caught a race. If that is what this is, nothing in this investigation was capable
 of finding it.
+
+---
+
+## 44. The verification sweep: my input evidence was polluted, and the fingerprint has an innocent explanation (2026-08-23)
+
+Seven independent code readers verified each link of the foreign-f32-overwrite
+mechanism, every claim cited to file:line. Two things came back that change the
+picture more than any hypothesis so far.
+
+### 44.1 The "inputs ALREADY NaN" annotations were read AFTER the graph finished
+
+`IK_NAN_CHECK` flags node outputs in-stream (trustworthy), but the per-input
+"ALREADY NaN" annotations are printed by `ik_nan_report` **after graph
+completion** — a post-hoc readback. By then the input copies' memory has been
+**legally freed and reused**: with `n_copies==1` a split-input copy is an op-NONE
+node freed after its last consumer (ggml-alloc.c:653-667), and any later node
+output can inherit its bytes. The overlap-log reconstruction shows exactly that:
+the `dsv4_raw_mask_padded-0` region is recycled within the same graph to **layer
+38-42 f32 outputs** (ffn_up_gate, kv_b, hca/csa state, attn_wo_a — full covers).
+
+**So the 1.55 % fingerprint is real data with an innocent explanation**: f32
+outputs of late layers legally occupying the freed mask region at readback time,
+read as f16 → 1.561 % NaN. It is not the poison; it is what freed memory looks
+like after the graph. §36.4, §38.2 and §40.2's "device copy is NaN while host is
+clean" rested on those annotations and are hereby downgraded: the true content of
+fattn-0's inputs *at read time* was never validly observed.
+
+### 44.2 What still stands, on trustworthy probes only
+
+* First NaN **node output** in stream order is `fattn-0` (`FLASH_ATTN_EXT`,
+  layer 0) — in-stream probe, valid.
+* Host KV cache: layers 0-2 clean, layers 3-42 poisoned for exactly the batch's
+  cells — host-side reads, valid.
+* Copy-time checks: host source clean, destination byte-perfect right after the
+  copy (1200 healthy comparisons + abort-time reports) — valid.
+* 283 000 synchronised copy-to-consume verifications: no change — valid but
+  race-blind.
+
+### 44.3 Verified code facts from the sweep (file:line in the workflow transcript)
+
+* The split-input H2D copy is `cudaMemcpyAsync` on **`cudaStreamPerThread`** +
+  sync of only that stream (ggml-cuda.cu:649-655). Compute runs on a
+  `cudaStreamNonBlocking` stream (common.cuh:876-885). The copy has **zero
+  device-side ordering** against compute, either direction.
+* The only ordering is the scheduler's host-side `needs_sync` gate → full
+  `cudaStreamSynchronize`; events are dead code since `n_copies==1`.
+* **Mainline synchronises unconditionally before every non-user input copy**
+  (mainline ggml-backend.cpp:1622-1627, 1717-1724). ik gates it. Upstream
+  accepted sync-elision on this path **twice and reverted it twice** — 57819b8d4
+  (Gerganov, 2026-03-12) and 86b94708f (NVIDIA, 2026-06-30). This exact class
+  was judged unsafe upstream.
+* `llama_decode_internal` **never drains after graph compute** — the post-logits
+  sync is commented out (llama.cpp:6838-6839); token generation drains via
+  `llama_get_logits`, **prefill ubatches do not**. Graphs N and N+1 overlap on
+  device during prefill; per-ubatch exposure matches the abort being
+  per-prefilled-token.
+* Within one `copy_inputs` call, expert-weight uploads go on the **compute
+  stream un-waited** while later inputs deposit via `cudaStreamPerThread`
+  concurrently — a window mainline forbids.
+
+### 44.4 The two hypotheses that survive
+
+**H1 — the FLASH_ATTN_EXT kernel itself** intermittently produces NaN from clean
+inputs on sm_120. Reconnects with #2317 (sm_120 takes different branches) — and
+was never really tested: §35 measured the *DSA indexer GEMM*, a different op.
+
+**H2 — a device-side race corrupts fattn's true inputs at read time**, invisible
+to every probe used so far (all synchronise) and misattributed by the post-hoc
+readback.
+
+### 44.5 The discriminating experiment
+
+Launch NaN-check kernels on the **inputs** of `FLASH_ATTN_EXT`, on the compute
+stream, **immediately before the node** — stream-ordered, no synchronisation, so
+races stay live; flags read after the graph as today. At the next abort:
+
+| input flags | output flag | verdict |
+|---|---|---|
+| clean | NaN | **H1** — kernel bug, from clean inputs |
+| NaN | NaN | **H2** — inputs corrupted before the read |
+
+Companions, both free of behavioural change: a host-side live-interval assert in
+galloc (names any plan violation deterministically), and — as the treatment test
+if H2 wins — `k_set_sync = true`, one line, which restores mainline's ordering
+semantics exactly.
+
+### 44.6 The probe was suppressing the fault it hunts — Matt's observation, quantified
+
+Matt noticed the recent no-probe configurations all aborted within a few hundred
+thousand tokens while the probe run sailed past a million. Tokens-to-first-abort
+for all 19 aborts since 08-20, split by the one shared factor:
+
+| configuration | aborts | median to abort | max |
+|---|---:|---:|---:|
+| no probes (no added synchronisation) | 9 | **154 k** | 446 k |
+| probes on (`ik_nan_report` synchronised per split) | 10 | **900 k** | 2.86 M |
+
+No no-probe run survived past 446 k; half the probe runs exceeded 900 k. The
+report ran once per split and synchronised every time — the probe serialised the
+pipeline and throttled the fault. This is also independent evidence that the
+fault is **concurrency-sensitive**, favouring H2-class mechanisms over a purely
+deterministic kernel bug, and consistent with §44.3's finding that prefill
+ubatches never drain between graphs.
+
+Fixed by making the flag readback stream-ordered and asynchronous: the report
+queues `cudaMemcpyFromSymbolAsync` into pinned memory and returns; only when a
+latched flag is seen on a later call does it synchronise (the fault has already
+happened by then, so that sync is free). Verdict latency: one split. The
+concurrency window is restored to no-probe conditions, so the verdict should now
+arrive on the no-probe timescale — a few hundred thousand tokens.
