@@ -4510,3 +4510,31 @@ lost its leading block).
 Eight days, eleven refuted hypotheses, four generations of in-stream
 instrumentation -- and the answer is fourteen rows of -inf at the top of a
 mask.
+
+### 48.1 The kernel dive: localized to tile indexing, three guards added, handed to the author
+
+The 1-second reproducer turned kernel debugging into printf archaeology.
+Established inside `fattn-new-mma.cu` (the new-MMA path, taken for K=V=512):
+
+* the affected rows reach finalize with `KQ_max = -FLT_MAX/2` (no finite score
+  ever seen) and `KQ_rowsum = NaN` -- the NaN is born during the iteration
+* `rowsum_add` is NaN in the FIRST iteration: the Q.K MMA output is **already
+  NaN before the mask is added**
+* the mask values read from the shared tile at that point are **garbage**
+  (0.366, 0.226 -- in a row whose mask is entirely -inf), so the tile loads are
+  reading the wrong memory for this configuration
+* `flash_attn_mask_to_KV_max` correctly returns KV_max = 0 for the fully-masked
+  leading q-tile; the failure is in how the kernel consumes that
+
+Three unguarded 0/0 divisions were found and guarded on the way
+(`flash_attn_combine_results_new`, `flash_attn_stream_k_fixup`, the main
+kernel's rowsum normalisation) -- correct hardening regardless, but none of
+them is the cause: the NaN enters through garbage tile reads upstream of all
+three. A kb0_start clamp against KV_max (suspected inverted stream-k range)
+did not cure it either -- the mis-indexing is deeper in the tile/prefetch
+logic of this kernel.
+
+That is the right moment to hand over: the kernel is ikawrakow's own, the
+reproducer runs in under a second, and tools/fattn-nan-repro.cpp is fully
+self-contained -- generated mask, random q/k, hardcoded shapes, zero private
+bytes. `NaN 458752 / 34734080, tokens 0..13` on sm_120, exit code 42.
