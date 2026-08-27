@@ -92,6 +92,20 @@ Probe named the producing op. One notification per burst; details in ${LOG##*/}.
                 "$line" 2>/dev/null
             printf '\n>>> %s\n' "$line"
             ;;
+        *"IK_FA_TWICE: NONDETERMINISM"*)
+            notify-send -u critical "ik-llama: FA NONDETERMINISM" \
+                "Same node, same inputs, two different outputs. Details in ${LOG##*/}." 2>/dev/null
+            printf '\n>>> %s\n' "$line"
+            ;;
+        *"IK_SUM_CHECK: MISMATCH"*)
+            now=$(date +%s)
+            if [ $((now - LAST)) -ge 300 ]; then
+                LAST=$now
+                notify-send -u critical "ik-llama: SUM MISMATCH" \
+                    "A copy changed between deposit and consumption. Details in ${LOG##*/}." 2>/dev/null
+            fi
+            printf '\n>>> %s\n' "$line"
+            ;;
         *"IK_NAN_CHECK VERDICT"*)
             # Same rate limit as the first-NaN branch, and for the same reason:
             # one abort event produced 231 VERDICT lines on 2026-08-24, which

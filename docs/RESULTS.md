@@ -4151,3 +4151,362 @@ The first point matters: it removes the layer-containment argument that made the
 expert branch look guilty in the first place. What still stands is purely
 experimental -- `-no-ooae` ran 2.47 M clean where 10 aborts were expected, and
 that is a fact about the branch as a whole, not about any story told over it.
+
+### 45.11 Prefetch eliminated for free — and the difference I had missed
+
+`--prefetch-experts` is **not set in this profile** (default false,
+common.h:458) and never has been. So the pool is never created,
+`ggml_moe_prefetch_enabled()` is false and `ggml_moe_prefetch_wait` is a no-op.
+Candidate 2 of §45.9 dies without a test, and the whole prefetch engine --
+including §45.4's unverified MADV_COLD residual -- has been irrelevant all
+along.
+
+Candidate 3 (the `needs_sync` side effect) is also already answered: with
+`k_set_sync = true` that line sets needs_sync to TRUE, the safe direction, and
+§45.3 aborted anyway.
+
+Which leaves nothing from my original list -- so the list was incomplete. The
+difference I never enumerated is **the deposit primitive itself**:
+
+| path | primitive | stream |
+|---|---|---|
+| OOAE (aborts) | `ggml_backend_tensor_set_async` | the **compute** stream, no wait |
+| generic, used by -no-ooae (2.47 M clean) | `ggml_backend_tensor_set` | `cudaStreamPerThread` + immediate sync of that stream |
+
+§45.9 swapped slicing for whole-tensor but kept `set_async`, so it never tested
+this. §45.5 added a drain after the loop, which is not the same as depositing on
+a different stream and waiting there.
+
+Now running with only the primitive swapped -- slicing, ids and everything else
+untouched (`IK_SYNC_DEPOSIT`, verified in /proc/PID/environ, no other switch
+set, OOAE on). Prefill 1682 t/s.
+
+* clean at ~2.5 M -> the compute-stream deposit is the mechanism, and the fix
+  is to deposit like every other input does
+* abort -> the branch differs from the generic path in some way still not
+  enumerated, and enumerating it by reading is what has failed four times
+
+### 45.12 The primitive is not it either — but something here reduces the rate
+
+    OOAE on, IK_SYNC_DEPOSIT=1 (verified in /proc/PID/environ), no other switch
+    1 abort after 1 328 753 tokens; 1 828 174 tokens total, 8.0 h
+
+Depositing through `ggml_backend_tensor_set` -- cudaStreamPerThread with an
+immediate sync of that stream, exactly what the generic path does -- still
+aborts. So the deposit primitive is not the mechanism either.
+
+The rate, though, is not the untreated rate: 7.4 aborts expected, 1 observed
+(P(<=1) = 0.5 %). The same was true of `k_set_sync = true` (first abort at
+727 k where the median is 154 k). Both treatments add synchronisation and both
+appear to thin the fault without removing it -- the same dose-response §44.6
+measured with the probes, where per-split synchronisation moved the median from
+154 k to 900 k.
+
+That pattern is now the most robust thing known about this fault after the
+in-stream verdict, and it argues that `-no-ooae`'s 2.47 M clean run may itself
+be a strong version of the same thinning rather than a cure. The honest reading
+of §45.5 is therefore weaker than written there: 0 aborts in 2.47 M is
+P = 0.0045 % against the UNTREATED rate, but against a rate already thinned
+~5x by added synchronisation it is only ~P = 13 %, which is not significant at
+all. **§45.5's conviction of the branch does not survive that correction.**
+
+What survives, and it is not nothing:
+
+* the in-stream verdict (§45): a device copy is poisoned between deposit and
+  consumption, with every upstream producer clean
+* the dose-response: every treatment that adds synchronisation reduces the rate,
+  none eliminates it
+* the layer facts (§45.10): origins in layers 0-7, streamed experts in 24+ --
+  no overlap
+
+The next step is not another single-variable soak. Each costs hours and the
+last four have produced negatives with confidence intervals too wide to
+separate "fixed" from "thinned". What is needed is either a deterministic
+detector (the galloc live-interval assert from §44.5, which names a violation
+the first time it happens) or a reproducer that raises the rate instead of
+lowering it.
+
+---
+
+## 46. The checksum detector: measuring the fact itself (2026-08-25)
+
+§45.12 ended with the realisation that single-variable soaks can no longer
+answer anything: each costs hours and cannot separate "fixed" from "thinned",
+because every added synchronisation thins the rate (the dose-response of
+§44.6). And §45's verdict, on re-examination, was weaker than written: the
+in-stream probe covered FLASH_ATTN_EXT only, so "raw_k-4 carried NaN into the
+concat" rested on a post-hoc annotation -- the same invalid mechanism as §44.1.
+What is actually established is only: *some split-input copy changes between
+deposit and consumption*.
+
+So measure exactly that. `IK_SUM_CHECK`:
+
+* **mark** -- right after each split-input deposit (all three copy_inputs
+  paths), a kernel on the compute stream sums the copy's bytes into a slot
+* **verify** -- right before every consumer, a kernel re-sums and a third
+  compares, latching the first mismatch (consumer node, src index, both sums)
+* no synchronisation while clean (async pinned readback, §44.6's pattern);
+  liveness heartbeats on both sides (§38.1's lesson); slots from a rolling ring
+  so cross-graph overlap cannot alias them; the map cleared per compute_splits
+  because the graph arena reuses addresses
+* runs with CUDA graphs disabled -- marks execute per iteration outside any
+  capture, so slots would go stale under replay
+
+Two properties matter. It is **methodologically valid** -- in-stream, at
+consumption time, no post-hoc reads. And it is an **amplifier**: it catches ANY
+mutation of a copy, not just the ~3 % that read as f16 NaN, so if the fault is
+a foreign write, mismatches should fire far more often than aborts ever did.
+
+Verified live: 21 425 marks / 95 812 verifies after one 35k-token request
+(~4.5 consumers per copy on average, mask and raw_k copies visibly tracked),
+zero false positives, prefill 1676 t/s. Accepted blind spot: a writer already
+queued on the compute stream between deposit and mark is summed into the
+baseline -- out-of-stream writers, the H2 class, are what this catches.
+
+The readout changes meaning now:
+
+| observation | conclusion |
+|---|---|
+| MISMATCH fires (with or without abort) | the foreign-write class is real; the consumer and tensor are named |
+| aborts continue, sums NEVER mismatch | no out-of-stream writer touches the copies -- H2 as formulated is dead, and the poison is computed into existence somewhere the probes have not looked |
+
+Either way the next abort finally pays for itself.
+
+### 46.1 The abort came with the detector live: ZERO mismatches in 49.8 M verifications
+
+    IK_SUM_CHECK on, graphs off, abort after 1 260 953 tokens
+    10.9 M marks / 49.8 M verifies -- every sum matched, including through the abort
+
+**H2 as formulated is dead.** No out-of-stream writer touches the split-input
+copies -- not once in fifty million deposit-to-consumption checks, not even
+during the poisoning itself. An amplifier that catches ANY byte change stayed
+silent while the logits went NaN.
+
+What survives every valid measurement: the first NaN in stream order is always
+the OUTPUT of a FLASH_ATTN_EXT node (in-stream output probes); the one direct
+input observation said "inputs clean, output NaN" (45, cluster 1); and now the
+inputs are proven untouched. Everything converges on **H1: the FLASH_ATTN_EXT
+kernel intermittently computes NaN from clean inputs** -- on sm_120,
+concurrency-sensitively, which is the signature of an intra-kernel race
+(shared memory, barriers, warp divergence; #2317 already documented sm_120
+taking different branches in FA).
+
+The §44.6 dose-response reads naturally now: more host synchronisation means
+lower occupancy pressure and different intra-kernel timing -- thinning a race
+inside the kernel just as it thinned everything else.
+
+### 46.2 The decisive test: run every FLASH_ATTN_EXT twice and compare
+
+`IK_FA_TWICE`: after the normal execution, sum the output in-stream, execute
+the SAME node again on the SAME inputs (attention writes every output element,
+so re-execution is semantically safe), sum again, compare, latch on the first
+divergence. No synchronisation. A deterministic kernel must produce identical
+sums; §46.1 just eliminated the only other explanation for a divergence
+(inputs changing between the two adjacent runs). If the kernel is
+nondeterministic, this catches it every time it misfires -- with or without NaN
+-- and names the node.
+
+### 46.3 Second abort under the detectors: BOTH silent — and what that leaves
+
+    abort after 111 478 tokens; 0 sum mismatches, 0 FA divergences (885 double-runs)
+
+The inputs were not touched and the kernel, run twice on identical inputs,
+agreed with itself even during the poisoning. Two explanations remain:
+
+**(a) deterministic NaN from a rare input configuration.** The classic is a
+fully-masked attention row (softmax 0/0). Testing this immediately produced a
+finding that reshapes it: `IK_MASK_SCAN` shows **fully-masked REAL rows are
+routine** -- ~12 per pass, mid-batch (rows ~2234-2238 of ~3432), every healthy
+graph, no abort. In DSA the raw branch legitimately selects nothing for some
+tokens, so the kernel must guard this case -- and does, almost always. The
+surviving form of (a): the guard fails on a rare variant (row position within a
+tile, tile fully masked, a kernel-variant boundary). Deterministic, data-shaped,
+timing-of-batching-sensitive -- which would also finally explain §44.6's
+dose-response: added synchronisation changes ubatch composition and padding,
+i.e. the probability of the fatal shape, not any race.
+
+**(b) the poison is already in the deposited bytes** -- host-side. Sum-check
+cannot see it by design; §39's copy-check saw host-clean for layer 0 in the old
+events, but layer-0 K passes through device-computed q_rope/k paths that no
+probe currently covers at content level.
+
+This run had no IK_NAN_CHECK, so the first-NaN node for this abort is unknown.
+Now deployed, everything at once: NAN_CHECK (first NaN node + fattn input NaN
+state) + SUM_CHECK + FA_TWICE + MASK_SCAN, graphs off, prefill 1388 t/s. The
+next abort answers, in one event: which node, whether its inputs held NaN at
+read time, whether they changed since deposit, whether the kernel diverged, and
+what the mask's fully-masked-row picture looked like at that moment.
+
+---
+
+## 47. Dump-on-abort: the poisoned state becomes the reproducer (2026-08-26)
+
+§46.4's four-way verdict makes the next abort worth ~300 MB of disk: fattn-0
+computes NaN **deterministically** from clean inputs, and for layer 0 the whole
+computation is reconstructible offline -- Q depends only on the ubatch tokens,
+K on the layer-0 KV cache (host-resident with -nkvo), the mask on the batch
+geometry. All of it survives the abort on the host side.
+
+The sampler-catch in server-context.cpp now saves, BEFORE erasing the slot
+(`IK_NAN_DUMP=0` to disable):
+
+    logs/nan-dump-<us>/tokens.bin   full token history, int32
+    logs/nan-dump-<us>/kv_l0.bin    layer-0 KV bytes, self-describing header
+    logs/nan-dump-<us>/kv_l1.bin    layer-1 likewise
+    logs/nan-dump-<us>/meta.txt     n_past, kv head/used/size, n_ubatch
+
+Helpers `llama_ik_kv_info` / `llama_ik_dump_kv_layer` added to src/llama.cpp
+(the KV tensors are not reachable through any public API). Full diagnostic
+stack stays on; prefill 1398 t/s.
+
+Plan once a dump lands: an offline replay harness re-runs the failing ubatch
+from the dump -- same tokens, same KV, same shapes. Deterministic kernel means
+the NaN must reproduce on demand, and from there the kernel can be dissected
+in minutes per experiment instead of hours per soak. That reproducer, not a
+statistic, is what upstream gets.
+
+### 47.1 Two offline replays, two negatives — and the reason is structural
+
+The replay harness (tools/replay-nan-dump.cpp) ran the dumped 125 196 tokens
+with the final chunk aligned to the aborting shape (2416): all logits finite.
+Injecting the dumped layer-0/1 KV bytes over the rebuilt cache before the fatal
+chunk: still finite.
+
+The structural reason: in DSA the mask is derived from the **indexer state**
+(the csa/lid/hca state buffers) via top-k selection, and that state was neither
+dumped nor reconstructible bit-exactly -- the server built it across many
+requests with many batch shapes, and the trigger is a bit pattern. Replaying
+tokens rebuilds a mathematically equivalent but bitwise different state.
+
+### 47.2 In-place replay: the server is the replay device
+
+Everything the failing decode read is still hot in the server process at catch
+time -- KV, indexer state, all of it. The catch now (before dropping the slot):
+
+1. `llama_kv_cache_seq_rm` of the failing batch's range
+2. arms `ik_fattn_capture` in the CUDA layer
+3. re-runs `llama_decode(batch_view)` -- same batch, same everything
+4. counts NaN logits of the re-run and logs `in-place replay after NaN abort`
+   with rc / nan_logits / captured / capture_dir
+
+During the re-run the CUDA layer captures **fattn-0's exact device input bytes**
+(all srcs, with types/shapes/strides) plus its output to
+`logs/fattn0-capture-<us>/` (~340 MB, once). If the re-run reproduces --
+§46.4's determinism says it should -- those files are the standalone
+reproducer: the kernel can then be fired at them in isolation, no model, no
+145 GB, no cache. `IK_NO_INPLACE_REPLAY=1` disables.
+
+Readout: `nan_logits > 0` in the replay log line = determinism confirmed on the
+real state + capture in hand. `nan_logits = 0` = the re-run diverged, which
+would point at the indexer state mutating during the failed decode.
+
+### 47.3 In-place replay REPRODUCED — and the walk-back finds the origin chunk
+
+    abort 11:00:48; in-place replay: rc=0, nan_logits=129280 (ALL)
+
+Deterministic reproduction on the real state, on demand — §46.4 confirmed in
+production. But the capture photographed a healthy graph: the batch in scope at
+the catch is the LAST batch, not the poisoning chunk; its fattn-0 was clean
+(out.bin NaN=0, shape 8192 vs the origin's 6728) and the replay's NaN was pure
+propagation from the poisoned cache in layers 3+. The armed capture then stayed
+live and shot the next innocent prefill.
+
+Replaced by the **walk-back replay**: rewind KV to the request's prefill base,
+re-run THIS request's chunks exactly as the server chunked them (bit-exact —
+what the offline replays could never be, §47.1), consume the in-stream NaN
+latch after each chunk. The first chunk that latches is the origin; it is
+re-run once more with the fattn-0 capture armed, and the capture disarms when
+the window closes so it can never again photograph an unrelated graph. Each
+chunk logs `walk-back replay chunk {p0, n, nan_node}`; the finale logs
+`ORIGIN chunk re-run` with the capture directory.
+
+### 47.4 The walk-back cannot work — the failing decode mutates its own trigger
+
+    abort 17:02:58; request base 15864, single 1079-token chunk;
+    bit-exact re-run of that chunk: CLEAN (nan_node=-1)
+
+The original run of that chunk produced NaN; its bit-exact replay did not. The
+only difference: the failing decode had already advanced the DSA indexer
+persist state, and the replay ran from the mutated state -- different top-k,
+different mask, no NaN. So the trigger involves indexer state that the failure
+itself overwrites, and NO after-the-fact replay -- in-place or offline -- can
+ever reproduce the origin. (The morning replay "reproduced" only propagation
+from the poisoned cache, which survives; the origin does not.)
+
+Replaced by the **origin dump**: ik_nan_report, which runs at the end of the
+origin's own split a few nodes after the latch, now dumps the latched
+FLASH_ATTN_EXT node's input and output bytes immediately -- during the original
+event, before any state moves further. The inputs may already be
+galloc-recycled by the origin's same-split successors, so the dump is validated
+offline: a genuine mask holds only finite values and -inf, recycled f32 garbage
+is unmistakable; q is reconstructible from tokens regardless. Combined with the
+abort-time nan-dump (tokens + layer-0/1 KV), a validated origin dump is the
+complete standalone reproducer.
+
+### 47.5 Third clean-inputs verdict, first origin dump — and recycling-proof staging
+
+    abort 21:12:53, origin fattn-0 again (n_tokens=1889, n_kv=2048 -- SMALL
+    context; deep context is not required)
+    in-stream: inputs CLEAN at read time; FA-twice: bit-identical double-run
+    (including the NaN pattern); sum-check: silent; output ~3 % NaN
+
+Third independent event with the same three-way verdict: the kernel produces a
+~3 % NaN output from clean inputs, bit-deterministically. The origin dump fired
+but end-of-split is already too late for the bytes: the mask region showed
+1.29 % NaN (recycled by downstream-NaN successors), K likewise; q looked
+intact. Exactly the predicted pollution.
+
+Fixed by ORIGIN STAGING: pinned-host copies of fattn-0's inputs, refreshed
+every prefill graph by a stream-ordered D2H issued immediately before the node
+-- byte-for-byte what the kernel is about to read, immune to galloc recycling,
+~50 ms per prefill graph (prefill 1357 t/s). On a latch, ik_nan_report writes
+them as staged_src*.bin next to the (kept, polluted) device dumps.
+
+The next abort therefore delivers guaranteed-valid kernel inputs. With those,
+the standalone harness runs FLASH_ATTN_EXT on the exact bytes in isolation --
+reproduce, then dissect the kernel variant and the value pattern that breaks
+its fully-masked-row / softmax guard.
+
+---
+
+## 48. ROOT CAUSE: FLASH_ATTN_EXT emits NaN for a fully-masked leading row block (2026-08-27)
+
+The staged capture from the 22:09 abort validated clean (q/k/sinks finite, mask
+99.4 % -inf with ~8 allowed positions per row) and the standalone harness
+(tools/fattn-repro.cpp) reproduced ON THE FIRST RUN:
+
+    scale 1/sqrt(512): NaN 458752 / 34734080 -- exactly 14 tokens x 64 heads x 512
+
+The mask has 27 fully-masked rows: 15 REAL leading rows (0-14) plus the 12
+padding rows. The NaN tokens are 0-13 -- the leading fully-masked block (row 14
+and the padding rows survive; mid-batch fully-masked rows never NaN, §46.3).
+
+Then the two substitutions that close the case:
+
+* **random q/k, real mask** -> identical NaN tokens 0-13. The values are
+  irrelevant; the trigger is the mask.
+* **random q/k, GENERATED mask** (rows 0-14 all -inf, an 8-wide causal window
+  after, padding masked) -> identical NaN tokens 0-13. **The reproducer is
+  100 % synthetic** -- a ~150-line program, no model, no capture, no private
+  data, fails in under a second on sm_120.
+
+**The bug:** the FLASH_ATTN_EXT path used by the DSV4 raw branch (head dim 512,
+IQK_DISABLED, sinks attached, prec F32) mishandles query rows whose mask is
+entirely -inf when they form the LEADING block of the batch. With sinks
+attached those rows must output zeros (as they do mid-batch and in padding);
+instead the leading block yields NaN.
+
+**Why it presented as a once-per-250k-token heisenbug:** DSA legitimately
+produces fully-masked raw-branch rows at a batch start -- tokens whose raw
+window holds no cells, a boundary condition of batching x indexer state. Every
+observed correlate now has its explanation: prefill-only (needs a multi-row
+batch), layer 0-7 origins (uncompressed/raw layers), the synchronisation
+dose-response (batch composition shifts the boundary-geometry probability, no
+race involved), FA-twice bit-identical (deterministic value bug), inputs clean
+in-stream (they ARE valid -- the kernel is wrong), ~3 % output NaN (14 of 1060
+rows), and the walk-back non-reproduction (the indexer state moved, the mask
+lost its leading block).
+
+Eight days, eleven refuted hypotheses, four generations of in-stream
+instrumentation -- and the answer is fourteen rows of -inf at the top of a
+mask.

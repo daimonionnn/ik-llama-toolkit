@@ -1,0 +1,1842 @@
+diff --git a/examples/server/server-context.cpp b/examples/server/server-context.cpp
+index b4fcbee7..280db8df 100644
+--- a/examples/server/server-context.cpp
++++ b/examples/server/server-context.cpp
+@@ -1,3 +1,14 @@
++#include <sys/stat.h>
++#include <cmath>
++
++// RESULTS 47: dump-on-abort helpers, defined in src/llama.cpp
++struct llama_context;
++extern "C" void llama_ik_kv_info(struct llama_context *, int *, int *, int *);
++extern "C" int  llama_ik_dump_kv_layer(struct llama_context *, int, const char *);
++extern "C" void ik_fattn_capture_arm(const char *);
++extern "C" void ik_fattn_capture_disarm(void);
++extern "C" int  ik_fattn_capture_done(void);
++extern "C" int  ik_nan_latch_consume(void);
+ #include "server-context.h"
+ #include "server-chat.h"
+ #include "server-common.h"
+@@ -4797,6 +4808,156 @@ void server_context::process_batch_tokens(int32_t & n_batch) {
+                     {"error", e.what()},
+                 });
+                 send_error(slot, std::string("sampling error: ") + e.what(), ERROR_TYPE_SERVER);
++
++                // LOCAL PATCH (ik-llama-toolkit): drop this slot's cached state.
++                //
++                // release() alone resets the slot but keeps cache_tokens, the KV
++                // cells and the checkpoints. The state that just produced NaN
++                // logits would therefore be REUSED by the next request carrying
++                // the same prefix -- and a retry is exactly what an agent client
++                // does with a 500. Either it aborts again and the agent spins, or
++                // it does not and the answer is silently degraded. The second is
++                // worse, because nothing reports it.
++                //
++                // We do not know whether the NaN originates in the KV or in the
++                // arithmetic of that one batch (RESULTS 32 -- the cause is open),
++                // so this is not a fix. It is refusing to build on a state that
++                // has demonstrably gone wrong. Cost is one full prefill on the
++                // retry; cheap against a quietly wrong answer.
++                //
++                // LOCAL PATCH (ik-llama-toolkit), RESULTS 47: dump-on-abort.
++                // 46.4 proved fattn-0 computes NaN deterministically from clean
++                // inputs, so the poisoned state IS the reproducer -- and the
++                // next line is about to erase it. Save it first: the token
++                // history (layer-0 Q depends only on these), the layer-0/1 KV
++                // bytes, and the slot geometry. ~300 MB, once per abort.
++                // Disable with IK_NAN_DUMP=0.
++                {
++                    const char * e = getenv("IK_NAN_DUMP");
++                    if (!e || atoi(e) != 0) {
++                        char dir[128];
++                        snprintf(dir, sizeof(dir), "logs/nan-dump-%lld", (long long) ggml_time_us());
++                        if (mkdir(dir, 0755) == 0) {
++                            char path[192];
++                            // token history, int32 little-endian
++                            snprintf(path, sizeof(path), "%s/tokens.bin", dir);
++                            if (FILE * f = fopen(path, "wb")) {
++                                for (size_t i = 0; i < slot.cache_tokens.size(); ++i) {
++                                    int32_t tok = (int32_t) slot.cache_tokens[i];
++                                    fwrite(&tok, sizeof(tok), 1, f);
++                                }
++                                fclose(f);
++                            }
++                            int kv_head = 0, kv_used = 0, kv_n = 0;
++                            llama_ik_kv_info(ctx, &kv_head, &kv_used, &kv_n);
++                            int mb0 = -1, mb1 = -1;
++                            snprintf(path, sizeof(path), "%s/kv_l0.bin", dir);
++                            mb0 = llama_ik_dump_kv_layer(ctx, 0, path);
++                            snprintf(path, sizeof(path), "%s/kv_l1.bin", dir);
++                            mb1 = llama_ik_dump_kv_layer(ctx, 1, path);
++                            snprintf(path, sizeof(path), "%s/meta.txt", dir);
++                            if (FILE * f = fopen(path, "w")) {
++                                fprintf(f, "n_tokens_history %zu\nn_past %d\nn_past_prompt %d\n"
++                                           "kv_head %d\nkv_used %d\nkv_size %d\n"
++                                           "n_ubatch %d\nkv_l0_mb %d\nkv_l1_mb %d\n",
++                                        slot.cache_tokens.size(), slot.n_past, slot.n_past_prompt,
++                                        kv_head, kv_used, kv_n,
++                                        (int) llama_n_ubatch(ctx), mb0, mb1);
++                                fclose(f);
++                            }
++                            LOG_ERROR("NaN dump written -- offline reproducer material", {
++                                {"dir", dir},
++                                {"kv_l0_mb", mb0},
++                                {"kv_l1_mb", mb1},
++                            });
++                        }
++                    }
++                }
++
++                // LOCAL PATCH (ik-llama-toolkit), RESULTS 47.3: walk-back replay.
++                // 47.2's replay of the batch in scope reproduced the NaN
++                // (propagation from the poisoned cache) but captured a healthy
++                // graph -- the batch in scope is the LAST one, not the
++                // poisoning chunk. This version rewinds to the request's
++                // prefill base and re-runs THIS request's chunks exactly as the
++                // server chunked them (bit-exact, unlike the offline replays,
++                // which is what killed those -- 47.1), consulting the in-stream
++                // NaN latch after each chunk. The first chunk that latches is
++                // the origin; it is re-run once more with the fattn-0 capture
++                // armed. Deterministic per 46.4, so it must latch again.
++                if (!getenv("IK_NO_INPLACE_REPLAY")) {
++                    const int32_t rp_base = slot.n_prompt_tokens_cache;
++                    const int32_t rp_end  = (int32_t) slot.cache_tokens.size();
++                    const int32_t rp_ub   = (int32_t) llama_n_ubatch(ctx);
++                    if (rp_base >= 0 && rp_end > rp_base) {
++                        (void) ik_nan_latch_consume();   // clear stale latch
++                        llama_kv_cache_seq_rm(ctx, slot.id, rp_base, -1);
++                        std::vector<llama_token> rp_toks(rp_end - rp_base);
++                        for (int32_t i2 = rp_base; i2 < rp_end; ++i2) rp_toks[i2 - rp_base] = slot.cache_tokens[i2];
++                        int32_t rp_origin = -1, rp_node = -1;
++                        for (int32_t p = 0; p < rp_end - rp_base; p += rp_ub) {
++                            const int32_t n = std::min(rp_ub, rp_end - rp_base - p);
++                            llama_batch rb = llama_batch_get_one(rp_toks.data() + p, n, rp_base + p, slot.id);
++                            if (llama_decode(ctx, rb) != 0) break;
++                            const int latched = ik_nan_latch_consume();
++                            LOG_ERROR("walk-back replay chunk", {
++                                {"p0", rp_base + p}, {"n", n}, {"nan_node", latched},
++                            });
++                            if (latched >= 0) { rp_origin = p; rp_node = latched; break; }
++                        }
++                        if (rp_origin >= 0) {
++                            // origin chunk found: re-run it once more with capture armed
++                            char cap_dir[160];
++                            snprintf(cap_dir, sizeof(cap_dir), "logs/fattn0-capture-%lld", (long long) ggml_time_us());
++                            llama_kv_cache_seq_rm(ctx, slot.id, rp_base + rp_origin, -1);
++                            ik_fattn_capture_arm(cap_dir);
++                            const int32_t n = std::min(rp_ub, rp_end - rp_base - rp_origin);
++                            llama_batch rb = llama_batch_get_one(rp_toks.data() + rp_origin, n, rp_base + rp_origin, slot.id);
++                            const int rc2 = llama_decode(ctx, rb);
++                            const int lat2 = ik_nan_latch_consume();
++                            ik_fattn_capture_disarm();
++                            LOG_ERROR("walk-back replay: ORIGIN chunk re-run", {
++                                {"p0", rp_base + rp_origin}, {"n", n}, {"rc", rc2},
++                                {"first_nan_node", rp_node}, {"relatch_node", lat2},
++                                {"captured", ik_fattn_capture_done()}, {"capture_dir", cap_dir},
++                            });
++                        } else {
++                            LOG_ERROR("walk-back replay: NO chunk re-latched -- origin did not reproduce from the request base", {
++                                {"base", rp_base}, {"end", rp_end},
++                            });
++                        }
++                    }
++                }
++
++                // Same sequence the SLOT_ERASE handler uses below.
++                const size_t n_tok_erased = slot.cache_tokens.size();
++                const size_t n_ckpt_erased = slot.server_cached_prompt.checkpoints.size();
++
++                llama_kv_cache_seq_rm(ctx, slot.id, -1, -1);
++                slot.cache_tokens.keep_first(0);
++                slot.server_cached_prompt.checkpoints.clear();
++                slot.server_cached_prompt.data.clear();
++                slot.n_past = 0;
++                slot.n_past_prompt = 0;
++                slot.n_prompt_tokens_cache = 0;
++                slot.checkpoint_pos = -1;
++                slot.do_checkpoint = false;
++                if (slot.ctx_sampling != nullptr) {
++                    common_sampler_reset(slot.ctx_sampling);
++                }
++
++                // Greppable, because the point of surviving is being able to tell
++                // afterwards that it happened and that recovery was clean:
++                //   grep 'NaN logits' logs/server-*.log
++                // The next request for this slot will show cache_size = 0 and a
++                // prefill from p0=0, which is the confirmation that it recovered.
++                LOG_ERROR("NaN logits -- dropped this slot's cached state, the next request will prefill from scratch", {
++                    {"id_slot",             slot.id},
++                    {"id_task",             slot.id_task},
++                    {"cache_tokens_erased", (uint64_t) n_tok_erased},
++                    {"checkpoints_erased",  (uint64_t) n_ckpt_erased},
++                });
++
+                 slot.release();
+                 slot.i_batch = -1;
+                 continue;
+diff --git a/examples/server/server-task.cpp b/examples/server/server-task.cpp
+index 95c1a05f..35c80f45 100644
+--- a/examples/server/server-task.cpp
++++ b/examples/server/server-task.cpp
+@@ -1213,6 +1213,25 @@ void server_prompt_cache::update() {
+ 
+             states.pop_front();
+         }
++
++        // The loop above cannot help when a *single* state is over the limit,
++        // and one easily is: a state carries up to --ctx-checkpoints
++        // checkpoints, and a checkpoint is a fixed size regardless of how many
++        // tokens it covers (~872 MiB at 131072 ctx here, ~1/6 of the whole KV
++        // cache), so 32 of them is ~27 GiB against a default limit of 8 GiB.
++        // Observed: 1 prompt holding 18 checkpoints = 18803 MiB, limit 8192.
++        //
++        // Checkpoints are an optimisation for partial reuse, not the state
++        // itself -- `data` is. So trim them oldest-first to get back under the
++        // limit, rather than letting the cache silently ignore it.
++        for (auto& state : states) {
++            while (size() > limit_size && !state.checkpoints.empty()) {
++                LLAMA_LOG_INFO(" - cache size limit reached, dropping a checkpoint (size = %.3f MiB)\n",
++                    state.checkpoints.front().size() / (1024.0 * 1024.0));
++
++                state.checkpoints.pop_front();
++            }
++        }
+     }
+ 
+     // average size per token
+diff --git a/ggml/src/ggml-alloc.c b/ggml/src/ggml-alloc.c
+index 70433f98..3bc12a18 100644
+--- a/ggml/src/ggml-alloc.c
++++ b/ggml/src/ggml-alloc.c
+@@ -868,6 +868,61 @@ static bool ggml_gallocr_needs_realloc(ggml_gallocr_t galloc, struct ggml_cgraph
+     return false;
+ }
+ 
++
++// IK_OVERLAP: does the allocator hand the same device memory to two tensors that
++// are both live? RESULTS 41 suspects exactly that for the split-input copies --
++// `ggml_set_input`/`ggml_set_output` is what stops it, and that guard is behind
++// `n_copies > 1`, which is never true here. Rather than wait ~8 M tokens to see
++// whether aborts stop, this looks at the allocation directly: it walks every
++// tensor in the graph and reports any pair whose byte ranges intersect, naming
++// them. Off unless IK_OVERLAP=1; one report per distinct pair of names.
++static void ik_overlap_check(struct ggml_cgraph * graph) {
++    static int on = -1;
++    if (on < 0) { const char * e = getenv("IK_OVERLAP"); on = (e && atoi(e)) ? 1 : 0; }
++    if (on != 1 || !graph) return;
++
++    // Collect every tensor that has storage, nodes and leafs alike.
++    enum { MAXT = 8192 };
++    static const struct ggml_tensor * ts[MAXT];
++    int n = 0;
++    for (int i = 0; i < graph->n_leafs && n < MAXT; i++) {
++        const struct ggml_tensor * t = graph->leafs[i];
++        if (t && t->data && !t->view_src) ts[n++] = t;
++    }
++    for (int i = 0; i < graph->n_nodes && n < MAXT; i++) {
++        const struct ggml_tensor * t = graph->nodes[i];
++        if (t && t->data && !t->view_src) ts[n++] = t;
++    }
++
++    static long long calls = 0;
++    ++calls;
++    int found = 0;
++    for (int i = 0; i < n; i++) {
++        const char * a = ts[i]->data;
++        const char * ae = a + ggml_nbytes(ts[i]);
++        for (int j = i + 1; j < n; j++) {
++            if (ts[i]->buffer != ts[j]->buffer) continue;
++            const char * b = ts[j]->data;
++            const char * be = b + ggml_nbytes(ts[j]);
++            if (a < be && b < ae) {
++                // Only interesting when one of them is a split-input copy.
++                if (strstr(ts[i]->name, "raw_k-") || strstr(ts[j]->name, "raw_k-")) {
++                    fprintf(stderr, "IK_OVERLAP: %s [%p,%p) overlaps %s [%p,%p)\n",
++                            ts[i]->name, (const void *)a, (const void *)ae,
++                            ts[j]->name, (const void *)b, (const void *)be);
++                    fflush(stderr);
++                    ++found;
++                }
++            }
++        }
++    }
++    if (calls == 1 || calls % 200 == 0) {
++        fprintf(stderr, "IK_OVERLAP: alive, graph #%lld, %d tensors with storage, %d raw_k overlaps this graph\n",
++                calls, n, found);
++        fflush(stderr);
++    }
++}
++
+ bool ggml_gallocr_alloc_graph(ggml_gallocr_t galloc, struct ggml_cgraph * graph) {
+     if (ggml_gallocr_needs_realloc(galloc, graph)) {
+         if (galloc->n_buffers == 1) {
+@@ -913,6 +968,8 @@ bool ggml_gallocr_alloc_graph(ggml_gallocr_t galloc, struct ggml_cgraph * graph)
+         ggml_gallocr_init_tensor(galloc, node, &node_alloc->dst);
+     }
+ 
++    ik_overlap_check(graph);
++
+     return true;
+ }
+ 
+diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index a6a394c4..6b1c0e14 100644
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -208,7 +208,215 @@ size_t ggml_backend_get_max_size(ggml_backend_t backend) {
+     return ggml_backend_buft_get_max_size(ggml_backend_get_default_buffer_type(backend));
+ }
+ 
++// IK_COPY_CHECK -- placed on the two low-level entry points every copy funnels
++// through, after three attempts at guessing the right branch in the scheduler
++// each landed somewhere raw_k never goes. The heartbeat is what caught that: a
++// counter of 1 over 35 000 prefilled tokens meant "this path is not used", not
++// "the data is clean". RESULTS 36.9 and 38.6.
++// IK_DST_CHECK: read the DESTINATION back immediately after the copy and compare
++// it with the source. RESULTS 40.5: CUDA0#raw_k-0 is NaN on the device while the
++// host bytes it came from are clean, and that is the one step in the chain with
++// no measurement behind it. Only for the tensors that matter, because a device
++// readback per copy would be ruinous.
++static bool ik_dst_check_wanted(const struct ggml_tensor * src, const struct ggml_tensor * dst) {
++    static int on = -1;
++    if (on < 0) { const char * e = getenv("IK_DST_CHECK"); on = (e && atoi(e)) ? 1 : 0; }
++    if (on != 1 || !src || !dst) return false;
++    if (src->type != GGML_TYPE_F16) return false;
++    // layers 0 and 1 only -- the uncompressed ones, where the poison starts
++    return strncmp(src->name, "raw_k-0", 7) == 0 || strncmp(src->name, "raw_k-1", 7) == 0;
++}
++
++static void ik_dst_check_after(const struct ggml_tensor * src, const struct ggml_tensor * dst) {
++    const size_t nb = ggml_nbytes(src);
++    const size_t n16 = nb / 2;
++    std::vector<uint16_t> buf(n16);
++    ggml_backend_tensor_get(dst, buf.data(), 0, nb);
++
++    const uint16_t * h = (const uint16_t *) src->data;
++    size_t src_nan = 0, dst_nan = 0, first_dst = 0, diff = 0;
++    for (size_t i = 0; i < n16; ++i) {
++        const bool sn = (h[i]      & 0x7FFFu) > 0x7C00u;
++        const bool dn = (buf[i]    & 0x7FFFu) > 0x7C00u;
++        if (sn) ++src_nan;
++        if (dn) { if (dst_nan == 0) first_dst = i; ++dst_nan; }
++        if (h[i] != buf[i]) ++diff;
++    }
++    static long long calls = 0;
++    ++calls;
++    if (dst_nan || diff) {
++        fprintf(stderr, "IK_DST_CHECK: %s -> %s: src_nan=%zu dst_nan=%zu (first %zu) differing=%zu of %zu\n",
++                src->name, dst->name, src_nan, dst_nan, first_dst, diff, n16);
++        fflush(stderr);
++    }
++    if (calls == 1 || calls % 100 == 0) {
++        fprintf(stderr, "IK_DST_CHECK: alive, %lld destination reads compared\n", calls);
++        fflush(stderr);
++    }
++}
++
++// IK_RAWK_GUARD=0 restores upstream behaviour (guard only when n_copies > 1),
++// so one build can test both. Default on.
++// ===== IK_LIFETIME: prove (or disprove) that raw_k's storage is overwritten
++// while it is still needed. RESULTS 41.4: the overlap check shows raw_k shares
++// storage with other tensors, but sharing is what the allocator is FOR -- only a
++// lifetime conflict is a bug. So: checksum the destination right after the copy,
++// and check it again at the moment attention consumes it. A difference is the
++// proof; equality kills the hypothesis.
++//
++// Requires GGML_CUDA_DISABLE_GRAPHS=1: reading device memory synchronises, which
++// is illegal during graph capture.
++#include <unordered_map>
++#include <unordered_set>
++struct ik_rawk_rec { uint64_t sum; size_t nbytes; size_t nan_at_copy; char name[GGML_MAX_NAME]; };
++static std::unordered_set<const void *> g_ik_copied;
++static std::unordered_map<const void *, ik_rawk_rec> g_ik_rawk;
++
++static uint64_t ik_sum16(const uint16_t * p, size_t n) {
++    uint64_t h = 1469598103934665603ULL;
++    for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ULL; }
++    return h;
++}
++
++extern "C" bool ik_sum_check_enabled(void);
++extern "C" void ik_sum_clear(void);
++extern "C" void ik_sum_mark_tensor(ggml_backend_t backend, const struct ggml_tensor * t);
++
++extern "C" bool ik_lifetime_on(void) {
++    static int on = -1;
++    if (on < 0) { const char * e = getenv("IK_LIFETIME"); on = (e && atoi(e)) ? 1 : 0; }
++    return on == 1;
++}
++
++// called right after a host->device copy of a raw_k tensor
++static void ik_lifetime_record(const struct ggml_tensor * src, struct ggml_tensor * dst) {
++    if (!ik_lifetime_on() || !dst || !dst->data) return;
++    if (!src || !src->name[0] || strncmp(src->name, "raw_k-", 6) != 0) return;
++    const size_t nb = ggml_nbytes(dst);
++    std::vector<uint16_t> tmp(nb/2);
++    ggml_backend_tensor_get(dst, tmp.data(), 0, nb);
++    ik_rawk_rec rec; rec.sum = ik_sum16(tmp.data(), tmp.size()); rec.nbytes = nb;
++    snprintf(rec.name, sizeof(rec.name), "%s", dst->name);
++    // Count NaN already present in what we just copied in. If the copy is skipped
++    // for a graph, the checksum would be taken from stale device content and the
++    // verify below would report no change even though the buffer is poisoned --
++    // the one blind spot this probe would otherwise have.
++    size_t nan_at_copy = 0;
++    for (size_t q = 0; q < tmp.size(); ++q) if ((tmp[q] & 0x7FFFu) > 0x7C00u) ++nan_at_copy;
++    rec.nan_at_copy = nan_at_copy;
++    if (nan_at_copy) {
++        fprintf(stderr, "IK_LIFETIME: %s was ALREADY NaN right after the copy -- %zu of %zu f16\n",
++                dst->name, nan_at_copy, tmp.size());
++        fflush(stderr);
++    }
++    g_ik_rawk[dst->data] = rec;
++    g_ik_copied.insert(dst->data);
++}
++
++// called from ggml-cuda.cu when a node is about to consume a tensor
++extern "C" void ik_lifetime_verify(const struct ggml_tensor * t, const char * consumer) {
++    if (!ik_lifetime_on() || !t || !t->data) return;
++    auto it = g_ik_rawk.find(t->data);
++    if (it == g_ik_rawk.end()) {
++        // A raw_k copy consumed in a graph where no copy was recorded: the device
++        // buffer holds whatever was there before. Report it once per name.
++        if (t->name[0] && strstr(t->name, "raw_k-") && !g_ik_copied.count(t->data)) {
++            static std::unordered_set<std::string> told;
++            if (told.insert(t->name).second) {
++                fprintf(stderr, "IK_LIFETIME: %s consumed by %s but NOT copied in this graph\n",
++                        t->name, consumer ? consumer : "?");
++                fflush(stderr);
++            }
++        }
++        return;
++    }
++    const size_t nb = it->second.nbytes;
++    if (ggml_nbytes(t) != nb) return;
++    // Only the SAME tensor changing counts. A different name at the same address
++    // is the allocator reusing storage after raw_k's last use -- which is what it
++    // is for, not a fault. The first version compared by address alone and duly
++    // reported q_b-N sitting on a former raw_k address as a "change".
++    if (strcmp(t->name, it->second.name) != 0) return;
++    std::vector<uint16_t> tmp(nb/2);
++    ggml_backend_tensor_get((struct ggml_tensor *) t, tmp.data(), 0, nb);
++    const uint64_t now = ik_sum16(tmp.data(), tmp.size());
++    static long long checked = 0, bad = 0;
++    ++checked;
++    if (now != it->second.sum) {
++        ++bad;
++        size_t nan = 0;
++        for (size_t i = 0; i < tmp.size(); ++i) if ((tmp[i] & 0x7FFFu) > 0x7C00u) ++nan;
++        fprintf(stderr, "IK_LIFETIME: %s CHANGED between copy and use by %s -- %zu NaN of %zu f16\n",
++                t->name, consumer ? consumer : "?", nan, tmp.size());
++        fflush(stderr);
++    }
++    if (checked == 1 || checked % 500 == 0) {
++        fprintf(stderr, "IK_LIFETIME: alive, %lld verified, %lld changed\n", checked, bad);
++        fflush(stderr);
++    }
++}
++// ===== end IK_LIFETIME =====
++
++static bool ik_rawk_guard(void) {
++    static int on = -1;
++    if (on < 0) { const char * e = getenv("IK_RAWK_GUARD"); on = (e && atoi(e) == 0) ? 0 : 1; }
++    return on == 1;
++}
++
++static void ik_copy_check_src(const char * where, const struct ggml_tensor * t, const char * dstname) {
++    static int on = -1;
++    if (on < 0) { const char * e = getenv("IK_COPY_CHECK"); on = (e && atoi(e)) ? 1 : 0; }
++    if (on != 1 || !t || !t->data) return;
++
++    static long long calls = 0, checked = 0;
++    ++calls;
++    if (t->type == GGML_TYPE_F16 && t->buffer && ggml_backend_buffer_is_host(t->buffer)) {
++        ++checked;
++        const size_t n16 = ggml_nbytes(t) / 2;
++        const uint16_t * h = (const uint16_t *) t->data;
++        size_t first = 0, cnt = 0;
++        for (size_t i = 0; i < n16; ++i) {
++            if ((h[i] & 0x7FFFu) > 0x7C00u) { if (cnt == 0) first = i; ++cnt; }
++        }
++        if (cnt) {
++            fprintf(stderr, "IK_COPY_CHECK [%s]: HOST source already NaN: %s -> %s, %zu of %zu f16, first at %zu\n",
++                    where, t->name, dstname ? dstname : "?", cnt, n16, first);
++            fflush(stderr);
++        }
++    }
++    if (calls == 1 || calls % 2000 == 0) {
++        fprintf(stderr, "IK_COPY_CHECK: alive, %lld copies seen, %lld host-f16 scanned\n", calls, checked);
++        fflush(stderr);
++    }
++}
++
+ void ggml_backend_tensor_set_async(ggml_backend_t backend, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
++    // The source here is a raw pointer, so the destination's type is what tells
++    // us how to read it. This is the funnel the scheduler's split-input copies
++    // actually use -- the two tensor-level wrappers see almost no traffic.
++    {
++        static int on = -1;
++        if (on < 0) { const char * e = getenv("IK_COPY_CHECK"); on = (e && atoi(e)) ? 1 : 0; }
++        static long long calls = 0, checked = 0;
++        if (on == 1 && data && tensor && tensor->type == GGML_TYPE_F16) {
++            ++calls; ++checked;
++            const size_t n16 = size / 2;
++            const uint16_t * h = (const uint16_t *) data;
++            size_t first = 0, cnt = 0;
++            for (size_t i = 0; i < n16; ++i) {
++                if ((h[i] & 0x7FFFu) > 0x7C00u) { if (cnt == 0) first = i; ++cnt; }
++            }
++            if (cnt) {
++                fprintf(stderr, "IK_COPY_CHECK [set_async]: SOURCE already NaN -> %s, %zu of %zu f16, first at %zu\n",
++                        tensor->name, cnt, n16, first);
++                fflush(stderr);
++            }
++            if (calls == 1 || calls % 50000 == 0) {
++                fprintf(stderr, "IK_COPY_CHECK [set_async]: alive, %lld f16 copies scanned\n", calls);
++                fflush(stderr);
++            }
++        }
++    }
+     GGML_ASSERT(tensor->data != NULL && "tensor not allocated");
+     if (offset + size > ggml_nbytes(tensor)) fprintf(stderr, "%s(%s): offset = %zu, size = %zu, nbytes = %zu\n", __func__, tensor->name, offset, size, ggml_nbytes(tensor));
+     GGML_ASSERT(offset + size <= ggml_nbytes(tensor) && "tensor write out of bounds");
+@@ -361,6 +569,8 @@ static bool ggml_are_same_layout(const struct ggml_tensor * a, const struct ggml
+ }
+ 
+ void ggml_backend_tensor_copy(struct ggml_tensor * src, struct ggml_tensor * dst) {
++    ik_copy_check_src("tensor_copy", src, dst ? dst->name : nullptr);
++    const bool ik_dst_check = ik_dst_check_wanted(src, dst);
+     GGML_ASSERT(ggml_are_same_layout(src, dst) && "cannot copy tensors with different layouts");
+ 
+     if (src == dst) {
+@@ -369,6 +579,8 @@ void ggml_backend_tensor_copy(struct ggml_tensor * src, struct ggml_tensor * dst
+ 
+     if (ggml_backend_buffer_is_host(src->buffer)) {
+         ggml_backend_tensor_set(dst, src->data, 0, ggml_nbytes(src));
++        if (ik_dst_check) ik_dst_check_after(src, dst);
++        ik_lifetime_record(src, dst);
+     } else if (ggml_backend_buffer_is_host(dst->buffer)) {
+         ggml_backend_tensor_get(src, dst->data, 0, ggml_nbytes(src));
+     } else if (!ggml_backend_buffer_copy_tensor(src, dst)) {
+@@ -384,6 +596,7 @@ void ggml_backend_tensor_copy(struct ggml_tensor * src, struct ggml_tensor * dst
+ }
+ 
+ void ggml_backend_tensor_copy_async(ggml_backend_t backend_src, ggml_backend_t backend_dst, struct ggml_tensor * src, struct ggml_tensor * dst) {
++    ik_copy_check_src("copy_async", src, dst ? dst->name : nullptr);
+     GGML_ASSERT(ggml_are_same_layout(src, dst) && "cannot copy tensors with different layouts");
+ 
+     if (src == dst) {
+@@ -1823,7 +2036,16 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
+                                 tensor_copy = ggml_dup_tensor_layout(sched->ctx, src);
+                                 ggml_format_name(tensor_copy, "%s#%s#%d", ggml_backend_name(backend), src->name, c);
+                             }
+-                            if (sched->n_copies > 1) {
++                            // LOCAL PATCH (ik-llama-toolkit), RESULTS 41. The guard
++                            // below was `n_copies > 1`, and GGML_SCHED_MAX_COPIES is
++                            // 1, so it never ran -- leaving ggml-alloc free to give
++                            // this copy's memory to another tensor mid-graph.
++                            //
++                            // Applying it to EVERY split input asks for 176 977 MiB
++                            // of compute buffer against 7040, so it cannot simply be
++                            // turned on. Narrowed to raw_k, which is the tensor the
++                            // probes actually catch poisoned (RESULTS 40.2).
++                            if (sched->n_copies > 1 || (ik_rawk_guard() && strncmp(src->name, "raw_k-", 6) == 0)) {
+                                 ggml_set_input(tensor_copy);
+                                 ggml_set_output(tensor_copy); // prevent ggml-alloc from overwriting the tensor
+                             }
+@@ -1850,7 +2072,16 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
+                         for (int c = 0; c < sched->n_copies; c++) {
+                             struct ggml_tensor * tensor_copy = ggml_dup_tensor_layout(sched->ctx, src);
+                             ggml_format_name(tensor_copy, "%s#%s#%d", ggml_backend_name(backend), src->name, c);
+-                            if (sched->n_copies > 1) {
++                            // LOCAL PATCH (ik-llama-toolkit), RESULTS 41. The guard
++                            // below was `n_copies > 1`, and GGML_SCHED_MAX_COPIES is
++                            // 1, so it never ran -- leaving ggml-alloc free to give
++                            // this copy's memory to another tensor mid-graph.
++                            //
++                            // Applying it to EVERY split input asks for 176 977 MiB
++                            // of compute buffer against 7040, so it cannot simply be
++                            // turned on. Narrowed to raw_k, which is the tensor the
++                            // probes actually catch poisoned (RESULTS 40.2).
++                            if (sched->n_copies > 1 || (ik_rawk_guard() && strncmp(src->name, "raw_k-", 6) == 0)) {
+                                 ggml_set_input(tensor_copy);
+                                 ggml_set_output(tensor_copy); // prevent ggml-alloc from overwriting the tensor
+                             }
+@@ -2004,10 +2235,17 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
+     return true;
+ }
+ 
++
+ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_backend_sched_split * split, std::array<bool, GGML_SCHED_MAX_BACKENDS> & needs_sync,
+         std::vector<int32_t> & ids, std::vector<uint32_t> & unique_ids, ggml_tensor * last_ids_tensor) {
+     if (split->n_inputs < 1) return;
+-    constexpr bool k_set_sync = false;
++    // LOCAL PATCH (ik-llama-toolkit), RESULTS 45.2: true restores mainline
++    // semantics -- a drain before EVERY non-user input deposit, not just the
++    // first per call. With false, expert-weight uploads queued un-waited on the
++    // compute stream run concurrently with later cudaStreamPerThread deposits
++    // of the same split's inputs (raw_k among them). Upstream accepted this
++    // elision twice and reverted it twice (57819b8d4, 86b94708f).
++    constexpr bool k_set_sync = true;
+     int split_backend_id = split->backend_id;
+     ggml_backend_t split_backend = sched->backends[split_backend_id];
+     ggml_backend_t last_input_backend = nullptr;
+@@ -2017,6 +2255,38 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+         struct ggml_tensor * input = split->inputs[j];
+         struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
+ 
++        // IK_INPUTS: is raw_k among the inputs the scheduler actually copies?
++        // Four instrumented copy paths never saw it (RESULTS 38.6). If it is not
++        // enumerated here either, the device tensor is allocated and never
++        // written -- which is 38.7. Prints once per distinct name.
++        {
++            static int on = -1;
++            if (on < 0) { const char * e = getenv("IK_INPUTS"); on = (e && atoi(e)) ? 1 : 0; }
++            if (on == 1 && input && input->name[0]) {
++                static std::set<std::string> seen;
++                std::string key = input->name;
++                if (seen.insert(key).second) {
++                    fprintf(stderr, "IK_INPUTS: split input %-46s -> %-46s  %s host=%d\n",
++                            input->name, input_cpy ? input_cpy->name : "(null)",
++                            ggml_type_name(input->type),
++                            input->buffer ? (int) ggml_backend_buffer_is_host(input->buffer) : -1);
++                    fflush(stderr);
++                }
++            }
++        }
++
++        auto ik_branch = [&](const char * tag) {
++            static int on = -1;
++            if (on < 0) { const char * e = getenv("IK_INPUTS"); on = (e && atoi(e)) ? 1 : 0; }
++            if (on != 1 || !input || !input->name[0]) return;
++            static std::set<std::string> seen_b;
++            std::string k = std::string(input->name) + "|" + tag;
++            if (seen_b.insert(k).second) {
++                fprintf(stderr, "IK_INPUTS: branch %-14s for %s\n", tag, input->name);
++                fflush(stderr);
++            }
++        };
++
+         if (input->flags & GGML_TENSOR_FLAG_INPUT) {
+             // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
+             // if there are multiple inputs for the split, and we have already synchronized this backend, no need to do it again.
+@@ -2028,7 +2298,9 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+                 }
+                 synced_on_input = true;
+             }
++            ik_branch("copy_early");
+             ggml_backend_tensor_copy(input, input_cpy);
++            ik_sum_mark_tensor(split_backend, input_cpy);  // RESULTS 46
+         } else {
+             // wait for the split backend to finish using the input before overwriting it
+             if (needs_sync[split_backend_id]) {
+@@ -2069,11 +2341,55 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+                 if (ids_tensor != last_ids_tensor) {
+                     ids.resize(ggml_nbytes(ids_tensor) / sizeof(int32_t));
+ 
++                    // LOCAL PATCH (ik-llama-toolkit), RESULTS 45.10 -- TRIPWIRES.
++                    // Three assumptions this branch makes and never checks.
++                    // Assertions, not a soak: if one is violated it says so the
++                    // first time it happens.
++                    if (getenv("IK_IDS_CHECK")) {
++                        // Liveness. A probe that only speaks on failure cannot be
++                        // told apart from one that never ran -- that has bitten
++                        // this investigation more than once (RESULTS 38.1).
++                        static int64_t n_checked = 0;
++                        if (++n_checked % 100 == 1) {
++                            fprintf(stderr, "IK_IDS_CHECK: alive, %lld ids readbacks checked"
++                                            " (n_expert=%d, ids=%s, backend=%s)\n",
++                                    (long long) n_checked, n_expert, ids_tensor->name,
++                                    ggml_backend_name(ids_backend));
++                            fflush(stderr);
++                        }
++                        // 1. ids_backend defaults to split_backend and is only
++                        //    corrected when the ids tensor is a LATER input of
++                        //    this split. If the tensor actually lives elsewhere,
++                        //    the D2H below runs on the wrong backend's stream.
++                        ggml_backend_t real = ggml_backend_sched_get_tensor_backend(sched, ids_tensor);
++                        if (real && real != ids_backend) {
++                            fprintf(stderr, "\nIK_IDS_CHECK: ids read through the WRONG backend"
++                                            " (using %s, tensor lives on %s, name=%s)\n",
++                                    ggml_backend_name(ids_backend), ggml_backend_name(real), ids_tensor->name);
++                            fflush(stderr);
++                        }
++                        // 2. The vector is sized by ggml_nbytes, but the loop
++                        //    below indexes with nb[1]/nb[0]. For a non-contiguous
++                        //    view that span can exceed nbytes -> reads past the
++                        //    end -> garbage ids -> wrong experts marked active.
++                        const size_t span = ids_tensor->ne[1] > 0 && ids_tensor->ne[0] > 0
++                            ? (size_t)(ids_tensor->ne[1]-1)*ids_tensor->nb[1]
++                            + (size_t)(ids_tensor->ne[0]-1)*ids_tensor->nb[0] + sizeof(int32_t)
++                            : 0;
++                        if (span > ggml_nbytes(ids_tensor)) {
++                            fprintf(stderr, "\nIK_IDS_CHECK: ids span %zu EXCEEDS nbytes %zu (name=%s)\n",
++                                    span, ggml_nbytes(ids_tensor), ids_tensor->name);
++                            fflush(stderr);
++                        }
++                    }
++
+                     ggml_backend_tensor_get_async(ids_backend, ids_tensor, ids.data(), 0, ggml_nbytes(ids_tensor));
+ 
+                     ggml_backend_synchronize(ids_backend);
+                     if (auto id = tensor_backend_id(ids_tensor); id >= 0 && id < GGML_SCHED_MAX_BACKENDS) {
++                        if (!getenv("IK_NO_IDS_NEEDS_SYNC")) {
+                         needs_sync[id] = k_set_sync;
++                        }
+                     }
+                     //needs_sync[tensor_backend_id(ids_tensor)] = k_set_sync;
+ 
+@@ -2082,6 +2398,12 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+                     for (int64_t i1 = 0; i1 < ids_tensor->ne[1]; i1++) {
+                         for (int64_t i0 = 0; i0 < ids_tensor->ne[0]; i0++) {
+                             int32_t id = ids[i1 * ids_tensor->nb[1]/sizeof(int32_t) + i0 * ids_tensor->nb[0]/sizeof(int32_t)];
++                            if (getenv("IK_IDS_CHECK") && (id < 0 || id >= n_expert)) {
++                                fprintf(stderr, "\nIK_IDS_CHECK: expert id %d OUT OF RANGE [0,%d) -- "
++                                                "wrong experts marked active, and unique_ids written out of bounds\n",
++                                        (int) id, n_expert);
++                                fflush(stderr);
++                            }
+                             unique_ids[id >> 5] |= (1u << (id & 31));
+                         }
+                     }
+@@ -2092,23 +2414,61 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+                 // when the expert prefetch engine streamed this tensor ahead
+                 // (see the lookahead in compute_splits), wait for it so the
+                 // host-side reads below hit warm page cache instead of faulting
++                // LOCAL PATCH (ik-llama-toolkit), RESULTS 45.11 -- isolate the
++                // two remaining differences between this branch and -no-ooae,
++                // one env switch each.
++                if (!getenv("IK_NO_PREFETCH_WAIT")) {
+                 ggml_moe_prefetch_wait(input);
++                }
+ 
+                 const size_t expert_size = input->ne[2] > 1 ? input->nb[2] : input->nb[1];
+ 
+                 if (input->ne[2] > 1) {
+ 
++                    // LOCAL PATCH (ik-llama-toolkit), RESULTS 45.7 -- MARKER TEST.
++                    // The slicing deposits only the active experts; whatever the
++                    // previous tensor left in the gaps survives. The upstream
++                    // comment below ("copy a bit extra to ensure there are no
++                    // NaNs in the padding") says the consumer is known to read
++                    // past the active range -- 512 bytes were enough to paper
++                    // over it. If it sometimes reads further, that is exactly
++                    // this bug. So: paint the WHOLE destination with a marker
++                    // first; the deposits then overwrite their own parts, and
++                    // anything read from a gap shows up as NaN immediately
++                    // rather than once per 250k tokens. 0xFF bytes read as NaN
++                    // in f16 and as NaN in f32.
++                    if (getenv("IK_PAINT_EXPERT_GAPS")) {
++                        static std::vector<uint8_t> paint;
++                        const size_t nb = ggml_nbytes(input_cpy);
++                        if (paint.size() < nb) paint.assign(nb, 0xFF);
++                        ggml_backend_tensor_set_async(split_backend, input_cpy, paint.data(), 0, nb);
++                    }
++
+                     auto copy_experts = [&](int32_t first_id, int32_t last_id) {
+                         const size_t expert_offset = first_id * expert_size;
+                         const size_t expert_size_copy =  (last_id - first_id + 1) * expert_size;
+                         const size_t padding = 512;
+                         const size_t padding_end = last_id < n_expert - 1 ? std::min<size_t>(expert_size, padding) : 0;
+ 
++                        // LOCAL PATCH (ik-llama-toolkit), RESULTS 45.11 -- THE
++                        // PRIMITIVE. Every OOAE deposit rides set_async on the
++                        // COMPUTE stream; the generic path that -no-ooae falls
++                        // back to uses ggml_backend_tensor_set, i.e.
++                        // cudaStreamPerThread plus an immediate sync of that
++                        // stream. 45.9 changed slicing but kept the primitive,
++                        // so the primitive itself has never been tested. This
++                        // swaps ONLY that, keeping the slicing and the ids.
++                        if (getenv("IK_SYNC_DEPOSIT")) {
++                            ggml_backend_tensor_set(input_cpy,
++                                    (const uint8_t *)input->data + expert_offset, expert_offset,
++                                    expert_size_copy + padding_end);
++                        } else {
+                         ggml_backend_tensor_set_async(split_backend,
+                                 input_cpy,
+                                 (const uint8_t *)input->data + expert_offset, expert_offset,
+                                 // copy a bit extra to ensure there are no NaNs in the padding
+                                 expert_size_copy + padding_end);
++                        }
+ 
+                     };
+ 
+@@ -2121,22 +2481,54 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+                         return id;
+                     };
+ 
++                    // LOCAL PATCH (ik-llama-toolkit), RESULTS 45.8 -- ISOLATE
++                    // THE SLICING. -no-ooae fixes it (2.47M clean) but changes
++                    // four things at once: the ids readback, prefetch_wait, the
++                    // needs_sync side effect, and the slicing. This keeps the
++                    // first three exactly as they are and replaces only the
++                    // sliced deposits with one whole-tensor deposit through the
++                    // same async primitive on the same stream.
++                    //   clean  => the partial deposit is the cause
++                    //   abort  => the ids readback / prefetch_wait / needs_sync is
++                    if (getenv("IK_WHOLE_EXPERT_UPLOAD")) {
++                        ggml_backend_tensor_set_async(split_backend, input_cpy,
++                                input->data, 0, ggml_nbytes(input));
++                    } else {
+                     int first_id = next_on_id(0);
+                     while (first_id < n_expert) {
+                         int last_id = next_off_id(first_id+1);
+                         copy_experts(first_id, last_id-1);
+                         first_id = next_on_id(last_id);
+                     }
++                    }
++
++                    // LOCAL PATCH (ik-llama-toolkit), RESULTS 45.5 -- BISECTION.
++                    // -no-ooae ran 2.47M tokens clean where 10 aborts were
++                    // expected (P 0.0045%), convicting this branch. It is the
++                    // only fire-and-forget device writer in the tree: these
++                    // uploads ride the compute stream and NOTHING ever waits on
++                    // them, while galloc later recycles their exact bytes for
++                    // raw_k and the K-assembly tensors. This sync keeps the
++                    // slicing and the ids exactly as they are and removes only
++                    // the fire-and-forget property. Clean => asynchrony was the
++                    // poison. Abort => the slicing/ids are, and the sync is not
++                    // the fix.
++                    if (getenv("IK_SYNC_EXPERT_UPLOADS")) {
++                        ggml_backend_synchronize(split_backend);
++                    }
+ 
+                 } else {
+                     auto copy_size = ggml_nbytes(input);
+-                    ggml_backend_tensor_set_async(split_backend, input_cpy, input->data, 0, copy_size);
++ik_branch("set_async");
++ggml_backend_tensor_set_async(split_backend, input_cpy, input->data, 0, copy_size);
+                 }
++                ik_sum_mark_tensor(split_backend, input_cpy);  // RESULTS 46 -- covers all expert deposit paths
+ 
+             } else
+                 // try async copy, but if not possible, we can still use a sync copy without synchronizing the dst backend, since we handle the synchronization here with multiple copies and events
+                 // TODO: add public function to facilitate this, since applications do not have direct access to the backend interface
+-                if (!split_backend->iface.cpy_tensor_async || !split_backend->iface.cpy_tensor_async(input_backend, split_backend, input, input_cpy)) {
++                if (ik_branch("try_async"), !split_backend->iface.cpy_tensor_async ||
++                !split_backend->iface.cpy_tensor_async(input_backend, split_backend, input, input_cpy)) {
+                     ggml_backend_synchronize(input_backend);
+                     if (needs_sync[split_backend_id]) {
+                         if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
+@@ -2146,8 +2538,10 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+                         }
+                         needs_sync[split_backend_id] = k_set_sync;
+                     }
++                    ik_branch("tensor_copy");
+                     ggml_backend_tensor_copy(input, input_cpy);
+                 }
++                ik_sum_mark_tensor(split_backend, input_cpy);  // RESULTS 46 -- also after a successful cpy_tensor_async
+         }
+     }
+ }
+@@ -2205,9 +2599,18 @@ static ggml_status ggml_backend_sched_eval(ggml_backend_sched_t sched, ggml_back
+     return GGML_STATUS_SUCCESS;
+ }
+ 
++
++
+ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
++    // IK_LIFETIME: the map must be cleared per graph. Without this, an address
++    // recorded in one graph and legitimately reused in the next reports as
++    // "changed" -- which is exactly what the first run showed (q_b-N landing on a
++    // former raw_k address). Only a change WITHIN one graph is a conflict.
++    if (ik_lifetime_on()) { g_ik_rawk.clear(); g_ik_copied.clear(); }
++
+ 
+     for (auto & item : sched->needs_sync) item = true;
++    if (ik_sum_check_enabled()) ik_sum_clear();
+ 
+     if (sched->is_async && sched->n_backends > 2 && sched->split_mode_graph && sched->has_reduce) {
+ 
+@@ -2662,6 +3065,7 @@ static void ggml_sched_prepare_graph(ggml_backend_sched_t sched) {
+ 
+     for (auto & item : sched->own_cpy   ) item = false;
+     for (auto & item : sched->needs_sync) item = true;
++    if (ik_sum_check_enabled()) ik_sum_clear();
+ 
+     if (sched->split_mode_graph) {
+         auto tensor_size = [] (const ggml_tensor * t) {
+diff --git a/ggml/src/ggml-cuda.cu b/ggml/src/ggml-cuda.cu
+index 232f765a..918f196c 100644
+--- a/ggml/src/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda.cu
+@@ -65,6 +65,8 @@
+ #include "ggml-cuda/indexer_topk.cuh"
+ #include "ggml-cuda/ds4_comp.cuh"
+ 
++#include <sys/stat.h>
++#include <unordered_map>
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
+@@ -3633,6 +3635,599 @@ static inline bool ops_are_same_device(const ggml_cgraph * cgraph, int first, in
+     return true;
+ }
+ 
++
++// ===== NaN probe (IK_NAN_CHECK=1) =====================================
++// The all-NaN logits abort (RESULTS 32, upstream #2344) is reported by the
++// sampler, which is only where it becomes fatal -- llama_decode has long
++// returned by then, so no stack has ever named the producer. This checks each
++// node's output as the graph runs and records the FIRST one that contains a
++// NaN or inf.
++//
++// It never synchronises inside the graph loop: a NaN sets a device flag, and the
++// flag is read back in ggml_backend_cuda_graph_compute, after capture has ended.
++// Synchronising or cudaMemcpyFromSymbol during CUDA graph capture is illegal and
++// fails with "operation failed due to a previous error during capture" -- which
++// is exactly how a previous attempt at this died.
++//
++// Costs a reduction per node, so it is off unless IK_NAN_CHECK=1.
++__device__ int g_nan_node = -1;
++__device__ int g_nan_kind = 0;   // 1 = nan
++__device__ int g_nan_first_idx = 2147483647;   // lowest flat index holding a NaN
++__device__ int g_nan_count = 0;
++
++static __global__ void k_nan_probe_f32(const float * x, int64_t n, int node_idx) {
++    int64_t i = (int64_t)blockIdx.x*blockDim.x + threadIdx.x;
++    if (i >= n) return;
++    float v = x[i];
++    // NaN only. inf is NOT an error here: attention masks are built out of
++    // -INFINITY, so flagging inf produced 1386 hits on a single healthy request
++    // -- from SCALE and FILL nodes doing exactly what they should.
++    if (isnan(v)) {
++        atomicCAS(&g_nan_node, -1, node_idx); atomicExch(&g_nan_kind, 1);
++        // WHERE in the tensor, not just whether: if every NaN sits past the
++        // logical end of the data, this is uninitialised padding being read
++        // rather than a poisoned value being computed.
++        atomicMin(&g_nan_first_idx, (int) i);
++        atomicAdd(&g_nan_count, 1);
++    }
++}
++
++static __global__ void k_nan_probe_f16(const half * x, int64_t n, int node_idx) {
++    int64_t i = (int64_t)blockIdx.x*blockDim.x + threadIdx.x;
++    if (i >= n) return;
++    float v = __half2float(x[i]);
++    // NaN only. inf is NOT an error here: attention masks are built out of
++    // -INFINITY, so flagging inf produced 1386 hits on a single healthy request
++    // -- from SCALE and FILL nodes doing exactly what they should.
++    if (isnan(v)) {
++        atomicCAS(&g_nan_node, -1, node_idx); atomicExch(&g_nan_kind, 1);
++        // WHERE in the tensor, not just whether: if every NaN sits past the
++        // logical end of the data, this is uninitialised padding being read
++        // rather than a poisoned value being computed.
++        atomicMin(&g_nan_first_idx, (int) i);
++        atomicAdd(&g_nan_count, 1);
++    }
++}
++
++// ===== IK_SUM_CHECK: in-stream deposit checksums (RESULTS 46) ==============
++// The strongest surviving fact (45) is that a split-input copy changes between
++// its deposit and its consumption. Every probe so far could only see the NaN
++// special case of that, and only post-hoc. This one measures the fact itself:
++//   mark   -- right after the deposit, a kernel on the compute stream sums the
++//             copy's bytes into a slot
++//   verify -- right before each consumer, a second kernel re-sums and a third
++//             compares, latching the first mismatch
++// All in-stream, no synchronisation while clean, so races stay live. And it is
++// an AMPLIFIER: it catches ANY mutation, not just the ~3% that read as NaN --
++// the fault should announce itself far more often than once per 250k tokens.
++// Requires GGML_CUDA_DISABLE_GRAPHS=1: marks run per iteration outside any
++// captured graph, so slots would go stale under capture/replay.
++// Blind spot, accepted and documented: a writer QUEUED EARLIER on the compute
++// stream that runs between the deposit and the mark is summed into the
++// baseline and missed. Out-of-stream writers -- the H2 class -- are caught.
++#define IK_SUM_SLOTS 65536
++
++__device__ unsigned long long ik_sum_base[IK_SUM_SLOTS];
++__device__ unsigned long long ik_sum_chk [IK_SUM_SLOTS];
++__device__ int ik_sum_hit_node = -1;   // consumer node idx of FIRST mismatch
++__device__ int ik_sum_hit_src  = -1;
++__device__ int ik_sum_hit_slot = -1;
++__device__ unsigned long long ik_sum_hit_count = 0;
++
++static __global__ void k_ik_sum_zero(unsigned long long * out) { *out = 0; }
++
++static __global__ void k_ik_sum(const uint8_t * p, size_t nbytes, unsigned long long * out) {
++    __shared__ unsigned long long sh;
++    if (threadIdx.x == 0) sh = 0;
++    __syncthreads();
++    unsigned long long acc = 0;
++    const size_t n32 = nbytes >> 2;
++    const uint32_t * p32 = (const uint32_t *) p;
++    for (size_t i = (size_t)blockIdx.x*blockDim.x + threadIdx.x; i < n32; i += (size_t)gridDim.x*blockDim.x) {
++        acc += p32[i];
++    }
++    if (blockIdx.x == 0 && threadIdx.x == 0) {
++        for (size_t i = nbytes & ~(size_t)3; i < nbytes; ++i) acc += p[i];
++    }
++    atomicAdd(&sh, acc);
++    __syncthreads();
++    if (threadIdx.x == 0) atomicAdd(out, sh);
++}
++
++static __global__ void k_ik_sum_cmp(int slot, int node, int src) {
++    if (ik_sum_base[slot] != ik_sum_chk[slot]) {
++        atomicAdd(&ik_sum_hit_count, 1ULL);
++        if (atomicCAS(&ik_sum_hit_node, -1, node) == -1) {
++            ik_sum_hit_src  = src;
++            ik_sum_hit_slot = slot;
++        }
++    }
++}
++
++__device__ int ik_fa_hit_node = -1;
++__device__ unsigned long long ik_fa_hit_a = 0, ik_fa_hit_b = 0;
++__device__ unsigned long long ik_fa_hit_count = 0;
++
++__device__ int ik_mask_hit_node = -1;
++__device__ int ik_mask_hit_row  = -1;
++__device__ unsigned long long ik_mask_hit_count = 0;
++
++// One block per mask row (query token). Latch any row with NO finite entry --
++// the classic softmax 0/0 configuration that produces NaN deterministically.
++static __global__ void k_ik_mask_scan(const half * mask, int64_t n_kv, size_t row_stride_half, int node) {
++    __shared__ int any_finite;
++    if (threadIdx.x == 0) any_finite = 0;
++    __syncthreads();
++    const half * row = mask + (size_t) blockIdx.x * row_stride_half;
++    for (int64_t i = threadIdx.x; i < n_kv && !any_finite; i += blockDim.x) {
++        const unsigned short u = __half_as_ushort(row[i]);
++        if (u != 0xFC00u) { any_finite = 1; break; }   // 0xFC00 = -inf
++    }
++    __syncthreads();
++    if (threadIdx.x == 0 && !any_finite) {
++        atomicAdd(&ik_mask_hit_count, 1ULL);
++        atomicCAS(&ik_mask_hit_node, -1, node);
++        atomicCAS(&ik_mask_hit_row,  -1, (int) blockIdx.x);
++    }
++}
++
++static __global__ void k_ik_fa_cmp(int slot_a, int slot_b, int node) {
++    if (ik_sum_base[slot_a] != ik_sum_chk[slot_b]) {
++        atomicAdd(&ik_fa_hit_count, 1ULL);
++        if (atomicCAS(&ik_fa_hit_node, -1, node) == -1) {
++            ik_fa_hit_a = ik_sum_base[slot_a];
++            ik_fa_hit_b = ik_sum_chk [slot_b];
++        }
++    }
++}
++
++// ===== fattn-0 input capture (RESULTS 47.2) ================================
++// Armed from the server's catch right before the in-place replay of the failing
++// batch. Captures the exact device bytes of fattn-0's inputs -- the true
++// minimal reproducer for the deterministic kernel NaN -- then disarms.
++// ORIGIN STAGING (RESULTS 47.5): pinned-host copies of fattn-0's inputs,
++// refreshed every prefill graph by stream-ordered D2H right before the node --
++// so they hold exactly the bytes the kernel read, and galloc can never
++// recycle them. Written to disk by ik_nan_report on a latch.
++struct ik_stage_slot {
++    void * host = nullptr; size_t cap = 0; size_t nbytes = 0;
++    int64_t hdr[10] = {0}; char name[96] = {0}; bool valid = false;
++};
++static ik_stage_slot ik_stage[GGML_MAX_SRC];
++
++static void ik_stage_src(ggml_backend_cuda_context & ctx, const ggml_tensor * src, int k) {
++    ik_stage_slot & sl = ik_stage[k];
++    sl.valid = false;
++    if (!src || !src->data) return;
++    const size_t nbytes = ggml_nbytes(src);
++    if (nbytes > sl.cap) {
++        if (sl.host) cudaFreeHost(sl.host);
++        sl.host = nullptr; sl.cap = 0;
++        if (cudaMallocHost(&sl.host, nbytes) != cudaSuccess) { sl.host = nullptr; return; }
++        sl.cap = nbytes;
++    }
++    sl.nbytes = nbytes;
++    int64_t * h = sl.hdr;
++    h[0] = (int64_t) src->type;
++    h[1]=src->ne[0]; h[2]=src->ne[1]; h[3]=src->ne[2]; h[4]=src->ne[3];
++    h[5]=(int64_t)src->nb[0]; h[6]=(int64_t)src->nb[1]; h[7]=(int64_t)src->nb[2]; h[8]=(int64_t)src->nb[3];
++    h[9]=(int64_t)nbytes;
++    snprintf(sl.name, sizeof(sl.name), "%s", src->name);
++    CUDA_CHECK(cudaMemcpyAsync(sl.host, src->data, nbytes, cudaMemcpyDeviceToHost, ctx.stream()));
++    sl.valid = true;
++}
++
++static char ik_fattn_capture_dir[256] = {0};
++static int  ik_fattn_capture_state = 0;   // 0 idle, 1 armed, 2 done
++
++extern "C" void ik_fattn_capture_disarm(void) {
++    if (ik_fattn_capture_state == 1) ik_fattn_capture_state = 0;
++}
++
++extern "C" void ik_fattn_capture_arm(const char * dir) {
++    snprintf(ik_fattn_capture_dir, sizeof(ik_fattn_capture_dir), "%s", dir);
++    ik_fattn_capture_state = 1;
++}
++extern "C" int ik_fattn_capture_done(void) { return ik_fattn_capture_state == 2 ? 1 : 0; }
++
++static void ik_fattn_capture_write(const ggml_tensor * t, const char * path) {
++    const size_t nbytes = ggml_nbytes(t);
++    std::vector<uint8_t> buf(nbytes);
++    CUDA_CHECK(cudaMemcpy(buf.data(), t->data, nbytes, cudaMemcpyDeviceToHost));
++    FILE * f = fopen(path, "wb");
++    if (!f) return;
++    int64_t hdr[10] = { (int64_t) t->type,
++                        t->ne[0], t->ne[1], t->ne[2], t->ne[3],
++                        (int64_t) t->nb[0], (int64_t) t->nb[1], (int64_t) t->nb[2], (int64_t) t->nb[3],
++                        (int64_t) nbytes };
++    fwrite(hdr, sizeof(hdr), 1, f);
++    fwrite(buf.data(), 1, nbytes, f);
++    fclose(f);
++}
++
++extern "C" bool ik_fa_twice_enabled(void) {
++    static int on = -1;
++    if (on < 0) { const char * e = getenv("IK_FA_TWICE"); on = (e && atoi(e)) ? 1 : 0; }
++    return on == 1;
++}
++
++extern "C" bool ik_sum_check_enabled(void) {
++    static int on = -1;
++    if (on < 0) { const char * e = getenv("IK_SUM_CHECK"); on = (e && atoi(e)) ? 1 : 0; }
++    return on == 1;
++}
++
++struct ik_sum_entry { int slot; size_t nbytes; };
++static std::unordered_map<const void *, ik_sum_entry> ik_sum_map;  // key: tensor struct ptr
++static int       ik_sum_next_slot = 0;
++static long long ik_sum_marks = 0, ik_sum_verifies = 0;
++static long long ik_fa_runs = 0;
++
++// Stale entries are poison: the sched graph arena reuses addresses every pass,
++// so an old entry can point a fresh tensor at a dead slot with the wrong size.
++// Cleared at every compute_splits entry.
++extern "C" void ik_sum_clear(void) {
++    ik_sum_map.clear();
++}
++
++static unsigned long long * ik_sum_base_ptr(void) {
++    static unsigned long long * p = nullptr;
++    if (!p) CUDA_CHECK(cudaGetSymbolAddress((void **) &p, ik_sum_base));
++    return p;
++}
++static unsigned long long * ik_sum_chk_ptr(void) {
++    static unsigned long long * p = nullptr;
++    if (!p) CUDA_CHECK(cudaGetSymbolAddress((void **) &p, ik_sum_chk));
++    return p;
++}
++
++// called from ggml-backend.cpp right after each split-input deposit
++extern "C" void ik_sum_mark_tensor(ggml_backend_t backend, const struct ggml_tensor * t) {
++    if (!ik_sum_check_enabled() || !t || !t->data) return;
++    if (!ggml_backend_is_cuda(backend)) return;
++    ggml_backend_cuda_context * ctx = (ggml_backend_cuda_context *) backend->context;
++    ggml_cuda_set_device(ctx->device);
++    const size_t nbytes = ggml_nbytes(t);
++    if (nbytes == 0) return;
++    const int slot = (ik_sum_next_slot++) & (IK_SUM_SLOTS - 1);
++    ik_sum_map[(const void *) t] = { slot, nbytes };
++    if (++ik_sum_marks % 5000 == 1) {
++        fprintf(stderr, "IK_SUM_CHECK: mark #%lld (%s, %zu B, slot %d)\n",
++                ik_sum_marks, t->name, nbytes, slot);
++        fflush(stderr);
++    }
++    unsigned long long * out = ik_sum_base_ptr() + slot;
++    k_ik_sum_zero<<<1, 1, 0, ctx->stream()>>>(out);
++    const int64_t grid = std::min<int64_t>(1024, ((int64_t)(nbytes >> 2) + 255) / 256 + 1);
++    k_ik_sum<<<grid, 256, 0, ctx->stream()>>>((const uint8_t *) t->data, nbytes, out);
++}
++
++static void ik_sum_verify_srcs(ggml_backend_cuda_context & ctx, const ggml_tensor * dst, int node_idx) {
++    for (int j = 0; j < GGML_MAX_SRC; ++j) {
++        const ggml_tensor * src = dst->src[j];
++        if (!src) continue;
++        auto it = ik_sum_map.find((const void *) src);
++        if (it == ik_sum_map.end()) continue;
++        const int slot = it->second.slot;
++        const size_t nbytes = it->second.nbytes;
++        ++ik_sum_verifies;
++        unsigned long long * out = ik_sum_chk_ptr() + slot;
++        k_ik_sum_zero<<<1, 1, 0, ctx.stream()>>>(out);
++        const int64_t grid = std::min<int64_t>(1024, ((int64_t)(nbytes >> 2) + 255) / 256 + 1);
++        k_ik_sum<<<grid, 256, 0, ctx.stream()>>>((const uint8_t *) src->data, nbytes, out);
++        k_ik_sum_cmp<<<1, 1, 0, ctx.stream()>>>(slot, node_idx, j);
++    }
++}
++
++static void ik_sum_report(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph) {
++    if (!ik_sum_check_enabled()) return;
++
++    // liveness -- a probe that only speaks on failure is indistinguishable from
++    // one that never ran (RESULTS 38.1)
++    static long long n_calls = 0;
++    if (++n_calls % 2000 == 1) {
++        fprintf(stderr, "IK_SUM_CHECK: alive, %lld marks / %lld verifies / %lld FA double-runs so far\n",
++                ik_sum_marks, ik_sum_verifies, ik_fa_runs);
++        fflush(stderr);
++    }
++
++    // mask-scan latch: read together with the FA latch below (same cadence)
++    if (ik_fa_twice_enabled()) {
++        static int * h_mask = nullptr;
++        if (!h_mask) {
++            CUDA_CHECK(cudaMallocHost((void **) &h_mask, sizeof(int)));
++            h_mask[0] = -1;
++        }
++        if (h_mask[0] >= 0) {
++            CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
++            int node = -1, row = -1; unsigned long long cnt = 0;
++            CUDA_CHECK(cudaMemcpyFromSymbol(&node, ik_mask_hit_node,  sizeof(node)));
++            CUDA_CHECK(cudaMemcpyFromSymbol(&row,  ik_mask_hit_row,   sizeof(row)));
++            CUDA_CHECK(cudaMemcpyFromSymbol(&cnt,  ik_mask_hit_count, sizeof(cnt)));
++            const ggml_tensor * nt = (cgraph && node >= 0 && node < cgraph->n_nodes) ? cgraph->nodes[node] : nullptr;
++            fprintf(stderr, "\nIK_MASK_SCAN: FULLY-MASKED ROW -- softmax 0/0 configuration present\n"
++                            "  node %d (%s), mask row %d, %llu such rows this pass\n",
++                    node, nt ? nt->name : "?", row, cnt);
++            fflush(stderr);
++            int r = -1; unsigned long long z = 0;
++            CUDA_CHECK(cudaMemcpyToSymbol(ik_mask_hit_node,  &r, sizeof(r)));
++            CUDA_CHECK(cudaMemcpyToSymbol(ik_mask_hit_row,   &r, sizeof(r)));
++            CUDA_CHECK(cudaMemcpyToSymbol(ik_mask_hit_count, &z, sizeof(z)));
++            h_mask[0] = -1;
++        } else {
++            CUDA_CHECK(cudaMemcpyFromSymbolAsync(h_mask, ik_mask_hit_node, sizeof(int), 0,
++                                                 cudaMemcpyDeviceToHost, ctx.stream()));
++        }
++    }
++
++    // FA-twice latch, same async pinned pattern
++    if (ik_fa_twice_enabled()) {
++        static int * h_fa = nullptr;
++        if (!h_fa) {
++            CUDA_CHECK(cudaMallocHost((void **) &h_fa, sizeof(int)));
++            h_fa[0] = -1;
++        }
++        if (h_fa[0] >= 0) {
++            CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
++            int node = -1; unsigned long long a = 0, b = 0, cnt = 0;
++            CUDA_CHECK(cudaMemcpyFromSymbol(&node, ik_fa_hit_node,  sizeof(node)));
++            CUDA_CHECK(cudaMemcpyFromSymbol(&a,    ik_fa_hit_a,     sizeof(a)));
++            CUDA_CHECK(cudaMemcpyFromSymbol(&b,    ik_fa_hit_b,     sizeof(b)));
++            CUDA_CHECK(cudaMemcpyFromSymbol(&cnt,  ik_fa_hit_count, sizeof(cnt)));
++            const ggml_tensor * nt = (cgraph && node >= 0 && node < cgraph->n_nodes) ? cgraph->nodes[node] : nullptr;
++            fprintf(stderr, "\nIK_FA_TWICE: NONDETERMINISM -- same node, same inputs, two different outputs\n"
++                            "  node %d, tensor %s: run1 sum %llu != run2 sum %llu (%llu divergences this pass)\n",
++                    node, nt ? nt->name : "?", a, b, cnt);
++            fflush(stderr);
++            int r = -1; unsigned long long z = 0;
++            CUDA_CHECK(cudaMemcpyToSymbol(ik_fa_hit_node,  &r, sizeof(r)));
++            CUDA_CHECK(cudaMemcpyToSymbol(ik_fa_hit_count, &z, sizeof(z)));
++            h_fa[0] = -1;
++        } else {
++            CUDA_CHECK(cudaMemcpyFromSymbolAsync(h_fa, ik_fa_hit_node, sizeof(int), 0,
++                                                 cudaMemcpyDeviceToHost, ctx.stream()));
++        }
++    }
++
++    // async pinned readback -- no synchronisation while clean (RESULTS 44.6)
++    static int * h_hit = nullptr;
++    if (!h_hit) {
++        CUDA_CHECK(cudaMallocHost((void **) &h_hit, sizeof(int)));
++        h_hit[0] = -1;
++    }
++    if (h_hit[0] < 0) {
++        CUDA_CHECK(cudaMemcpyFromSymbolAsync(h_hit, ik_sum_hit_node, sizeof(int), 0,
++                                             cudaMemcpyDeviceToHost, ctx.stream()));
++        return;
++    }
++    // a mismatch latched: the fault already happened, syncing now costs nothing
++    CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
++    int node = -1, src = -1, slot = -1; unsigned long long cnt = 0, vbase = 0, vchk = 0;
++    CUDA_CHECK(cudaMemcpyFromSymbol(&node, ik_sum_hit_node,  sizeof(node)));
++    CUDA_CHECK(cudaMemcpyFromSymbol(&src,  ik_sum_hit_src,   sizeof(src)));
++    CUDA_CHECK(cudaMemcpyFromSymbol(&slot, ik_sum_hit_slot,  sizeof(slot)));
++    CUDA_CHECK(cudaMemcpyFromSymbol(&cnt,  ik_sum_hit_count, sizeof(cnt)));
++    if (slot >= 0) {
++        CUDA_CHECK(cudaMemcpy(&vbase, ik_sum_base_ptr() + slot, sizeof(vbase), cudaMemcpyDeviceToHost));
++        CUDA_CHECK(cudaMemcpy(&vchk,  ik_sum_chk_ptr()  + slot, sizeof(vchk),  cudaMemcpyDeviceToHost));
++    }
++    const ggml_tensor * nt = (cgraph && node >= 0 && node < cgraph->n_nodes) ? cgraph->nodes[node] : nullptr;
++    fprintf(stderr, "\nIK_SUM_CHECK: MISMATCH -- copy changed between deposit and consumption\n"
++                    "  consumer : node %d, op %s, tensor %s\n"
++                    "  input    : src[%d] = %s\n"
++                    "  sums     : deposit %llu -> consume %llu (slot %d, %llu mismatches this pass)\n",
++            node, nt ? ggml_op_name(nt->op) : "?", nt ? nt->name : "?",
++            src, (nt && src >= 0 && nt->src[src]) ? nt->src[src]->name : "?",
++            vbase, vchk, slot, cnt);
++    fflush(stderr);
++    int reset = -1; unsigned long long zero = 0;
++    CUDA_CHECK(cudaMemcpyToSymbol(ik_sum_hit_node,  &reset, sizeof(reset)));
++    CUDA_CHECK(cudaMemcpyToSymbol(ik_sum_hit_src,   &reset, sizeof(reset)));
++    CUDA_CHECK(cudaMemcpyToSymbol(ik_sum_hit_slot,  &reset, sizeof(reset)));
++    CUDA_CHECK(cudaMemcpyToSymbol(ik_sum_hit_count, &zero,  sizeof(zero)));
++    h_hit[0] = -1;
++}
++
++// ===== IK_NAN_CHECK input probes (RESULTS 44.5) ===========================
++// The per-input "ALREADY NaN" annotations in ik_nan_report read memory AFTER the
++// graph finishes, when the copies' regions have been legally freed and reused --
++// which is how 36-40 misattributed the origin. These kernels check the INPUTS of
++// FLASH_ATTN_EXT on the compute stream IMMEDIATELY BEFORE the node runs:
++// stream-ordered, no synchronisation, so a race stays live, and they observe
++// exactly the bytes the kernel will read.
++//   packed flag: node_idx * 16 + src_idx, CAS from -1 keeps the earliest.
++__device__ int g_nan_in_packed = -1;
++
++static __global__ void k_nan_probe_in_f32(const float * x, int64_t n, int packed) {
++    int64_t i = (int64_t)blockIdx.x*blockDim.x + threadIdx.x;
++    if (i >= n) return;
++    if (isnan(x[i])) atomicCAS(&g_nan_in_packed, -1, packed);
++}
++
++static __global__ void k_nan_probe_in_f16(const half * x, int64_t n, int packed) {
++    int64_t i = (int64_t)blockIdx.x*blockDim.x + threadIdx.x;
++    if (i >= n) return;
++    const unsigned short u = __half_as_ushort(x[i]);
++    if ((u & 0x7FFFu) > 0x7C00u) atomicCAS(&g_nan_in_packed, -1, packed);
++}
++
++static bool ik_nan_check_enabled() {
++    static int on = -1;
++    if (on < 0) { const char * e = getenv("IK_NAN_CHECK"); on = (e && atoi(e)) ? 1 : 0; }
++    return on == 1;
++}
++
++// Returns true if the tensor contains a NaN. Synchronous, so ONLY call it from
++// ik_nan_report -- after capture has ended.
++static bool ik_tensor_has_nan(ggml_backend_cuda_context & ctx, const ggml_tensor * t) {
++    if (!t || !t->data) return false;
++    if (t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16) return false;
++    const int64_t n = ggml_nelements(t);
++    if (n <= 0) return false;
++    int reset = -1, big = 2147483647, zero = 0;
++    CUDA_CHECK(cudaMemcpyToSymbol(g_nan_node, &reset, sizeof(reset)));
++    CUDA_CHECK(cudaMemcpyToSymbol(g_nan_first_idx, &big, sizeof(big)));
++    CUDA_CHECK(cudaMemcpyToSymbol(g_nan_count, &zero, sizeof(zero)));
++    const int64_t block = 256, grid = (n + block - 1)/block;
++    if (grid > 2147483647LL) return false;
++    if (t->type == GGML_TYPE_F32) k_nan_probe_f32<<<grid, block, 0, ctx.stream()>>>((const float *) t->data, n, 1);
++    else                          k_nan_probe_f16<<<grid, block, 0, ctx.stream()>>>((const half  *) t->data, n, 1);
++    CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
++    int hit = -1;
++    CUDA_CHECK(cudaMemcpyFromSymbol(&hit, g_nan_node, sizeof(hit)));
++    return hit >= 0;
++}
++
++static void ik_nan_probe(ggml_backend_cuda_context & ctx, const ggml_tensor * dst, int node_idx) {
++    if (!ik_nan_check_enabled() || !dst || !dst->data) return;
++    const int64_t n = ggml_nelements(dst);
++    if (n <= 0) return;
++    const int64_t block = 256, grid = (n + block - 1)/block;
++    if (grid > 2147483647LL) return;
++    if (dst->type == GGML_TYPE_F32) {
++        k_nan_probe_f32<<<grid, block, 0, ctx.stream()>>>((const float *) dst->data, n, node_idx);
++    } else if (dst->type == GGML_TYPE_F16) {
++        k_nan_probe_f16<<<grid, block, 0, ctx.stream()>>>((const half *) dst->data, n, node_idx);
++    }
++}
++
++// Called after the graph has finished -- never during capture.
++// synchronous read+reset of the in-stream NaN latch, for the walk-back
++// replay in the server catch (RESULTS 47.3). Returns the latched node or -1.
++extern "C" int ik_nan_latch_consume(void) {
++    int node = -1;
++    cudaDeviceSynchronize();
++    cudaMemcpyFromSymbol(&node, g_nan_node, sizeof(node));
++    if (node >= 0) {
++        int r = -1;
++        cudaMemcpyToSymbol(g_nan_node, &r, sizeof(r));
++        cudaMemcpyToSymbol(g_nan_in_packed, &r, sizeof(r));
++    }
++    return node;
++}
++
++static void ik_nan_report(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph) {
++    if (!ik_nan_check_enabled()) return;
++    // Synchronous flag readback, restored at Matt's call after the async variant
++    // (RESULTS 44.6) ran 1M+ tokens without an abort -- the input-probe kernels
++    // apparently perturb timing enough on their own. This version demonstrably
++    // still aborts (median ~900k tokens across ten probe runs), just slower, and
++    // the verdict machinery is identical either way.
++    int node = -1, kind = 0, in_packed = -1;
++    CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
++    CUDA_CHECK(cudaMemcpyFromSymbol(&node, g_nan_node, sizeof(node)));
++    CUDA_CHECK(cudaMemcpyFromSymbol(&in_packed, g_nan_in_packed, sizeof(in_packed)));
++    if (node < 0 && in_packed < 0) return;
++    (void) kind;
++
++    // THE VERDICT (RESULTS 44.5). The input probes run on the compute stream
++    // immediately before each FLASH_ATTN_EXT node, so unlike the post-graph
++    // annotations below they show what the kernel actually read.
++    if (in_packed >= 0) {
++        const int in_node = in_packed / 16, in_src = in_packed % 16;
++        const ggml_tensor * nt = (cgraph && in_node < cgraph->n_nodes) ? cgraph->nodes[in_node] : nullptr;
++        fprintf(stderr, "\nIK_NAN_CHECK VERDICT: INPUT NaN seen IN-STREAM before node %d (%s), src[%d] = %s\n"
++                        "  -> H2: the input was already poisoned when the kernel read it.\n",
++                in_node, nt ? ggml_op_name(nt->op) : "?", in_src,
++                nt && nt->src[in_src] ? nt->src[in_src]->name : "?");
++        fflush(stderr);
++    } else if (node >= 0 && cgraph && node < cgraph->n_nodes &&
++               cgraph->nodes[node]->op == GGML_OP_FLASH_ATTN_EXT) {
++        fprintf(stderr, "\nIK_NAN_CHECK VERDICT: FLASH_ATTN_EXT output NaN with inputs CLEAN at read time\n"
++                        "  -> H1: the kernel produced NaN from clean inputs.\n");
++        fflush(stderr);
++    }
++    if (node < 0) { int r = -1; CUDA_CHECK(cudaMemcpyToSymbol(g_nan_in_packed, &r, sizeof(r))); return; }
++    const char * what = "NaN";
++    if (cgraph && node < cgraph->n_nodes) {
++        const ggml_tensor * t = cgraph->nodes[node];
++
++        // ORIGIN DUMP (RESULTS 47.4): grab the origin node's input bytes NOW,
++        // during the original event -- the walk-back proved no after-the-fact
++        // replay can reproduce, because the failing decode mutates the DSA
++        // indexer state it depends on. This report runs at the end of the
++        // origin's own split, a few nodes after the latch, so the inputs may
++        // already be galloc-recycled: the dump is validated offline (a real
++        // mask holds only finite values and -inf; recycled f32 garbage is
++        // unmistakable). q is reconstructible from tokens regardless.
++        static int origin_dumped = 0;
++        if (!origin_dumped && t->op == GGML_OP_FLASH_ATTN_EXT) {
++            origin_dumped = 1;
++            char dir[160], path[224];
++            snprintf(dir, sizeof(dir), "logs/origin-capture-%lld", (long long) ggml_time_us());
++            struct stat st;
++            if (stat(dir, &st) != 0) mkdir(dir, 0755);
++            for (int k = 0; k < GGML_MAX_SRC; ++k) {
++                if (!t->src[k] || !t->src[k]->data) continue;
++                snprintf(path, sizeof(path), "%s/src%d.bin", dir, k);
++                ik_fattn_capture_write(t->src[k], path);
++            }
++            snprintf(path, sizeof(path), "%s/out.bin", dir);
++            ik_fattn_capture_write(t, path);
++            // the staged copies are the guaranteed-valid version of the same
++            // inputs -- taken in-stream at read time, immune to recycling
++            for (int k = 0; k < GGML_MAX_SRC; ++k) {
++                if (!ik_stage[k].valid || !ik_stage[k].host) continue;
++                snprintf(path, sizeof(path), "%s/staged_src%d.bin", dir, k);
++                if (FILE * f = fopen(path, "wb")) {
++                    fwrite(ik_stage[k].hdr, sizeof(ik_stage[k].hdr), 1, f);
++                    fwrite(ik_stage[k].host, 1, ik_stage[k].nbytes, f);
++                    fclose(f);
++                }
++            }
++            fprintf(stderr, "IK_ORIGIN_DUMP: %s inputs+output -> %s (staged_* files are recycling-proof)\n",
++                    t->name, dir);
++            fflush(stderr);
++        }
++        fprintf(stderr, "\n=============================== IK_NAN_CHECK: first %s at node %d\n"
++                        "  op       : %s\n  tensor   : %s\n  type     : %s\n  shape    : %lld x %lld x %lld x %lld\n",
++                what, node, ggml_op_name(t->op), t->name, ggml_type_name(t->type),
++                (long long)t->ne[0], (long long)t->ne[1], (long long)t->ne[2], (long long)t->ne[3]);
++        // Are the INPUTS already poisoned? This is the question the probe could
++        // not answer on its own: it only ever saw node outputs, so a tensor read
++        // from the KV cache -- which no node in this graph produces -- was
++        // invisible. Without this, an op that merely propagates someone else's
++        // NaN looks exactly like the op that made it.
++        for (int k = 0; k < GGML_MAX_SRC; ++k) {
++            if (!t->src[k]) continue;
++            const char * verdict = "";
++            if (t->src[k]->type == GGML_TYPE_F32 || t->src[k]->type == GGML_TYPE_F16) {
++                static char buf[160];
++                if (ik_tensor_has_nan(ctx, t->src[k])) {
++                    int first = 0, cnt = 0;
++                    CUDA_CHECK(cudaMemcpyFromSymbol(&first, g_nan_first_idx, sizeof(first)));
++                    CUDA_CHECK(cudaMemcpyFromSymbol(&cnt,   g_nan_count,     sizeof(cnt)));
++                    const long long ne0 = t->src[k]->ne[0];
++                    snprintf(buf, sizeof(buf),
++                             "  <== ALREADY NaN: first at flat %d (row %lld col %lld), %d of %lld elems",
++                             first, ne0 ? first/ne0 : -1LL, ne0 ? first%ne0 : -1LL,
++                             cnt, (long long) ggml_nelements(t->src[k]));
++                    verdict = buf;
++                } else {
++                    verdict = "  (clean)";
++                }
++            } else {
++                verdict = "  (not checked: quantised)";
++            }
++            fprintf(stderr, "  src[%d]   : %-28s %-10s %lld x %lld x %lld x %lld%s\n", k,
++                    t->src[k]->name, ggml_type_name(t->src[k]->type),
++                    (long long)t->src[k]->ne[0], (long long)t->src[k]->ne[1],
++                    (long long)t->src[k]->ne[2], (long long)t->src[k]->ne[3], verdict);
++        }
++        fflush(stderr);
++    }
++    // Reset so the next graph can report again -- the first hit per graph is
++    // what identifies the producer; later ones are just propagation.
++    int reset = -1, zero = 0;
++    CUDA_CHECK(cudaMemcpyToSymbol(g_nan_in_packed, &reset, sizeof(reset)));
++    CUDA_CHECK(cudaMemcpyToSymbol(g_nan_node, &reset, sizeof(reset)));
++    CUDA_CHECK(cudaMemcpyToSymbol(g_nan_kind, &zero,  sizeof(zero)));
++}
++// ===== end NaN probe ==================================================
++
++extern "C" void ik_lifetime_verify(const struct ggml_tensor * t, const char * consumer);
++extern "C" bool ik_lifetime_on(void);
++
+ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst, const ggml_cgraph * cgraph, int & i) {
+ 
+ #if IK_PRINT_TIMING
+@@ -3643,6 +4238,52 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+         return true;
+     }
+ 
++    // IK_LIFETIME: check every source this node is about to read, before it runs.
++    if (ik_lifetime_on()) {
++        for (int k = 0; k < GGML_MAX_SRC; ++k) {
++            if (dst->src[k]) ik_lifetime_verify(dst->src[k], ggml_op_name(dst->op));
++        }
++    }
++
++    // IK_SUM_CHECK verify: re-sum every tracked split-input copy this node
++    // reads and compare with its deposit-time sum, all in-stream (RESULTS 46)
++    if (ik_sum_check_enabled()) {
++        ik_sum_verify_srcs(ctx, dst, i);
++    }
++
++    // IK_MASK_SCAN: latch any fully-masked mask row before FLASH_ATTN_EXT
++    // (RESULTS 46.3, hypothesis (a): deterministic softmax 0/0). In-stream.
++    if (ik_fa_twice_enabled() && dst->op == GGML_OP_FLASH_ATTN_EXT && dst->ne[2] >= 32) {
++        const ggml_tensor * mask = dst->src[3];
++        if (mask && mask->data && mask->type == GGML_TYPE_F16 && mask->ne[1] > 0) {
++            const int64_t rows = mask->ne[1];
++            if (rows <= 65535) {
++                k_ik_mask_scan<<<(unsigned) rows, 256, 0, ctx.stream()>>>(
++                    (const half *) mask->data, mask->ne[0], mask->nb[1] / sizeof(half), i);
++            }
++        }
++    }
++
++    // IK_NAN_CHECK input probe: FLASH_ATTN_EXT only (the established origin
++    // node). Launched on ctx.stream() before the node -- stream-ordered, no
++    // sync, race-transparent. Flags read post-graph in ik_nan_report.
++    if (ik_nan_check_enabled() && dst->op == GGML_OP_FLASH_ATTN_EXT) {
++        for (int k = 0; k < GGML_MAX_SRC; ++k) {
++            const ggml_tensor * src = dst->src[k];
++            if (!src || !src->data) continue;
++            const int64_t n = ggml_nbytes(src) / (src->type == GGML_TYPE_F32 ? 4 : 2);
++            if (n <= 0) continue;
++            const int64_t grid = (n + 255)/256;
++            if (grid > 2147483647LL) continue;
++            const int packed = i*16 + k;
++            if (src->type == GGML_TYPE_F32) {
++                k_nan_probe_in_f32<<<grid, 256, 0, ctx.stream()>>>((const float *) src->data, n, packed);
++            } else if (src->type == GGML_TYPE_F16) {
++                k_nan_probe_in_f16<<<grid, 256, 0, ctx.stream()>>>((const half *) src->data, n, packed);
++            }
++        }
++    }
++
+     // In case we forget to do that in some kernel.
+     ggml_cuda_set_device(ctx.device);
+ 
+@@ -4211,7 +4852,53 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+             ggml_cuda_op_hc_post(ctx, dst);
+             break;
+         case GGML_OP_FLASH_ATTN_EXT:
++            // ORIGIN STAGING (RESULTS 47.5): stream-ordered D2H of the inputs
++            // the kernel is about to read; ~50 ms per prefill graph
++            if (ik_nan_check_enabled() && strcmp(dst->name, "fattn-0") == 0 && dst->ne[2] >= 32) {
++                for (int k = 0; k < GGML_MAX_SRC; ++k) ik_stage_src(ctx, dst->src[k], k);
++            }
++            if (ik_fattn_capture_state == 1 && strcmp(dst->name, "fattn-0") == 0 && dst->ne[2] >= 32) {
++                // synchronous dump is fine here: this only runs during the
++                // one-off in-place replay after an abort (RESULTS 47.2)
++                CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
++                char path[320]; struct stat st;
++                if (stat(ik_fattn_capture_dir, &st) != 0) mkdir(ik_fattn_capture_dir, 0755);
++                for (int k = 0; k < GGML_MAX_SRC; ++k) {
++                    if (!dst->src[k] || !dst->src[k]->data) continue;
++                    snprintf(path, sizeof(path), "%s/src%d.bin", ik_fattn_capture_dir, k);
++                    ik_fattn_capture_write(dst->src[k], path);
++                }
++                ggml_cuda_flash_attn_ext(ctx, dst);
++                CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
++                snprintf(path, sizeof(path), "%s/out.bin", ik_fattn_capture_dir);
++                ik_fattn_capture_write(dst, path);
++                ik_fattn_capture_state = 2;
++                fprintf(stderr, "IK_FATTN_CAPTURE: fattn-0 inputs+output written to %s\n", ik_fattn_capture_dir);
++                fflush(stderr);
++                break;
++            }
+             ggml_cuda_flash_attn_ext(ctx, dst);
++            // IK_FA_TWICE (RESULTS 46.2): re-execute the same node on the same
++            // inputs and compare output sums in-stream. 46.1 proved nothing
++            // rewrites the inputs (0 mismatches in 49.8M checks), so a
++            // divergence here has exactly one explanation left: the kernel is
++            // nondeterministic. FA writes every output element, so re-running
++            // it is semantically a no-op. Requires graphs off, like IK_SUM_CHECK.
++            // prefill batches only (ne[2] = tokens): every origin ever seen
++            // is prefill, and doubling decode FA cost 38 % of generation speed
++            if (ik_fa_twice_enabled() && dst->data && dst->ne[2] >= 32) {
++                const size_t fa_nbytes = ggml_nbytes(dst);
++                const int slot_a = (ik_sum_next_slot++) & (IK_SUM_SLOTS - 1);
++                const int slot_b = (ik_sum_next_slot++) & (IK_SUM_SLOTS - 1);
++                const int64_t fa_grid = std::min<int64_t>(1024, ((int64_t)(fa_nbytes >> 2) + 255) / 256 + 1);
++                k_ik_sum_zero<<<1, 1, 0, ctx.stream()>>>(ik_sum_base_ptr() + slot_a);
++                k_ik_sum<<<fa_grid, 256, 0, ctx.stream()>>>((const uint8_t *) dst->data, fa_nbytes, ik_sum_base_ptr() + slot_a);
++                ggml_cuda_flash_attn_ext(ctx, dst);   // second run, same inputs
++                k_ik_sum_zero<<<1, 1, 0, ctx.stream()>>>(ik_sum_chk_ptr() + slot_b);
++                k_ik_sum<<<fa_grid, 256, 0, ctx.stream()>>>((const uint8_t *) dst->data, fa_nbytes, ik_sum_chk_ptr() + slot_b);
++                k_ik_fa_cmp<<<1, 1, 0, ctx.stream()>>>(slot_a, slot_b, i);
++                ++ik_fa_runs;
++            }
+             break;
+         case GGML_OP_INDEXER_TOPK:
+             ggml_cuda_op_indexer_topk(ctx, dst);
+@@ -4251,6 +4938,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+     printf("%s(%s): %d us\n", ggml_op_name(dst->op), dst->name, (int)(tim2 - tim1));
+ #endif
+ 
++    ik_nan_probe(ctx, dst, i);
++
+     return true;
+ }
+ 
+@@ -4772,6 +5461,9 @@ GGML_CALL static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t
+ 
+     evaluate_and_capture_cuda_graph(cuda_ctx, cgraph, graph_evaluated_or_captured, use_cuda_graph, cuda_graph_update_required);
+ 
++    ik_nan_report(*cuda_ctx, cgraph);
++    ik_sum_report(*cuda_ctx, cgraph);
++
+     return GGML_STATUS_SUCCESS;
+ }
+ 
+diff --git a/src/llama-sampling.cpp b/src/llama-sampling.cpp
+index 4e0f4911..4206ea49 100644
+--- a/src/llama-sampling.cpp
++++ b/src/llama-sampling.cpp
+@@ -11,6 +11,7 @@
+ #include <numeric>
+ #include <unordered_map>
+ #include <fstream>
++#include <stdexcept>
+ 
+ static void llama_log_softmax(float * array, size_t size) {
+     float max_l = *std::max_element(array, array + size);
+@@ -727,8 +728,38 @@ llama_token llama_sample_token_with_rng_impl(struct llama_sampling * smpl, llama
+     auto p = sump * r / rng.max();
+     auto iter = std::upper_bound(probs.begin(), probs.end(), p);
+     if (iter == probs.end()) {
++        // LOCAL PATCH (ik-llama-toolkit): throw instead of GGML_ABORT.
++        //
++        // Reaching here means every candidate logit is NaN, so upper_bound found
++        // nothing -- all comparisons are false. The logits arrive that way from
++        // llama_decode; nothing in this function produced them.
++        //
++        // llama-server ALREADY handles a throwing sampler: the call site in
++        // examples/server/server-context.cpp wraps common_sampler_sample in
++        // try/catch, logs "sampling failed, releasing slot", returns a 500 for
++        // that one request, releases the slot and carries on. That handler was
++        // unreachable, because GGML_ABORT -> ggml_abort -> abort() is not a C++
++        // exception. So a condition the server knows how to survive was taking
++        // the whole process down, along with every other in-flight request.
++        //
++        // This does not fix, hide or diagnose the NaN -- see RESULTS 32 and
++        // docs/external/issue-nan-logits-abort.md, where the cause is still open.
++        // It only stops one bad token from being fatal to the server.
++        //
++        // The dump gets a unique name too: it used to be a fixed path in the
++        // working directory, so the next occurrence destroyed the previous
++        // evidence. That already cost us the dump from abort #8, and now that
++        // the server survives, repeats are expected rather than exceptional.
++        // Microseconds, not seconds: the counter below only makes names unique
++        // WITHIN a process, so two servers aborting in the same second would
++        // still collide -- which a test caught before this shipped.
++        static int n_failed = 0;
++        char fname[64];
++        snprintf(fname, sizeof(fname), "probabilities-%lld-%d.txt",
++                 (long long) ggml_time_us(), ++n_failed);
++
+         LLAMA_LOG_ERROR("=============================== Failed to sample token\n");
+-        std::ofstream out("probabilities.txt");
++        std::ofstream out(fname);
+         out << "candidates->size: " << candidates->size << std::endl;
+         out << "max  = " << max << std::endl;
+         out << "sump = " << sump << std::endl;
+@@ -739,10 +770,11 @@ llama_token llama_sample_token_with_rng_impl(struct llama_sampling * smpl, llama
+         }
+         out.flush();
+         out.close();
+-        LLAMA_LOG_ERROR("Data has been stored in probabilities.txt\n");
+-        LLAMA_LOG_ERROR("Create an issue with full log and attach probabilities.txt to the issue\n");
+-        LLAMA_LOG_ERROR("\n\nCrashing now\n");
+-        GGML_ABORT("Fatal error");
++        LLAMA_LOG_ERROR("Data has been stored in %s\n", fname);
++        LLAMA_LOG_ERROR("Create an issue with full log and attach that file to the issue\n");
++
++        throw std::runtime_error(
++            std::string("failed to sample token: all candidate logits are NaN (dump: ") + fname + ")");
+     }
+     GGML_ASSERT(iter != probs.end());
+     auto idx = std::distance(probs.begin(), iter);
+diff --git a/src/llama.cpp b/src/llama.cpp
+index 7945d9db..51c358d5 100644
+--- a/src/llama.cpp
++++ b/src/llama.cpp
+@@ -6133,6 +6133,96 @@ static bool prepare_mtp_graph_inputs(
+ // return positive int on warning
+ // return negative int on error
+ //
++
++// ===== IK_KV_SCAN: find the decode that poisons the KV cache ==========
++// RESULTS 36 established that the NaN surfaces at FLASH_ATTN_EXT layer 0 with
++// raw_k-0 ALREADY poisoned -- persistent state gone bad, producer never seen as
++// a node output. This scans layer 0's K cache from the host after each decode
++// and reports the FIRST decode after which NaN is present, with what that
++// decode was doing. Requires -nkvo (cache in host memory); silently does
++// nothing if the buffer is not host-resident. Off unless IK_KV_SCAN=1.
++static bool ik_kv_scan_enabled() {
++    static int on = -1;
++    if (on < 0) { const char * e = getenv("IK_KV_SCAN"); on = (e && atoi(e)) ? 1 : 0; }
++    return on == 1;
++}
++
++static void ik_kv_scan(llama_context & lctx, int32_t n_tokens_batch, const char * phase) {
++    if (!ik_kv_scan_enabled()) return;
++    auto & kv = lctx.kv_self;
++    if (kv.k_l.empty()) return;
++    // Which layer to scan. It was 0, and layer 0 is one of the three that is
++    // NEVER poisoned (RESULTS 39) -- so four aborts' worth of "cache is clean"
++    // meant only "layer 0 is clean". Default 4: the lowest layer that shows the
++    // full 80.9 % pattern. Scanning all 43 would be 5.8 GB per decode.
++    static int scan_layer = -1;
++    if (scan_layer < 0) {
++        const char * e = getenv("IK_KV_SCAN_LAYER");
++        scan_layer = e ? atoi(e) : 4;
++    }
++    if (scan_layer < 0 || scan_layer >= (int) kv.k_l.size()) return;
++    ggml_tensor * k0 = kv.k_l[scan_layer];
++    if (!k0 || !k0->data || k0->type != GGML_TYPE_F16) return;
++    if (k0->buffer && !ggml_backend_buffer_is_host(k0->buffer)) return;
++
++    // Writes land async on the backend stream; sync before reading.
++    ggml_backend_sched_synchronize(lctx.sched);
++
++    // Row layout: ne[0] f16 per cell. Scan only cells that carry data --
++    // untouched cells beyond that are legitimately uninitialised.
++    // Scan the WHOLE tensor, and report live and beyond-live separately.
++    // The first version scanned only max(head, used) cells and reported nothing
++    // while attention was demonstrably reading NaN out of this very tensor --
++    // DeepSeek-V4 compacts rows and windows them (kv.row_count, size_swa), so
++    // head/used does not describe layer 0's occupancy and the scan was looking
++    // at the wrong range.
++    const int64_t per_cell = k0->ne[0];
++    const int64_t n = (int64_t) ggml_nelements(k0);
++    if (n <= 0) return;
++    const uint32_t live_rows = kv.rows(0);
++    const int64_t  live_n    = std::min(n, (int64_t) live_rows * per_cell);
++
++    const uint16_t * d = (const uint16_t *) k0->data;
++    int64_t first = -1, cnt = 0, cnt_live = 0;
++    for (int64_t i = 0; i < n; ++i) {
++        // f16 NaN: exponent all ones, mantissa nonzero
++        if ((d[i] & 0x7FFFu) > 0x7C00u) {
++            if (first < 0) first = i;
++            ++cnt;
++            if (i < live_n) ++cnt_live;
++        }
++    }
++    const uint32_t cells = live_rows;
++
++    static int64_t decode_no = 0;      // counts scanned decodes
++    static bool was_poisoned_pre = false, was_poisoned_post = false;
++    const bool is_pre = phase[0] == 'p' && phase[1] == 'r';
++    bool & was_poisoned = is_pre ? was_poisoned_pre : was_poisoned_post;
++    if (!is_pre) ++decode_no;
++    const bool poisoned = cnt > 0;
++    // Heartbeat, so "nothing reported" can be told apart from "never ran" --
++    // the distinction the first version could not make.
++    if (decode_no == 1 || decode_no % 500 == 0) {
++        fprintf(stderr, "IK_KV_SCAN: alive [%s] layer %d, decode #%lld, scanned %lld elems (%u live rows), %lld NaN (%lld live)\n",
++                phase, scan_layer, (long long) decode_no, (long long) n, live_rows, (long long) cnt, (long long) cnt_live);
++        fflush(stderr);
++    }
++    if (poisoned && !was_poisoned) {
++        fprintf(stderr, "\n=============================== IK_KV_SCAN [%s]: layer-%d K cache went CLEAN -> POISONED\n"
++                        "  decode #%lld: batch of %d tokens, kv head=%u used=%u n=%u\n"
++                        "  first NaN at cell %lld dim %lld, %lld NaN total (%lld inside %u live rows)\n",
++                phase, scan_layer, (long long) decode_no, n_tokens_batch, kv.head, kv.used, kv.n,
++                (long long)(first/per_cell), (long long)(first%per_cell), (long long) cnt, (long long) cnt_live, cells);
++        fflush(stderr);
++    } else if (!poisoned && was_poisoned) {
++        fprintf(stderr, "IK_KV_SCAN [%s]: layer-%d K cache POISONED -> CLEAN (decode #%lld, kv head=%u used=%u)\n",
++                phase, scan_layer, (long long) decode_no, kv.head, kv.used);
++        fflush(stderr);
++    }
++    was_poisoned = poisoned;
++}
++// ===== end IK_KV_SCAN =================================================
++
+ static int llama_decode_internal(
+          llama_context & lctx,
+            llama_batch   batch_all) { // TODO: rename back to batch
+@@ -6453,6 +6543,11 @@ static int llama_decode_internal(
+             tim2 = ggml_time_us();
+             printf("sched_alloc_graph(...): %d us\n", int(tim2-tim1));
+ #endif
++            // Scan immediately BEFORE this graph runs, not only after the last
++            // one. The post scan leaves a gap in which the server can restore a
++            // checkpoint, run kv_cache_seq_rm or defrag; anything that poisons
++            // the cache there would be blamed on the graph. RESULTS 38.
++            ik_kv_scan(lctx, (int32_t) u_batch.n_tokens, "pre");
+             if (u_batch.embd == nullptr && lctx.cparams.graph_reuse) {
+                 auto & kv_self_used = (model.arch == LLM_ARCH_GEMMA4_MTP || model.arch == LLM_ARCH_GEMMA4_ASSISTANT) &&
+                                       lctx.mtp_target_ctx != nullptr ? lctx.mtp_target_ctx->kv_self : lctx.kv_self;
+@@ -6771,6 +6866,8 @@ static int llama_decode_internal(
+     printf("sched_reset(...): %d us\n", int(tim2-tim1));
+ #endif
+ 
++    ik_kv_scan(lctx, (int32_t) batch_all.n_tokens, "post");
++
+     return 0;
+ }
+ 
+@@ -13044,3 +13141,55 @@ std::vector<llama_model *> & llama_all_loaded_models() {
+     static std::vector<llama_model *> models;
+     return models;
+ }
++
++// LOCAL PATCH (ik-llama-toolkit), RESULTS 47: dump-on-abort helpers.
++// 46.4 proved the NaN is computed DETERMINISTICALLY by fattn-0 from clean
++// inputs, so a byte dump of the layer-0 KV plus the token history is a
++// complete offline reproducer (layer 0's Q depends only on the ubatch tokens).
++extern "C" void llama_ik_kv_info(struct llama_context * ctx, int * head, int * used, int * n_total) {
++    if (head)    *head    = (int) ctx->kv_self.head;
++    if (used)    *used    = (int) ctx->kv_self.used;
++    if (n_total) *n_total = (int) ctx->kv_self.size;
++}
++
++// inverse of the dump: overwrite one layer's KV bytes with a dumped file.
++// RESULTS 47.1: replay-from-tokens cannot be bit-exact because the server's
++// history was chunked by many requests, and the trigger is a bit pattern. The
++// dumped bytes ARE the server's bits; injecting them after a body prefill (which
++// only exists to populate the cells) makes layer 0/1 identical to the abort.
++extern "C" int llama_ik_load_kv_layer(struct llama_context * ctx, int il, const char * path) {
++    if (il < 0 || il >= (int) ctx->kv_self.k_l.size()) return -1;
++    ggml_tensor * t = ctx->kv_self.k_l[il];
++    if (!t) return -2;
++    FILE * f = fopen(path, "rb");
++    if (!f) return -3;
++    int32_t hdr[6];
++    if (fread(hdr, sizeof(hdr), 1, f) != 1) { fclose(f); return -4; }
++    const size_t nbytes = ggml_nbytes(t);
++    std::vector<uint8_t> buf(nbytes);
++    const size_t got = fread(buf.data(), 1, nbytes, f);
++    fclose(f);
++    if (got != nbytes) return -5;
++    ggml_backend_tensor_set(t, buf.data(), 0, nbytes);
++    return (int) (nbytes / (1024*1024));
++}
++
++extern "C" int llama_ik_dump_kv_layer(struct llama_context * ctx, int il, const char * path) {
++    if (il < 0 || il >= (int) ctx->kv_self.k_l.size()) return -1;
++    ggml_tensor * t = ctx->kv_self.k_l[il];
++    if (!t) return -2;
++    const size_t nbytes = ggml_nbytes(t);
++    std::vector<uint8_t> buf(nbytes);
++    ggml_backend_tensor_get(t, buf.data(), 0, nbytes);
++    FILE * f = fopen(path, "wb");
++    if (!f) return -3;
++    // small self-describing header: type, ne[4], nbytes
++    int32_t hdr[6] = { (int32_t) t->type,
++                       (int32_t) t->ne[0], (int32_t) t->ne[1],
++                       (int32_t) t->ne[2], (int32_t) t->ne[3],
++                       (int32_t) 0 };
++    fwrite(hdr, sizeof(hdr), 1, f);
++    fwrite(buf.data(), 1, nbytes, f);
++    fclose(f);
++    return (int) (nbytes / (1024*1024));
++}

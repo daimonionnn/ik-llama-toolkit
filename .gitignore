@@ -30,3 +30,8 @@ probabilities-*.txt
 # they are simply never committed. Matt's call, 2026-08-19.
 config/models/deepseek-v4-flash-abliterated-128k.env
 serve-deepseek-v4-flash-abliterated-mxfp4-128k.sh
+logs/nan-dump-*/
+logs/fattn0-capture-*/
+logs/origin-capture-*/
+tools/fattn-repro
+tools/replay-nan-dump
