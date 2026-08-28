@@ -133,12 +133,18 @@ int main(int argc, char ** argv) {
         ggml_backend_tensor_set(kb, k.bytes.data(), 0, k.bytes.size());
         ggml_backend_tensor_set(mb, m.bytes.data(), 0, m.bytes.size());
         ggml_backend_tensor_set(sb, s4.bytes.data(), 0, s4.bytes.size());
+        // marker fill of the output: distinguishes "kernel wrote NaN" from
+        // "kernel never wrote this cell" (pool garbage would then be the NaN)
+        {
+            std::vector<float> mark(ggml_nelements(fa), 123456.0f);
+            ggml_backend_tensor_set(fa, mark.data(), 0, mark.size()*sizeof(float));
+        }
 
         for (int r = 0; r < runs; ++r) {
             ggml_backend_graph_compute(backend, gf);
             std::vector<float> out(ggml_nelements(fa));
             ggml_backend_tensor_get(fa, out.data(), 0, out.size()*sizeof(float));
-            size_t nan = 0; float mx = 0;
+            size_t nan = 0, marker = 0; float mx = 0;
             std::vector<int> nan_rows;
             const int64_t d0 = fa->ne[0], nh = fa->ne[1];
             for (size_t ii = 0; ii < out.size(); ++ii) {
@@ -146,15 +152,16 @@ int main(int argc, char ** argv) {
                     ++nan;
                     int row = (int)(ii / (d0*nh));
                     if (nan_rows.empty() || nan_rows.back() != row) nan_rows.push_back(row);
-                } else if (fabsf(out[ii]) > mx) mx = fabsf(out[ii]);
+                } else if (out[ii] == 123456.0f) ++marker;
+                else if (fabsf(out[ii]) > mx) mx = fabsf(out[ii]);
             }
             if (!nan_rows.empty()) {
                 printf("  NaN tokens (%zu):", nan_rows.size());
                 for (size_t z = 0; z < nan_rows.size() && z < 40; ++z) printf(" %d", nan_rows[z]);
                 printf("\n");
             }
-            printf("scale %-9.6f run %d: NaN %zu / %zu  max|out| %.4f %s\n",
-                   scale, r, nan, out.size(), mx, nan ? " <<<<<<<< REPRODUCED" : "");
+            printf("scale %-9.6f run %d: NaN %zu / %zu  MARKER(unwritten) %zu  max|out| %.4f %s\n",
+                   scale, r, nan, out.size(), marker, mx, nan ? " <<<<<<<< REPRODUCED" : "");
             if (nan) { printf("\nREPRODUCED standalone at scale %.6f\n", scale); return 42; }
         }
         ggml_backend_buffer_free(buf);
