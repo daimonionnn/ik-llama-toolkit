@@ -4713,3 +4713,40 @@ The lesson worth keeping: the first comparison varied `-ncmoe` because that was
 the obvious knob, and concluded against `--swa-compress` on one data point. The
 right question was which resource to spend, and only measuring the third
 combination answered it.
+
+### 49.5 All five configurations, and why 128k stays the default
+
+Every number below is from 2026-08-29 on the fixed build, full prefills with
+unique prompts:
+
+| config | ~6.4k pp/tg | ~52k pp/tg | ~122k pp/tg |
+|---|---|---|---|
+| 128k `-nkvo` n19 ub8192 | **1647.5 / 18.90** | 1684.9 / 18.02 | 1359.5 / 16.25 |
+| **128k swa n21 ub8192** | 1576.8 / 18.01 | **1693.7** / 17.57 | **1518.9 / 16.79** |
+| 256k `-nkvo` n21 ub8192 | 1383.5 / 16.03 | 1486.9 / 15.17 | 1182.1 / 13.91 |
+| 256k swa n25 ub8192 | 1332.4 / 14.58 | 1520.2 / 14.31 | 1342.4 / 14.37 |
+| 256k swa n21 ub4096 | 1025.1 / 16.65 | 1223.0 / 16.11 | 1106.6 / 15.82 |
+
+Weighted turn (1000 prefilled + 500 generated) against this box's measured
+depth distribution — 112 requests, median 5 148, 84.8 % below 20k, 8.0 % above
+100k:
+
+| config | weighted turn | vs best |
+|---|---|---|
+| 128k `-nkvo` n19 | 27.51 s | — |
+| **128k swa n21** | **28.61 s** | +4.0 % |
+| 256k swa n21 ub4096 | 31.19 s | +13.4 % |
+| 256k `-nkvo` n21 | 32.43 s | +17.9 % |
+| 256k swa n25 | 35.12 s | +27.7 % |
+
+**262144 costs ~13 % of every turn** — two more expert layers on the host plus
+a halved `-ub` — to serve the 8 % of requests that run deep, and the deepest
+request ever recorded here was 139 264 tokens. Not worth it while the client
+can compact.
+
+Shipped: **128k with `--swa-compress`**, which gives up 4 % against the old
+`-nkvo` settings at shallow depth and is the fastest of all five at 122k
+(1518.9 pp / 16.79 tg). Hermes is pointed at it with an explicit
+`context_length: 131072` override, so it stops budgeting against the model's
+advertised 262144 — a mismatch that had been there since long before any of
+this.
