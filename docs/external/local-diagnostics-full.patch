@@ -856,7 +856,7 @@ index a6a394c4..6b1c0e14 100644
      if (sched->split_mode_graph) {
          auto tensor_size = [] (const ggml_tensor * t) {
 diff --git a/ggml/src/ggml-cuda.cu b/ggml/src/ggml-cuda.cu
-index 232f765a..918f196c 100644
+index 232f765a..d8e4e634 100644
 --- a/ggml/src/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda.cu
 @@ -65,6 +65,8 @@
@@ -1521,7 +1521,7 @@ index 232f765a..918f196c 100644
      // In case we forget to do that in some kernel.
      ggml_cuda_set_device(ctx.device);
  
-@@ -4211,7 +4852,53 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+@@ -4211,7 +4852,80 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
              ggml_cuda_op_hc_post(ctx, dst);
              break;
          case GGML_OP_FLASH_ATTN_EXT:
@@ -1529,6 +1529,33 @@ index 232f765a..918f196c 100644
 +            // the kernel is about to read; ~50 ms per prefill graph
 +            if (ik_nan_check_enabled() && strcmp(dst->name, "fattn-0") == 0 && dst->ne[2] >= 32) {
 +                for (int k = 0; k < GGML_MAX_SRC; ++k) ik_stage_src(ctx, dst->src[k], k);
++            }
++            // ON-DEMAND MASK DUMP (RESULTS 49.1): IK_MASK_DUMP=<dir> writes
++            // fattn-0's inputs from the FIRST prefill graph and disarms, so the
++            // mask geometry of a configuration can be compared without waiting
++            // for an abort.
++            if (strcmp(dst->name, "fattn-0") == 0 && dst->ne[2] >= 32) {
++                static int md_done = 0;
++                const char * md_dir = getenv("IK_MASK_DUMP");
++                // IK_MASK_DUMP_CONT=1: only dump a CONTINUATION batch, where the
++                // K view is wider than the batch (n_kv > n_tokens). The first
++                // chunk of a request is perfectly causal and shows nothing.
++                const bool md_want = md_dir && (!getenv("IK_MASK_DUMP_CONT") ||
++                        (dst->src[1] && dst->src[1]->ne[1] > dst->ne[2]));
++                if (md_want && !md_done) {
++                    md_done = 1;
++                    CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
++                    struct stat st; char path[320];
++                    if (stat(md_dir, &st) != 0) mkdir(md_dir, 0755);
++                    for (int k = 0; k < GGML_MAX_SRC; ++k) {
++                        if (!dst->src[k] || !dst->src[k]->data) continue;
++                        snprintf(path, sizeof(path), "%s/src%d.bin", md_dir, k);
++                        ik_fattn_capture_write(dst->src[k], path);
++                    }
++                    fprintf(stderr, "IK_MASK_DUMP: fattn-0 inputs (n_tokens=%lld, n_kv=%lld) -> %s\n",
++                            (long long) dst->ne[2], (long long) (dst->src[1] ? dst->src[1]->ne[1] : -1), md_dir);
++                    fflush(stderr);
++                }
 +            }
 +            if (ik_fattn_capture_state == 1 && strcmp(dst->name, "fattn-0") == 0 && dst->ne[2] >= 32) {
 +                // synchronous dump is fine here: this only runs during the
@@ -1575,7 +1602,7 @@ index 232f765a..918f196c 100644
              break;
          case GGML_OP_INDEXER_TOPK:
              ggml_cuda_op_indexer_topk(ctx, dst);
-@@ -4251,6 +4938,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+@@ -4251,6 +4965,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
      printf("%s(%s): %d us\n", ggml_op_name(dst->op), dst->name, (int)(tim2 - tim1));
  #endif
  
@@ -1584,7 +1611,7 @@ index 232f765a..918f196c 100644
      return true;
  }
  
-@@ -4772,6 +5461,9 @@ GGML_CALL static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t
+@@ -4772,6 +5488,9 @@ GGML_CALL static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t
  
      evaluate_and_capture_cuda_graph(cuda_ctx, cgraph, graph_evaluated_or_captured, use_cuda_graph, cuda_graph_update_required);
  
@@ -1670,6 +1697,39 @@ index 681d4fa4..d35995ea 100644
  }
  
  template<int width = WARP_SIZE>
+diff --git a/src/graphs/build_deepseek4.cpp b/src/graphs/build_deepseek4.cpp
+index d3fefc8b..f3a0783a 100644
+--- a/src/graphs/build_deepseek4.cpp
++++ b/src/graphs/build_deepseek4.cpp
+@@ -1133,6 +1133,28 @@ static ggml_tensor * ds4_attention(ggml_cgraph * gf, ggml_context * ctx0, llm_bu
+         int ntokens = std::max(k_fa_chunk, int(q->ne[2]));
+         int nton = k_fa_chunk*((ntokens + n_swa + k_fa_chunk - 1)/k_fa_chunk);
+         int first = raw_k->ne[2] - nton;
++        // LOCAL FIX (ik-llama-toolkit), RESULTS 49.2. `first` is derived from
++        // raw_k->ne[2], i.e. the 256-PADDED kv length, while the mask rows are
++        // indexed from kv_head. When the padding slack exceeds the window slack
++        // (which needs a non-256-aligned kv_head, i.e. prompt-cache reuse), the
++        // view starts AFTER the cells the leading rows need: those rows come out
++        // entirely -inf, and FLASH_ATTN_EXT turns them into NaN. Even short of
++        // that, the same overshoot silently truncates the window of the first
++        // rows. The window must never start later than the oldest cell row 0
++        // still needs.
++        if (int max_first = (int) llm.kv_head - n_swa + 1; first > max_first) {
++            first = max_first;
++        }
++        // IK_SWA_DBG: diagnostic for the above, kept because it is what found
++        // the fault. Cached so the disabled path costs one branch.
++        static const bool swa_dbg = getenv("IK_SWA_DBG") != nullptr;
++        if (swa_dbg) {
++            fprintf(stderr, "IK_SWA_DBG: il=%d kv_head=%d n_tokens=%d raw_k_ne2=%d nton=%d first=%d offset=%d%s\n",
++                    il, (int) llm.kv_head, (int) q->ne[2], (int) raw_k->ne[2], nton, first,
++                    first - (int) llm.kv_head,
++                    (first - (int) llm.kv_head) > 0 ? "   <<<< EMPTY LEADING ROWS" : "");
++            fflush(stderr);
++        }
+         if (first > 0) {
+             raw_k = ggml_view_4d(ctx0, raw_k, raw_k->ne[0], raw_k->ne[1], nton, raw_k->ne[3],
+                     raw_k->nb[1], raw_k->nb[2], raw_k->nb[3], raw_k->nb[2]*first);
 diff --git a/src/llama-sampling.cpp b/src/llama-sampling.cpp
 index 4e0f4911..4206ea49 100644
 --- a/src/llama-sampling.cpp

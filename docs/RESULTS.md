@@ -4538,3 +4538,111 @@ That is the right moment to hand over: the kernel is ikawrakow's own, the
 reproducer runs in under a second, and tools/fattn-nan-repro.cpp is fully
 self-contained -- generated mask, random q/k, hardcoded shapes, zero private
 bytes. `NaN 458752 / 34734080, tokens 0..13` on sm_120, exit code 42.
+
+---
+
+## 49. `--swa-compress` replaces `-nkvo` at no cost — and it is the fix for us (2026-08-29)
+
+ikawrakow's reply pointed at `-nkvo` ("the flag is there for the extremely GPU
+poor. I never use it, so it is possible something is broken") and recommended
+`--swa-compress`, a flag this project had never tried. Measured on this box,
+all at `-b 8192 -ub 8192 -c 131072`, unique prompts per run (a repeated prompt
+hits the prompt cache and halves the reported prefill -- the first pass of this
+comparison was wrong for exactly that reason):
+
+| config | KV buffer | compute buffer | loads? |
+|---|---|---|---|
+| `-nkvo` (shipped, ncmoe 19) | 0 (host) | 7 576 | yes |
+| KV on GPU, no swa-compress | 5 504 | **57 984** | **OOM** |
+| KV on GPU + `--swa-compress`, ncmoe 19 | 355 | 15 236 | OOM (4 GB short) |
+| **KV on GPU + `--swa-compress`, ncmoe 21** | **355** | **14 212** | **yes** |
+
+Throughput, same build, same prompts:
+
+| depth | `-nkvo` (ncmoe 19) | `--swa-compress` (ncmoe 21) |
+|---|---|---|
+| ~4.8k prefill | 1439.3 t/s | 1395.9 t/s (−3.0 %) |
+| ~38k prefill | 1752.9 t/s | **1773.6 t/s (+1.2 %)** |
+| generation @4.8k | 17.99 t/s | 17.68 t/s |
+| generation @38k | 17.06 t/s | 17.17 t/s |
+
+**Equivalent** -- and that is with TWO more expert layers pushed to the host
+(ncmoe 21 vs 19), which §21 measured at −1.9 % prefill each. The KV cache
+shrinks 5 504 → 355 MiB.
+
+Two things worth reporting upstream. Our compute buffer with KV on the GPU is
+**57 984 MiB where ikawrakow measures 8 768** at identical batch settings, and
+**14 212 where he measures 4 550** with `--swa-compress` -- a 3.1-6.6x gap that
+is not explained by his `-cmoe` vs our `-ncmoe 21`, and points at `-mla 3
+-fidx` (the DSA raw branch) inflating the attention scratch on this build.
+That gap is why §26 concluded "-nkvo cannot be dropped": true then, and true
+without `--swa-compress` now.
+
+The `--swa-compress` configuration is now soaking. §34 measured 22 aborts /
+34.3 M tokens with `-nkvo` against 0 / 3.7 M without it, so if the fault is
+`-nkvo`-specific this run should stay clean -- and the fully-masked-leading-row
+reproducer stays valid regardless, since it never used `-nkvo` at all.
+
+## 49.2 ROOT CAUSE, FOUND AND FIXED: the raw-branch window view overshoots kv_head
+
+`-fidx` was exonerated first: masks dumped with it on and off, same conditions,
+are **byte-identical** (md5 `7d1d53ee...`). It is a pure indexer fusion.
+
+The fault is in `src/graphs/build_deepseek4.cpp:1130-1141`, the SWA window view:
+
+```c
+int nton  = k_fa_chunk*((ntokens + n_swa + k_fa_chunk - 1)/k_fa_chunk);
+int first = raw_k->ne[2] - nton;          // <-- anchored on the PADDED kv length
+if (first > 0) { /* view raw_k and raw_mask from column `first` */ }
+```
+
+`raw_k->ne[2]` is `kv_self.n` = `GGML_PAD(kv_head + n_tokens, 256)`, but the mask
+rows are indexed from `kv_head`. So the view starts at `first` while row *j*
+needs cells `[kv_head + j - n_swa + 1, kv_head + j]`. Define
+
+    offset = first - kv_head = P - S
+    P = GGML_PAD(kv_head+n_tokens,256) - (kv_head+n_tokens)   (0..255)
+    S = nton - n_tokens                                        (>= n_swa)
+
+When **P > S** the view starts past what the leading rows need and `offset` of
+them come out entirely `-inf`. Confirmed against both captured masks, predicting
+`n_kv` from `n_tokens` alone:
+
+| capture | n_tokens | nton (predicted) | n_kv (measured) | offset |
+|---|---|---|---|---|
+| abort §48 | 1060 | 1280 | **1280** | +15 → 15 empty rows |
+| healthy continuation | 8192 | 8448 | **8448** | −128 → none |
+
+`S >= 256` whenever `n_tokens` is a multiple of 256, so **P > S is impossible for
+aligned batches** — which is why 8192-token chunks never fail. It needs a
+**non-256-aligned `kv_head`**, i.e. prompt-cache reuse, exactly what an agent
+client does when it resends a growing conversation. Every recorded abort
+geometry (1060, 1889, 2416, 6728) is in the vulnerable class; every synthetic
+sweep that never reproduced used aligned chunks.
+
+**Reproduced on demand** (seconds, not 250k tokens): a prefix request followed by
+an extended one, so the continuation starts at an unaligned `kv_head` — 86
+graphs with empty leading rows and an HTTP 500 NaN abort, first try.
+
+**The fix**, one clause: the window must never start later than the oldest cell
+row 0 still needs.
+
+```c
+if (int max_first = (int) llm.kv_head - n_swa + 1; first > max_first) {
+    first = max_first;
+}
+```
+
+Verified: same scenario, 6 063 window views, **zero** with `offset > 0` (max
+−127, i.e. the clamp), zero empty rows, zero aborts, 45/45 requests OK.
+Throughput unchanged (1422/1711 t/s against 1439/1753 before; generation 18.30/
+16.95 against 17.99/17.06).
+
+This also explains the two mitigations: `--swa-compress` takes a path where this
+block never runs (0 shifts observed), and the author never sees the fault
+because he does not use `-nkvo`, whose profile is what forces this branch here.
+The kernel-side reproducer stays valid as hardening — `FLASH_ATTN_EXT` should
+not turn a fully-masked row into NaN — but it is no longer the bug to fix.
+
+**And ikawrakow was right**: fully-masked leading rows are not legitimate. They
+were a malformed mask all along.
