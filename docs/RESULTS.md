@@ -4646,3 +4646,32 @@ not turn a fully-masked row into NaN — but it is no longer the bug to fix.
 
 **And ikawrakow was right**: fully-masked leading rows are not legitimate. They
 were a malformed mask all along.
+
+### 49.3 Depth comparison: `--swa-compress` wins at 120k, and the fix costs nothing
+
+Both configurations on the fixed build, full prefills (unique prompts; a shared
+prefix silently truncates `prompt_n` and makes the number meaningless -- two
+runs had to be discarded for exactly that):
+
+| depth | A: `-nkvo`, ncmoe 19 | B: `--swa-compress`, ncmoe 21 | B vs A |
+|---|---|---|---|
+| ~6.4k prefill | 1647.5 t/s | 1576.8 t/s | −4.3 % |
+| ~52k prefill | 1684.9 t/s | 1693.7 t/s | +0.5 % |
+| **~122k prefill** | 1359.5 t/s | **1518.9 t/s** | **+11.7 %** |
+| TG @6.4k | 18.90 t/s | 18.01 t/s | −4.7 % |
+| TG @52k | 18.02 t/s | 17.57 t/s | −2.5 % |
+| **TG @122k** | 16.25 t/s | **16.79 t/s** | **+3.3 %** |
+
+The crossover is real and in the predicted direction: with `-nkvo` the KV cache
+sits in host RAM and every token pays for it over PCIe, a cost that grows with
+depth; `--swa-compress` keeps it at 355 MiB on the GPU. Shallow work slightly
+favours A (two fewer expert layers on the host), deep work clearly favours B --
+and this box's actual workload is deep.
+
+Also confirms the fix is free: A here (1647/1685/1360) matches the pre-fix
+baseline (1439/1753 at the shallower shapes) within run-to-run spread, and the
+`-nkvo` profile at 122k is close to §21's 1327.7.
+
+**Both are now correct** -- §49.2 fixes the fault at its source, so this is a
+performance choice, not a workaround. B is the better default for deep-context
+serving.
