@@ -4675,3 +4675,41 @@ baseline (1439/1753 at the shallower shapes) within run-to-run spread, and the
 **Both are now correct** -- §49.2 fixes the fault at its source, so this is a
 performance choice, not a workaround. B is the better default for deep-context
 serving.
+
+### 49.4 The 256k profile: `--swa-compress` wins after all, at `-ub 4096`
+
+The first pass rejected `--swa-compress` at 262144 because it needed `-ncmoe 25`
+(four more expert layers on the host than `-nkvo`, against two at 131072) and
+that lost more generation than the KV placement won. Matt pushed back, and the
+rejected variable was the wrong one: keep `-ncmoe 21` and buy the room with
+`-ub 4096` instead.
+
+| depth | A: `-nkvo` n21 ub8192 | B: swa n25 ub8192 | **C: swa n21 ub4096** |
+|---|---|---|---|
+| ~6.4k | 1383.5 / 16.03 | 1332.4 / 14.58 | 1025.1 / **16.65** |
+| ~52k | 1486.9 / 15.17 | 1520.2 / 14.31 | 1223.0 / **16.11** |
+| ~122k | 1182.1 / 13.91 | 1342.4 / 14.37 | 1106.6 / **15.82** |
+
+C has the best generation at every depth (+3.9 / +6.2 / +13.7 % over A) and
+gives up only raw prefill throughput.
+
+**Weighted by this box's real workload rather than by guesswork.** The server
+logs give the depth distribution of 112 completed requests: median 5 148, p90
+52 073, 84.8 % below 20k, 8.0 % above 100k. Modelling a turn as 1000 prefilled
+plus 500 generated tokens:
+
+| config | weighted turn |
+|---|---|
+| A `-nkvo` n21 ub8192 | 32.43 s |
+| B swa n25 ub8192 | 35.12 s |
+| **C swa n21 ub4096** | **31.19 s** (−3.8 %) |
+
+C shipped. Note this contradicts the 128k sibling, where a large `-ub`
+amortises expert streaming and is worth keeping — it still is; this profile
+simply cannot afford 8192 without giving up an expert layer, and the layer is
+worth more.
+
+The lesson worth keeping: the first comparison varied `-ncmoe` because that was
+the obvious knob, and concluded against `--swa-compress` on one data point. The
+right question was which resource to spend, and only measuring the third
+combination answered it.
