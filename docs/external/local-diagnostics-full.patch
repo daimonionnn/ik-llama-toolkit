@@ -280,10 +280,10 @@ index 70433f98..3bc12a18 100644
  }
  
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index a6a394c4..6b1c0e14 100644
+index a6a394c4..f31000bd 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
-@@ -208,7 +208,215 @@ size_t ggml_backend_get_max_size(ggml_backend_t backend) {
+@@ -208,7 +208,219 @@ size_t ggml_backend_get_max_size(ggml_backend_t backend) {
      return ggml_backend_buft_get_max_size(ggml_backend_get_default_buffer_type(backend));
  }
  
@@ -437,8 +437,12 @@ index a6a394c4..6b1c0e14 100644
 +// ===== end IK_LIFETIME =====
 +
 +static bool ik_rawk_guard(void) {
++    // Default OFF since 2026-08-30: the guard was a hypothesis test and the
++    // hypothesis was refuted (RESULTS 43.4 -- abort after 244k tokens with it
++    // on). It cost 536 MiB of compute buffer and 1.1 % prefill, and every run
++    // since had to remember to pass IK_RAWK_GUARD=0. Opt back in with =1.
 +    static int on = -1;
-+    if (on < 0) { const char * e = getenv("IK_RAWK_GUARD"); on = (e && atoi(e) == 0) ? 0 : 1; }
++    if (on < 0) { const char * e = getenv("IK_RAWK_GUARD"); on = (e && atoi(e)) ? 1 : 0; }
 +    return on == 1;
 +}
 +
@@ -499,7 +503,7 @@ index a6a394c4..6b1c0e14 100644
      GGML_ASSERT(tensor->data != NULL && "tensor not allocated");
      if (offset + size > ggml_nbytes(tensor)) fprintf(stderr, "%s(%s): offset = %zu, size = %zu, nbytes = %zu\n", __func__, tensor->name, offset, size, ggml_nbytes(tensor));
      GGML_ASSERT(offset + size <= ggml_nbytes(tensor) && "tensor write out of bounds");
-@@ -361,6 +569,8 @@ static bool ggml_are_same_layout(const struct ggml_tensor * a, const struct ggml
+@@ -361,6 +573,8 @@ static bool ggml_are_same_layout(const struct ggml_tensor * a, const struct ggml
  }
  
  void ggml_backend_tensor_copy(struct ggml_tensor * src, struct ggml_tensor * dst) {
@@ -508,7 +512,7 @@ index a6a394c4..6b1c0e14 100644
      GGML_ASSERT(ggml_are_same_layout(src, dst) && "cannot copy tensors with different layouts");
  
      if (src == dst) {
-@@ -369,6 +579,8 @@ void ggml_backend_tensor_copy(struct ggml_tensor * src, struct ggml_tensor * dst
+@@ -369,6 +583,8 @@ void ggml_backend_tensor_copy(struct ggml_tensor * src, struct ggml_tensor * dst
  
      if (ggml_backend_buffer_is_host(src->buffer)) {
          ggml_backend_tensor_set(dst, src->data, 0, ggml_nbytes(src));
@@ -517,7 +521,7 @@ index a6a394c4..6b1c0e14 100644
      } else if (ggml_backend_buffer_is_host(dst->buffer)) {
          ggml_backend_tensor_get(src, dst->data, 0, ggml_nbytes(src));
      } else if (!ggml_backend_buffer_copy_tensor(src, dst)) {
-@@ -384,6 +596,7 @@ void ggml_backend_tensor_copy(struct ggml_tensor * src, struct ggml_tensor * dst
+@@ -384,6 +600,7 @@ void ggml_backend_tensor_copy(struct ggml_tensor * src, struct ggml_tensor * dst
  }
  
  void ggml_backend_tensor_copy_async(ggml_backend_t backend_src, ggml_backend_t backend_dst, struct ggml_tensor * src, struct ggml_tensor * dst) {
@@ -525,7 +529,7 @@ index a6a394c4..6b1c0e14 100644
      GGML_ASSERT(ggml_are_same_layout(src, dst) && "cannot copy tensors with different layouts");
  
      if (src == dst) {
-@@ -1823,7 +2036,16 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
+@@ -1823,7 +2040,16 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
                                  tensor_copy = ggml_dup_tensor_layout(sched->ctx, src);
                                  ggml_format_name(tensor_copy, "%s#%s#%d", ggml_backend_name(backend), src->name, c);
                              }
@@ -543,7 +547,7 @@ index a6a394c4..6b1c0e14 100644
                                  ggml_set_input(tensor_copy);
                                  ggml_set_output(tensor_copy); // prevent ggml-alloc from overwriting the tensor
                              }
-@@ -1850,7 +2072,16 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
+@@ -1850,7 +2076,16 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
                          for (int c = 0; c < sched->n_copies; c++) {
                              struct ggml_tensor * tensor_copy = ggml_dup_tensor_layout(sched->ctx, src);
                              ggml_format_name(tensor_copy, "%s#%s#%d", ggml_backend_name(backend), src->name, c);
@@ -561,7 +565,7 @@ index a6a394c4..6b1c0e14 100644
                                  ggml_set_input(tensor_copy);
                                  ggml_set_output(tensor_copy); // prevent ggml-alloc from overwriting the tensor
                              }
-@@ -2004,10 +2235,17 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
+@@ -2004,10 +2239,17 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
      return true;
  }
  
@@ -580,7 +584,7 @@ index a6a394c4..6b1c0e14 100644
      int split_backend_id = split->backend_id;
      ggml_backend_t split_backend = sched->backends[split_backend_id];
      ggml_backend_t last_input_backend = nullptr;
-@@ -2017,6 +2255,38 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+@@ -2017,6 +2259,38 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
          struct ggml_tensor * input = split->inputs[j];
          struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
  
@@ -619,7 +623,7 @@ index a6a394c4..6b1c0e14 100644
          if (input->flags & GGML_TENSOR_FLAG_INPUT) {
              // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
              // if there are multiple inputs for the split, and we have already synchronized this backend, no need to do it again.
-@@ -2028,7 +2298,9 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+@@ -2028,7 +2302,9 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
                  }
                  synced_on_input = true;
              }
@@ -629,7 +633,7 @@ index a6a394c4..6b1c0e14 100644
          } else {
              // wait for the split backend to finish using the input before overwriting it
              if (needs_sync[split_backend_id]) {
-@@ -2069,11 +2341,55 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+@@ -2069,11 +2345,55 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
                  if (ids_tensor != last_ids_tensor) {
                      ids.resize(ggml_nbytes(ids_tensor) / sizeof(int32_t));
  
@@ -685,7 +689,7 @@ index a6a394c4..6b1c0e14 100644
                      }
                      //needs_sync[tensor_backend_id(ids_tensor)] = k_set_sync;
  
-@@ -2082,6 +2398,12 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+@@ -2082,6 +2402,12 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
                      for (int64_t i1 = 0; i1 < ids_tensor->ne[1]; i1++) {
                          for (int64_t i0 = 0; i0 < ids_tensor->ne[0]; i0++) {
                              int32_t id = ids[i1 * ids_tensor->nb[1]/sizeof(int32_t) + i0 * ids_tensor->nb[0]/sizeof(int32_t)];
@@ -698,7 +702,7 @@ index a6a394c4..6b1c0e14 100644
                              unique_ids[id >> 5] |= (1u << (id & 31));
                          }
                      }
-@@ -2092,23 +2414,61 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+@@ -2092,23 +2418,61 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
                  // when the expert prefetch engine streamed this tensor ahead
                  // (see the lookahead in compute_splits), wait for it so the
                  // host-side reads below hit warm page cache instead of faulting
@@ -760,7 +764,7 @@ index a6a394c4..6b1c0e14 100644
  
                      };
  
-@@ -2121,22 +2481,54 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+@@ -2121,22 +2485,54 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
                          return id;
                      };
  
@@ -817,7 +821,7 @@ index a6a394c4..6b1c0e14 100644
                      ggml_backend_synchronize(input_backend);
                      if (needs_sync[split_backend_id]) {
                          if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
-@@ -2146,8 +2538,10 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
+@@ -2146,8 +2542,10 @@ static void ggml_backend_sched_copy_inputs(ggml_backend_sched_t sched, ggml_back
                          }
                          needs_sync[split_backend_id] = k_set_sync;
                      }
@@ -828,7 +832,7 @@ index a6a394c4..6b1c0e14 100644
          }
      }
  }
-@@ -2205,9 +2599,18 @@ static ggml_status ggml_backend_sched_eval(ggml_backend_sched_t sched, ggml_back
+@@ -2205,9 +2603,18 @@ static ggml_status ggml_backend_sched_eval(ggml_backend_sched_t sched, ggml_back
      return GGML_STATUS_SUCCESS;
  }
  
@@ -847,7 +851,7 @@ index a6a394c4..6b1c0e14 100644
  
      if (sched->is_async && sched->n_backends > 2 && sched->split_mode_graph && sched->has_reduce) {
  
-@@ -2662,6 +3065,7 @@ static void ggml_sched_prepare_graph(ggml_backend_sched_t sched) {
+@@ -2662,6 +3069,7 @@ static void ggml_sched_prepare_graph(ggml_backend_sched_t sched) {
  
      for (auto & item : sched->own_cpy   ) item = false;
      for (auto & item : sched->needs_sync) item = true;
