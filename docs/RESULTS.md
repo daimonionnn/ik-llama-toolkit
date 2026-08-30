@@ -4788,3 +4788,23 @@ context length in VRAM terms even as it narrows in throughput.
 
 Soak continues on A: **2 468 649 tokens, 0 aborts** before this benchmark
 interruption (9.1 expected without the fix, P = 0.01 %).
+
+### 49.7 The ~20k data point, and the upstream report
+
+Added because 84.8 % of this box's requests live below 20k, which made ~6.4k
+the wrong headline number:
+
+| depth | `-nkvo` n19 | `--swa-compress` n21 | delta pp / tg |
+|---|---|---|---|
+| ~6.4k | 1711.8 / 19.11 | 1603.8 / 18.12 | −6.3 % / −5.2 % |
+| **~20k** | **1802.9 / 18.74** | 1742.6 / 18.18 | −3.3 % / −3.0 % |
+| ~52k | 1671.1 / 18.13 | 1695.8 / 18.14 | +1.5 % / +0.1 % |
+| ~122k | 1369.0 / 16.57 | 1516.8 / 17.05 | +10.8 % / +2.9 % |
+
+It strengthens the case rather than diluting it: `-nkvo` is still ahead at 20k,
+so the advantage holds across the whole band where the traffic actually is, not
+only at the shallowest end. Prefill peaks at ~20k on both.
+
+Reported upstream as issue #2344 comment 5468237072: the soak result
+(2 468 649 tokens, 0 aborts, P = 0.01 %), both tables, the depth distribution
+that justifies the weighting, and the self-correction about the guard.
