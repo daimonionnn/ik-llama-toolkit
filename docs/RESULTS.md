@@ -4750,3 +4750,41 @@ Shipped: **128k with `--swa-compress`**, which gives up 4 % against the old
 `context_length: 131072` override, so it stops budgeting against the model's
 advertised 262144 — a mismatch that had been there since long before any of
 this.
+
+### 49.6 Re-measured with the raw_k guard off — and why that mattered
+
+Matt caught that `ik_rawk_guard` defaulted **ON** (`getenv(...) == 0 ? 0 : 1`),
+so every measured run had it unless `IK_RAWK_GUARD=0` was passed explicitly.
+Worse, it is asymmetric: the guard acts on host→device `raw_k` copies, which
+only exist with `-nkvo`. So §49.5's table was biased **against** `-nkvo` by
+exactly 536 MiB of compute buffer and its throughput cost — and `-nkvo` still
+won. The default is now OFF (the hypothesis it tested died in §43.4).
+
+Re-measured clean, median of 3 runs per point, spread 0.1–4.1 %:
+
+| depth | A: `-nkvo` n19 | B: swa n21 | B vs A |
+|---|---|---|---|
+| ~6.4k | **1711.8 / 19.11** | 1603.8 / 18.12 | pp −6.3 %, tg −5.2 % |
+| ~52k | 1671.1 / 18.13 | **1695.8** / 18.14 | pp +1.5 %, tg +0.1 % |
+| ~122k | 1369.0 / 16.57 | **1516.8 / 17.05** | pp +10.8 %, tg +2.9 % |
+
+Weighted turn: **A 27.18 s, B 28.35 s (+4.3 %)** — the same verdict as the noisy
+pass (+4.0 %), so the guard cost accuracy, not the conclusion.
+
+**Compute buffer scaling** (guard off, same `-ub 8192`):
+
+| context | `-nkvo` | `--swa-compress` |
+|---|---|---|
+| 131072 | 7 040 | 14 212 |
+| 262144 | 11 136 | 21 380 |
+| growth | **+4 096** | +7 168 |
+
+This is the durable argument for `-nkvo` on a card this size: its scratch is
+half the size and grows at 57 % of the rate, and that headroom buys **two more
+expert layers resident on the GPU** (`-ncmoe 19` against 21) — which is where
+the 4.3 % comes from. It is not a fallback for the GPU-poor here; it is the
+faster configuration for shallow-to-mid agent traffic, and the gap widens with
+context length in VRAM terms even as it narrows in throughput.
+
+Soak continues on A: **2 468 649 tokens, 0 aborts** before this benchmark
+interruption (9.1 expected without the fix, P = 0.01 %).
