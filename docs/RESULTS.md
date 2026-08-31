@@ -4856,3 +4856,49 @@ compute-buffer scratch at large `-ub`, superlinearly toward earlier layers.
 
 The soak was down ~20:59–21:20 CEST for the bisect (94 404 tokens on the
 interrupted run, 0 aborts) and is back on the same configuration.
+
+## 50. ds4 #791: the PR that must not be sent (2026-09-01)
+
+tedin7 independently confirmed cause 1 on RTX 3090/3080 (sm_86, driver 580.x),
+which unblocked the PR offered in #791 for causes 1-2. Prepared it in the
+corrected shape (gate `cudaHostRegisterReadOnly` on
+`cudaDevAttrHostRegisterReadOnlySupported` at the two whole-map sites, leave
+`cuda_model_range_ptr` untouched, plus the Linux MAP_PRIVATE/RW mapping),
+built it on current main `ab06d19`, and smoke-tested — the patch works exactly
+as designed: the pin succeeds without ReadOnly, 80.76 GiB registered, session
+up, tokens out.
+
+And that is precisely why it must not ship. Upstream moved 699 files since
+`84cc882`: on current main a *failed* registration now falls into a new
+full-model device-image cache (`cudaMalloc(model_size)` + chunked copy), and
+strategy selection between mapped-zero-copy and device-cache rides on that
+error return (`if (g_model_device_owned || g_model_registered) return 1;`
+before the device copy). Same card, same commit, same toy prompt:
+
+| build | path taken | prefill / generation |
+|---|---|---|
+| stock `ab06d19` | register fails → device cache | 30.72 / **82.70 t/s** |
+| + our fix (register succeeds) | host-mapped zero-copy | 0.24 / **0.67 t/s** |
+
+The fix makes ds4 **123x slower** by succeeding. The failure it removes is
+load-bearing: it is the only thing routing discrete cards onto the fast path,
+and unified-memory boards (attr=1) onto the mapped path. Both machine classes
+land right by accident. Archived as fork branch
+`fix/discrete-model-pinning` (`a4dd3c2`, "DO NOT MERGE") — it is the
+measurement, not the fix.
+
+What #791 still owes upstream, re-verified on `ab06d19` stock:
+
+- Session creation is FIXED (the original headline symptom). Toy prompts run
+  at any `-c` up to 32768, generation 72-83 t/s.
+- Real prompts still die: `ds4-bench` fails with "failed to create session"
+  even single-step, and the CLI with a ~6k-token prompt at `-c 16384` fails
+  with "failed to allocate GPU graph runtime". The 80.76 GiB image cache plus
+  the q8-f16 cache's 1 % reserve (`cuda_q8_f16_cache_reserve_bytes`) leave
+  under 1 GiB free, and the full-model `cudaMalloc` reserves nothing for the
+  prefill graph runtime. Cause 4 reborn: residency wins over working memory.
+- The right upstream ask is now: (a) make the mapped-vs-cached choice an
+  explicit unified/discrete policy, not an error-path accident; (b) budget
+  the image cache against session + graph-runtime headroom.
+
+No PR. Comment drafted for #791 with the table above and the OOM repro lines.
