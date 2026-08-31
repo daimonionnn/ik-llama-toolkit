@@ -4808,3 +4808,51 @@ only at the shallowest end. Prefill peaks at ~20k on both.
 Reported upstream as issue #2344 comment 5468237072: the soak result
 (2 468 649 tokens, 0 aborts, P = 0.01 %), both tables, the depth distribution
 that justifies the weighting, and the self-correction about the guard.
+
+### 49.8 ikawrakow's smell test was half right: the buffer numbers are real, our attribution was wrong (2026-08-31)
+
+His whole reply: "21 GiB compute buffer with `--swa-compress`? That does not
+pass the smell test." A flag bisect on this box (probe = load `llama-server`
+until `llama_init_from_model` prints the buffer sizes, then kill; all runs
+`-c 131072 -fa on -ctk/-ctv f16 -b 8192 -ub 8192`, KV on GPU,
+`--swa-compress`, sm_120, unless noted):
+
+| expert placement | CUDA0 compute buffer |
+|---|---|
+| `-cmoe` (his) | **4 549.77 MiB — his number, to the hundredth** |
+| `-ncmoe 42` (1 GPU expert layer) | 4 549.77 |
+| `-ncmoe 35` | 7 044.36 |
+| `-ncmoe 28` | 10 116.36 |
+| `-ncmoe 21` (ours) | 14 212.36 |
+| `-cmoe`, no `--swa-compress` | **8 768.06 — his second number, exactly** |
+| `-ncmoe 19`, no `--swa-compress` | 57 984.36 attempted, OOM (the §49 row) |
+| `-cmoe` @ 262144 | 5 573.77 |
+| `-ncmoe 21` @ 262144 (production logs) | 21 380.36 |
+| `-ncmoe 21`, `-ub 4096` | 7 074.18 (ub-linear) |
+
+So: every number in the §49/§49.6 tables is genuine (three independent server
+logs for 21 380.36, and both of his values reproduce bit-for-bit on this
+machine once `-cmoe` is used) — but the **attribution** in §49 and in the
+upstream comment was wrong. It is not `-mla 3 -fidx` inflating attention
+scratch: `-mla` defaults to 3 and `-fidx` defaults to enabled *and cannot be
+disabled from the CLI* (`common.cpp` only ever sets it true), so his runs had
+both as well. The entire 3.1–6.6× gap is **expert placement**: he measures
+with `-cmoe` (all experts on CPU), we run `-ncmoe 19/21` (24/22 GPU-resident
+expert layers), and each GPU expert layer adds compute-buffer scratch at
+`-ub 8192` — ~356 MiB/layer for late layers rising to ~585 MiB/layer for
+earlier ones with `--swa-compress`, and ~2 050 MiB/layer without it (the
+57 984). The per-layer cost also being n_kv-sensitive says this is the graph
+allocator's peak with expert activations and n_kv-sized attention tensors
+live together, not any single tensor.
+
+Consequences, in order of embarrassment avoided: the "points at `-mla 3
+-fidx`" sentence upstream needs a retraction; his skepticism about 21 GiB was
+correct *for his configuration* (at `-cmoe`, 262144 costs 5 574 MiB, +1 GiB
+per context doubling — nothing like our +7 GiB); and the §49.6 trade-off
+table stands unchanged, because the comparison there is between our own two
+configurations, both measured honestly. The bisect also hands upstream a
+cleaner statement of the real phenomenon: GPU-resident MoE layers multiply
+compute-buffer scratch at large `-ub`, superlinearly toward earlier layers.
+
+The soak was down ~20:59–21:20 CEST for the bisect (94 404 tokens on the
+interrupted run, 0 aborts) and is back on the same configuration.
