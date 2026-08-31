@@ -1,0 +1,76 @@
+diff --git a/ggml/src/ggml-cuda/fattn-new-mma.cu b/ggml/src/ggml-cuda/fattn-new-mma.cu
+index 681d4fa4..d35995ea 100644
+--- a/ggml/src/ggml-cuda/fattn-new-mma.cu
++++ b/ggml/src/ggml-cuda/fattn-new-mma.cu
+@@ -1454,9 +1454,15 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
+                         }
+ 
+                         if (!needs_fixup && !is_fixup) {
++                            // LOCAL FIX (ik-llama-toolkit, RESULTS 48.1): a query
++                            // row with no attendable KV position ends here with
++                            // rowsum == 0, and 0/0 wrote the NaN that spent eight
++                            // days disguised as a heisenbug. Zero attendable
++                            // weight on V means the correct output is 0.
+                             const float KQ_rowsum_j = meta_j[1];
+-                            dstk_val.x /= KQ_rowsum_j;
+-                            dstk_val.y /= KQ_rowsum_j;
++                            const float inv = KQ_rowsum_j == 0.0f ? 0.0f : 1.0f/KQ_rowsum_j;
++                            dstk_val.x *= inv;
++                            dstk_val.y *= inv;
+                         }
+ 
+                         if (is_fixup) {
+@@ -1576,6 +1582,12 @@ static __global__ void flash_attn_ext_f16(
+         int kb0_stop_kernel  = kb0_stop  * kb_niter;
+         if (KV_max) {
+             kb0_stop_kernel  = min(kb0_stop_kernel,  KV_max[jt] / c::nbatch_fa);
++            // LOCAL FIX (ik-llama-toolkit, RESULTS 48.1): clamp the START too --
++            // a fully-masked q-tile has KV_max 0 and a stream-k slice starting
++            // beyond it got an inverted range; the pipelined prefetch then reads
++            // K and the mask from beyond the valid region and the MMA turns the
++            // garbage into NaN. Clamped, the slice runs zero iterations.
++            kb0_start_kernel = min(kb0_start_kernel, kb0_stop_kernel);
+         }
+ 
+         constexpr bool is_fixup = false; // All but (potentially) the last iterations write their data to dst rather than the fixup buffer.
+@@ -1623,6 +1635,12 @@ static __global__ void flash_attn_ext_f16(
+     int kb0_stop_kernel  = kb0_stop  * kb_niter;
+     if (KV_max) {
+         kb0_stop_kernel  = min(kb0_stop_kernel,  KV_max[jt] / c::nbatch_fa);
++        // LOCAL FIX (ik-llama-toolkit, RESULTS 48.1): clamp the START too --
++        // a fully-masked q-tile has KV_max 0 and a stream-k slice starting
++        // beyond it got an inverted range; the pipelined prefetch then reads
++        // K and the mask from beyond the valid region and the MMA turns the
++        // garbage into NaN. Clamped, the slice runs zero iterations.
++        kb0_start_kernel = min(kb0_start_kernel, kb0_stop_kernel);
+     }
+ 
+     constexpr bool is_fixup = true; // Last index writes its data to fixup buffer to avoid data races with other blocks.
+@@ -1742,7 +1760,10 @@ static __global__ void flash_attn_stream_k_fixup(
+     }
+ 
+     // Write back final result:
+-    *dst = dst_val / rowsum;
++    // LOCAL FIX (ik-llama-toolkit, RESULTS 48.1): same zero-rowsum guard as in
++    // flash_attn_combine_results_new -- a fully-masked row yields rowsum == 0
++    // here and 0/0 must not become NaN.
++    *dst = rowsum == 0.0f ? 0.0f : dst_val / rowsum;
+ }
+ 
+ template<int D> // D == head size
+@@ -1785,7 +1806,14 @@ static __global__ void flash_attn_combine_results_new(
+         VKQ_denominator += KQ_max_scale * meta[l].y;
+     }
+ 
+-    dst[blockIdx.z*D + tid] = VKQ_numerator / VKQ_denominator;
++    // LOCAL FIX (ik-llama-toolkit, RESULTS 48.1): a fully-masked query row
++    // reaches this combine with every partial rowsum == 0 -- no KV position
++    // was attendable and the attention sink is applied only in the main
++    // kernel's finalize, never here. The division then manufactures NaN out
++    // of two zeros, which is where the DSV4 NaN-logits abort was born. The
++    // correct output for such a row is 0 (zero attendable weight on V), with
++    // or without sinks.
++    dst[blockIdx.z*D + tid] = VKQ_denominator == 0.0f ? 0.0f : VKQ_numerator / VKQ_denominator;
+ }
+ 
+ template<int width = WARP_SIZE>
