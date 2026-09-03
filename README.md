@@ -211,28 +211,48 @@ is exactly the problem any "model bigger than VRAM" setup faces, on any GPU.
 
 ## The default model
 
-**DeepSeek-V4-Flash**, MXFP4, served by the `deepseek-v4-flash-gpu-experts-128k`
-profile — 131072 context, **~1850 tok/s prefill at 32k**, ~20 tok/s generation.
-The experts that do not fit in VRAM are computed *on the GPU* rather than on the
-CPU, which is worth roughly 3x prefill (RESULTS §21–§24). What that
-profile does and why is in [docs/RESULTS.md §11](docs/RESULTS.md); the short
-version is that the KV cache lives in system RAM so the VRAM it would occupy
-goes to expert weights instead.
+**Qwen3.8-Flash-Next**, `Q8_0`, served by the `qwen38-flash-next-q8-128k`
+profile — 131072 context, **2303 tok/s prefill**, 40.6 t/s generation
+(RESULTS §51). A hybrid SSM/attention MoE: 176.9 B parameters, 512 experts with
+10 used per token, and a KV cache on only every fourth of its 48 layers, which
+is why 131072 costs 2 224 MiB of cache instead of the ~12 GiB the shape suggests.
 
-> **Known issue — do not raise `IK_UBATCH` above 1024.** The server intermittently
-> aborts with all-`nan` logits (`Failed to sample token`) under sustained use.
-> Six occurrences, every one at `-ub 2048`; none across 1.07 M prefilled tokens of
-> the same interactive workload at 512 or 1024. The profile therefore ships
-> `-ub 1024`. That cost 3–5 % of prefill when it was chosen; since the GPU moved to
-> a full PCIe 5.0 x16 link it no longer does — `-ub 1024` now measures 486 tok/s at
-> 32k, above what `-ub 2048` managed before (§20). The abort follows prefilled *volume*
-> (roughly one per 100–330 k tokens), not uptime, so a short test proves nothing.
-> Cause unknown; the investigation is [RESULTS §19](docs/RESULTS.md) and the open
-> threads are TODO item 9.
+`./serve.sh` with no arguments starts it; the profile is `IK_PROFILE` in
+[`config/default.env`](config/default.env).
 
-Four sibling profiles cover the other trade-offs — 256k and 512k context, and
-MTP variants that swap prefill for generation. See the wrapper list under
-[Usage](#usage).
+> **This default is not soaked.** It became the default on 2026-09-03 because it
+> is what this box serves, but it has a handful of benchmark runs behind it,
+> validated to N_KV 75 776 of 131072 — against weeks of real traffic and a
+> nine-day NaN-abort hunt behind the profile it replaced. Treat early production
+> use as the soak.
+
+**Three sibling profiles** cover the other trade-offs:
+
+| profile | prefill | generation | when |
+|---|---:|---:|---|
+| `qwen38-flash-next-q4km-128k` | 3486 | **128.9** | when 4-bit quality is acceptable — 3.2× the generation |
+| `qwen38-flash-next-q4km-256k` | 3342 | 128.6 | same, with the full 262144 window |
+| `qwen38-flash-next-q8-256k` | 2163 | 36.9 | Q8 quality at 262144, −6 % pp / −9 % tg |
+
+### The previous default: DeepSeek-V4-Flash
+
+Still shipped, still the subject of §19–§49, now behind an explicit
+`./serve.sh deepseek-v4-flash-gpu-experts-128k` — MXFP4 at 131072, **~1850 tok/s
+prefill at 32k**, ~20 tok/s generation. Its experts that do not fit in VRAM are
+computed *on the GPU* rather than on the CPU, worth roughly 3× prefill
+(RESULTS §21–§24).
+
+That profile carried a "do not raise `IK_UBATCH` above 1024" warning here for
+weeks, because of an intermittent all-`nan` logits abort. **That is resolved.**
+The cause was a malformed SWA mask — the window view was anchored on the padded
+KV length rather than on `kv_head`, so leading rows could arrive entirely `-inf`
+and flash-attention turned them into NaN (RESULTS §49.2, reported upstream as
+[ik_llama.cpp#2344](https://github.com/ikawrakow/ik_llama.cpp/issues/2344)). With
+the one-line clamp the profile has run **3 046 843 prefilled tokens with zero
+aborts** where 12.3 were expected, and it now ships `-ub 8192`.
+
+Four further DeepSeek profiles cover 256k and 512k context and MTP variants that
+swap prefill for generation. See the wrapper list under [Usage](#usage).
 
 ### The original default: Step-3.7-Flash
 
@@ -360,9 +380,13 @@ VRAM at launch. Starting with 20 GiB free instead of 95 GiB silently pushes
 ## Usage
 
 ```bash
-./serve.sh                              # default: DeepSeek fast-prefill 128k (484 pp / ~21 tg)
+./serve.sh                              # default: Qwen3.8-Flash-Next Q8_0 128k (2303 pp / 40.6 tg)
 ./serve.sh step-3.7-flash-q4            # the old default: Step-3.7-Flash Q4_K_XL, ~26 tok/s
 ./serve.sh mxfp4-tuned                  # DeepSeek-V4-Flash MXFP4, the tuned profile
+./serve-qwen38-flash-next-q8-128k.sh                      # THE DEFAULT: Qwen3.8 Q8_0, 2303 pp / 40.6 tg
+./serve-qwen38-flash-next-q4km-128k.sh                   # fastest overall: 3486 pp / 128.9 tg (4-bit)
+./serve-qwen38-flash-next-q4km-256k.sh                   # same at 262144: 3342 / 128.6
+./serve-qwen38-flash-next-q8-256k.sh                     # Q8 at 262144: 2163 / 36.9
 ./serve-deepseek-v4-flash-antirez-IQ2XXS-gpu-mtp-65k.sh   # fastest DeepSeek: all in VRAM + MTP, ~87 tok/s
 ./serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh           # lossless DeepSeek, experts in DDR5, ~21 tok/s
 ./serve-deepseek-v4-flash-mxfp4-kvram-128k.sh             # experts on the CPU: 486 tok/s pp
@@ -505,13 +529,15 @@ permanent.
 | `IK_THREADS`             | `24`            | CPU threads for generation (all cores; generation is flat past 12 — see TUNING §2) |
 | `IK_THREADS_BATCH`       | `24`            | CPU threads for prompt processing — **worth +32% prefill over 12** |
 | `IK_MODELS_ROOT`         | `$HOME/.lmstudio/models` | Where the GGUFs live. Profiles are written against this, so the toolkit runs on any machine — `IK_MODELS_ROOT=/mnt/models ./serve.sh` |
-| `IK_BATCH` / `IK_UBATCH` | `4096` / `1024` | Prefill batch sizes. **Do not raise `IK_UBATCH`** — see the known issue above |
+| `IK_BATCH` / `IK_UBATCH` | per profile | Prefill batch sizes. Bounded by the compute buffer, which scales with `-ub` × `n_kv` — raising it can stop the profile loading |
 | `IK_RTR`                 | `0`             | Repack CPU experts — faster prefill, but disables mmap |
 | `IK_SER`                 | *(unset)*       | Use fewer than 8 experts. Faster, changes output |
 
 The three placement modes (`IK_OT`, `IK_NCMOE`, `IK_FIT`) are mutually
-exclusive and checked in that order — so the default profile's `IK_NCMOE=22`
-wins over `IK_FIT=1`. **`IK_NCMOE` is context-specific**: if you lower `IK_CTX`
+exclusive and checked in that order, so a profile's pinned `IK_NCMOE` wins over a
+bare `IK_FIT=1` in the profile. An **explicit** `IK_FIT=1` in the environment
+does override it (`load_config` records what you asked for before the profile is
+sourced), and so does the automatic fallback on a GPU outside the 96 GiB class. **`IK_NCMOE` is context-specific**: if you lower `IK_CTX`
 you can lower it too (more experts fit on the GPU → faster); if you raise
 `IK_CTX` past the default you must raise it or switch to `IK_FIT=1`, or the
 server OOMs. The measured splits are tabulated in

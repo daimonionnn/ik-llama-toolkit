@@ -4,9 +4,17 @@ Every measurement taken while building and tuning this toolkit, on the
 [reference machine](../README.md#the-reference-machine). This is the evidence
 base behind the defaults; the *reasoning* is in [TUNING.md](TUNING.md).
 
-Two models are covered. **DeepSeek-V4-Flash is the primary one** — it is what
-this box serves daily and what the current default profile runs; Step-3.7-Flash
-was the toolkit's original tuning target and remains the second model.
+Three models are covered.
+
+**Qwen3.8-Flash-Next is what the default profile now runs** (since 2026-09-03,
+§51) — a hybrid SSM/attention MoE, and the newest arrival here.
+
+**DeepSeek-V4-Flash carries most of this document** (§19–§50): it was the default
+before Qwen and is the architecture class ik_llama.cpp is built for, so the long
+investigations — the NaN-abort hunt, the expert-placement sweeps, the upstream
+reports — all happened on it.
+
+**Step-3.7-Flash** was the toolkit's original tuning target and remains as §1–§5.
 
 **Model 1: DeepSeek-V4-Flash** (`deepseek4`: MLA + DeepSeek Sparse Attention) —
 the architecture class ik_llama.cpp is built for, and where all the recent
