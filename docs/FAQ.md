@@ -81,6 +81,13 @@ Two things to know:
   CPU and is much slower. Re-run `./bench.sh` and re-pick the split for your
   card's VRAM (see [BENCHMARKING.md](BENCHMARKING.md) and
   [TUNING.md §1](TUNING.md)).
+- **`IK_FIT=1` does not rescue you from the environment.** Argument assembly
+  checks `IK_OT`, then `IK_NCMOE`, and only reaches `--fit` if neither is set —
+  and a profile's `: "${IK_NCMOE:=17}"` counts as set even if you pass
+  `IK_NCMOE=` on the command line, because `:=` fills in null values too. So
+  `IK_FIT=1 ./serve.sh` silently keeps this box's split. Either start from a
+  profile that never sets `IK_NCMOE` (`deepseek-v4-flash` is the `--fit` one) or
+  edit the `IK_NCMOE` line in the profile you want.
 
 ### Can ik_llama.cpp use several GPUs in one PC, or is it only GPU+CPU?
 

@@ -12,12 +12,36 @@ pays off is DeepSeek-class MLA models** — on DeepSeek-V4-Flash MXFP4 it beats
 mainline llama.cpp by ~26% on prefill and ~19% on generation, and runs a q8_0
 KV cache that mainline segfaults on. On plain GQA MoE models such as
 Step-3.7-Flash, mainline is as fast or faster; see
-[docs/RESULTS.md §5](docs/RESULTS.md). It ships
-**tuned for one specific machine** (an RTX PRO 6000 Blackwell, 96 GiB), but
-nothing here is tied to that card: it runs on any CUDA GPU — and, through
-ik_llama.cpp, on AMD/ROCm, Vulkan and Apple Metal too — with the split re-tuned
-per machine by `./bench.sh`. Adapting it to other hardware (a different NVIDIA
-card, less VRAM, multiple GPUs) is a one-line change; see [docs/FAQ.md](docs/FAQ.md).
+[docs/RESULTS.md §5](docs/RESULTS.md).
+
+> ### ⚙️ Tuned for one card. Runs on many.
+>
+> **Every number, default and profile in this repository was measured on one
+> machine: an NVIDIA RTX PRO 6000 Blackwell (96 GiB) with 244 GiB of DDR5.**
+> Treat the shipped `-ncmoe` / `-ub` values as *that machine's answers*, not as
+> universal settings — they encode exactly how much VRAM this card has.
+>
+> **Nothing here is tied to that card.** It runs on any CUDA GPU, and through
+> ik_llama.cpp on AMD/ROCm, Vulkan and Apple Metal as well. Moving to different
+> hardware is a config change, not a code change:
+>
+> ```bash
+> ./build.sh                          # detects and compiles for your GPU
+> ./serve.sh deepseek-v4-flash        # a --fit profile: sizes itself to your VRAM
+> ./bench.sh ncmoe <profile>          # or measure the best split for your card
+> ```
+>
+> **Watch out for one sharp edge:** `IK_FIT=1 ./serve.sh` does *not* override a
+> profile that pins `IK_NCMOE` — the profile's `:=` default wins and you silently
+> get this card's split. Use a profile that leaves `IK_NCMOE` unset (such as
+> `deepseek-v4-flash`), or edit the `IK_NCMOE` line in the profile you want.
+>
+> With less VRAM you push more expert layers to the host and lose throughput,
+> not function — the whole point of the project is that the model does not have
+> to fit. See [docs/FAQ.md](docs/FAQ.md) for a different card, less VRAM or
+> multiple GPUs, and [docs/TUNING.md](docs/TUNING.md) for re-deriving the split.
+> [docs/VS-DGX-SPARK.md](docs/VS-DGX-SPARK.md) shows how much the *model*
+> changes the answer — the same tuning wins on one model and loses on another.
 
 ```bash
 ./build.sh        # compile ik_llama.cpp for this GPU (once)
@@ -83,14 +107,34 @@ Two things are worth knowing before trusting any such comparison:
   effectively lossless MXFP4 — 5.3× — so a hardware comparison drawn from that
   number is wrong by more than the hardware difference it is trying to show.
 
-Tables and sources in [docs/COMPARISON.md](docs/COMPARISON.md).
+**And the verdict flips by model.** On Qwen3.8-Flash-Next the same card wins:
+3486 tok/s prefill and **128.9 tok/s generation** at Q4_K_M, against ~1.8× and
+~2.1× less on the closest mature-software Spark reference. At Q8_0 it is a wash
+(40.6 t/s here, ~36–44 estimated there) — and no one has published FP8 of that
+model on a Spark pair at all, because FP8 measures *slower* than NVFP4 for MoE on
+that hardware.
+
+What decides it is neither the machine nor how much spills into DDR5 — Qwen at
+Q8_0 spills more than DeepSeek (95.9 GiB against 63) and still generates twice as
+fast. It is **expert geometry**: DeepSeek's 6-of-256 experts on a 4096-wide
+residual with a 2048 FFN move 6.49 B active parameters per token, against 2.36 B
+for Qwen's 10-of-512 at 2560 × 640. Decode is bandwidth-bound, so the model that
+reads fewer bytes per token wins — even at twice the bits per weight.
+
+Tables and sources for both models in [docs/VS-DGX-SPARK.md](docs/VS-DGX-SPARK.md).
 
 ---
 
 ## The reference machine
 
-These are the specs the shipped defaults are tuned for. On different hardware
-everything still works — you just re-run `./bench.sh` to re-pick the split
+These are the specs the shipped defaults are tuned for — **the whole repository
+is one machine's tuned answer**, and the `-ncmoe` / `-ub` values in every profile
+encode this card's 96 GiB rather than a general truth.
+
+On different hardware everything still works. Fewer gigabytes of VRAM means more
+expert layers on the host and less throughput, not a failure to run: the project
+exists precisely because the model is bigger than the card. Re-run `./bench.sh
+ncmoe` to re-pick the split, or start from a `--fit` profile that sizes itself
 (see [docs/FAQ.md](docs/FAQ.md) and [docs/TUNING.md](docs/TUNING.md)).
 
 | resource | reference configuration |
@@ -469,7 +513,7 @@ ik-llama-toolkit/
 ├── lib/common.sh         shared helpers: config, preflight, arg assembly
 ├── docs/
 │   ├── RESULTS.md        every measurement taken, including the negative ones
-│   ├── COMPARISON.md     this box against 2x DGX Spark and other published setups
+│   ├── VS-DGX-SPARK.md   this card vs 2x DGX Spark, DeepSeek and Qwen
 │   ├── TUNING.md         why every parameter is set the way it is
 │   ├── BENCHMARKING.md   how to measure and how to read the numbers
 │   ├── FAQ.md            platform, portability, hardware bottlenecks
@@ -485,8 +529,9 @@ ik-llama-toolkit/
 
 ## Further reading
 
-- [docs/COMPARISON.md](docs/COMPARISON.md) — how this box compares to 2× DGX
-  Spark and other published setups, and why those numbers vary fifteen-fold
+- [docs/VS-DGX-SPARK.md](docs/VS-DGX-SPARK.md) — how this box compares to 2× DGX
+  Spark on DeepSeek-V4-Flash and Qwen3.8-Flash-Next (the verdict flips between
+  them), and why published numbers vary fifteen-fold on identical hardware
 - [docs/RESULTS.md](docs/RESULTS.md) — every measurement taken for Q4 and Q8:
   the split sweeps, thread scaling, rtr/R4, PCIe, and the Q4-vs-Q8 comparison
 - [docs/FAQ.md](docs/FAQ.md) — platform & portability: other NVIDIA cards, AMD
