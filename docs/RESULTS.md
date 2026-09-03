@@ -4873,6 +4873,232 @@ compute-buffer scratch at large `-ub`, superlinearly toward earlier layers.
 The soak was down ~20:59–21:20 CEST for the bisect (94 404 tokens on the
 interrupted run, 0 aborts) and is back on the same configuration.
 
+### 49.9 His "constant" reproduces; the growth is 22 copies of one 256 MiB mask (2026-09-03)
+
+ikawrakow closed #2344 as completed (NaN resolved) with one loose end: he
+"did test 128k context with 4096 u-batch, and the compute buffer remained
+constant between `-cmoe` and `-ncmoe 38`", so the §49.8 growth "makes no
+sense at all" and could only be "some strange bug in the backend scheduler
+that somehow manifests only with your specific configuration."
+
+**Re-measured at his exact point** — same probe as §49.8, `-c 131072 -fa on
+-ctk/-ctv f16 -b 4096 -ub 4096`, KV on GPU, `-mla 3 -fidx`, sm_120. Note
+that ik_llama's `-ncmoe N` places the *last* N expert layers on the CPU
+(`llama-load-tensors.cpp` walks from `last_layer-1` downward, contrary to the
+help text), so the GPU-resident experts are always the prefix `blk.0..42-N`:
+
+| `-ncmoe` | GPU expert layers | CUDA0 compute, `--swa-compress` | without |
+|---|---|---|---|
+| `-cmoe` | 0 | 2 978.89 | 4 224.03 |
+| 42 | 1 | 2 978.89 | — |
+| **38 (his test)** | 5 | **2 978.18** | 9 536.18 |
+| 35 | 8 | 3 490.18 (+512) | 13 632.18 |
+| 28 | 15 | 5 026.18 (+2 048) | 22 336.18 |
+| 21 (ours) | 22 | 7 074.18 (+4 096) | — |
+| 19 | 24 | — | 28 992, OOM (§26) |
+
+So he is right: at `-ncmoe 38` the buffer *is* constant, on this box too —
+presumably with `--swa-compress`, since without it the same step costs
++5.3 GiB. The growth begins one step below the deepest placement his VRAM
+allows, and every increment is a clean multiple of **512 MiB** (n_ctx ×
+n_ubatch bytes), which is not what an allocator quirk looks like.
+
+**The mechanism, from `GGML_SCHED_DEBUG=1` on the `-ncmoe 21` reserve graph**
+(`scratchpad/bisect2/DBG-n21.log`): the prefill graph has 44 splits — one
+giant CUDA0 split holding layers 0–22 (all GPU-resident experts, no
+boundary), then two splits per host-resident layer. The giant split lists
+**46 inputs, 22 of which are `dsv4_csa_kq_mask (view)` at 256 MiB each** —
+two per CSA layer (the even layers 2..22), one consumed by `INDEXER_TOPK` (the
+`-fidx` indexer), one by `MASK_TOPK`. All 22 are copies of the *same* host
+tensor: `dsv4_build_raw_mask_view` (`build_deepseek4.cpp:157`) returns a fresh
+`ggml_view_2d` of the mask on every call, the scheduler hashes split inputs by
+tensor, so each per-layer view becomes its own input and its own device copy —
+and `ggml_backend_sched_split_graph` inserts every input copy **at the start
+of the split** ("so that they are allocated by ggml-alloc at the start of the
+split", `ggml-backend.cpp:1916`). With `-cmoe` each layer is its own split and
+at most one layer's pair is live; with N contiguous GPU layers the pairs stack.
+
+The arithmetic closes to the MiB. Copies live at split start = 2 × (CSA layers
+whose attention falls inside the split) × 256 MiB; the buffer is
+`max(baseline, copies − slack)` with the slack — what the baseline peak has
+that the split start does not — coming out identical at every point:
+
+| `-ncmoe` | CSA layers in split | copies | measured growth | slack |
+|---|---|---|---|---|
+| 38 | 2 | 1 024 | 0 | (below baseline) |
+| 35 | 4 | 2 048 | 512 | 1 536 |
+| 28 | 7 | 3 584 | 2 048 | 1 536 |
+| 21 | 11 | 5 632 | 4 096 | 1 536 |
+| 21 @ `-ub 8192` (§49.8) | 11 | 11 264 | 9 663 | 1 601 |
+| 28 @ `-ub 8192` | 7 | 7 168 | 5 567 | 1 601 |
+
+So the §49.8 "~356 MiB/layer rising to ~585" was the same thing seen through
+a stride of seven: 512 MiB per merged CSA layer at `-ub 8192`, every other
+layer. (This section first said "bandwidth-wise nothing changes, only the
+allocation peak does" — wrong, see §49.10: the copies are synchronous
+host-to-device transfers of the full mask span, one per view per u-batch,
+and they cost 19 % of prefill at 122k.)
+
+**What it is worth.** At `-ub 8192`, 131072, `-ncmoe 21`, the stacked copies
+are 9 663 of the 14 212 MiB — three expert layers' worth (up+gate+down are
+1 088 MiB each). One copy per split instead of one per view would let the
+`--swa-compress` placement of §49.6 run at about `-ncmoe 18` instead of 21.
+At 262144 (§49: 21 380) each copy is 1 GiB, so most of that number should be
+the same thing, though that point was not dumped and its arithmetic is not
+closed here. The obvious fix is in `dsv4_build_raw_mask_view`: return `mask`
+itself when the requested shape equals the mask's (the commented-out lines
+163–165 do exactly that), or hoist the two views out of the layer loop; the
+scheduler then sees one input per split. Tried the same evening — §49.10 —
+and the CSA mask turned out to be one of three.
+
+`-cmoe` split count = 2 + 2 × 43 = 88; `-ncmoe N` = 2 + 2N — the splits
+themselves never grow, which is why the smell test pointed the wrong way.
+
+The server (Qwen Q8, the current default) was down 19:59–20:12 CEST for the
+eleven probes and is back under the systemd unit, 83 620 / 6 996 MiB as
+shipped.
+
+### 49.10 The fix, tried: three mask families, 22 GiB → 3.5, and +19 % prefill at 122k (2026-09-03)
+
+Patched locally the same evening (`docs/external/patches/keep-mask-share.patch`,
+`src/graphs/build_deepseek4.cpp` + one struct in `src/llama-context.h`, 100
+lines, every edit under a `dsv4_share_full_mask()` guard so that
+`IK_MASK_SHARE=0` gives the old graph from the same binary). It grew from one
+edit to four because the first probe matrix showed the CSA mask was only the
+`--swa-compress` half of the story:
+
+1. `dsv4_build_raw_mask_view`, the `raw_k_read_idxs == nullptr` branch (CSA and
+   HCA masks): return `mask` itself when the view would be the whole mask.
+2. `dsv4_build_lid_top_k_shared`: same, for the `INDEXER_TOPK` view.
+3. The `mask_base1` branch — this is where **every layer's raw/SWA branch**
+   lands whenever the raw plan is empty, i.e. the reserve graph and all prefill
+   without `--swa-compress`: a full `n_ctx × n_tokens` view (1 GiB at 131072 /
+   `-ub 4096`) *and* a `ggml_cont` of it, per layer. Return the mask.
+4. The SWA window cut (`first > 0`, the §49.2 site): `first`, `nton` and the
+   mask are identical for all 43 layers of a graph, so the window is cut and
+   made contiguous **once per graph** (`lctx.dsv4.inputs.raw_mask_window`,
+   reset at the top of `build_deepseek4()`) instead of 43 times. Without this,
+   step 3 does nothing at runtime: each per-layer view of the host mask is
+   still its own split input, and the scheduler copies the view's *span* —
+   `ggml_nbytes` of a strided view is first-to-last byte, i.e. the whole mask.
+
+**Reserve-time buffers**, same probe as §49.9, 131072, KV on the GPU unless
+noted, old → patched:
+
+| placement | `-ub` | `--swa-compress` | old | patched | Δ |
+|---|---|---|---|---|---|
+| `-cmoe` | 4096 | yes | 2 978.89 | 3 298.03 | **+319** |
+| `-ncmoe 21` | 4096 | yes | 7 074.18 | **3 106.18** | −3 968 |
+| `-cmoe` | 8192 | yes | 4 549.77 | 5 188.06 | **+638** |
+| `-ncmoe 21` | 8192 | yes | 14 212.36 | **4 616.36** | −9 596 |
+| `-ncmoe 19` | 8192 | yes | 15 236 (OOM) | 4 616.36, loads | |
+| `-ncmoe 17` | 8192 | yes | — | 4 616.36, but does not load: 92 631 weights + 355 KV + 4 616 = 97 602 of 97 887 MiB, inside the CUDA context's own share | |
+| `-cmoe` | 4096 | no | 4 224.03 | 3 328.02 | −896 |
+| `-ncmoe 28` | 4096 | no | 22 336.18 | **3 519.94** | −18 816 |
+| `-cmoe` | 8192 | no | 8 768.06 (his) | **5 507.83** | −3 260 |
+| `-ncmoe 19` | 8192 | no | 57 984 (§49, OOM) | 5 380.13, weights + KV do not fit | |
+| `-ncmoe 21` | 8192 | no | — | 5 380.13, **loads and runs** (A3 below) | |
+| `-nkvo -ncmoe 19` (shipped) | 8192 | no | 7 040.03 | **4 991.80** | −2 048 |
+
+`IK_MASK_SHARE=0` reproduces 7 074.18 / 14 212.36 / 22 336.18 from the patched
+binary, so the deltas are the edits and nothing else (graph nodes 4 843 → 4 780
+with `--swa-compress`, 5 058 → 4 825 without; split counts unchanged). The two
+`+` rows are the honest cost: with `-cmoe` each layer was its own split and its
+mask copy died with it; the shared copy now lives until its last consumer, so
+`-cmoe --swa-compress` pays one CSA mask (+256/+512 MiB) plus one HCA mask
+(+63/+126). Without `--swa-compress` the same `-cmoe` gains 0.9–3.3 GiB, because
+the per-layer 1–2 GiB view-plus-cont pair of step 3 was alive even one layer at
+a time. His 8 768.06 — the number he quoted as normal — is 5 507.83 after the
+patch.
+
+**The three families, from `GGML_SCHED_DEBUG=1` on real graphs** (`-ncmoe 28`,
+no `--swa-compress`, `-ub 4096`, a 4 941-token prompt; the dumps are session
+scratch, the counts are here).
+Inputs of the big CUDA0 split, old → patched:
+
+| graph | old inputs | of which mask copies | patched | mask copies |
+|---|---|---|---|---|
+| reserve | 53 | 14 × csa 256 MiB, 16 × `KQ_mask_swa` 1 024 MiB | 25 | 1 + 1 + 1 |
+| u-batch 1 (pos 0) | 44 | 14 csa 8 MiB, 7 hca 2 MiB, 1 raw 32 MiB | 25 | 1 + 1 + 1 |
+| u-batch 2 (845 tok at 4096) | 59 | **16 raw 8 MiB**, 14 csa 2 MiB, 7 hca | 25 | 1 + 1 + 1 |
+| generation | 56 | 16 raw 151 KiB, 14 csa, 7 hca | 22 | 1 + 1 + 1 |
+
+(16 = the GPU-resident layers of `-ncmoe 28` whose attention sits in the split;
+u-batch 1 has one raw copy because upstream already returns the whole mask when
+`first ≤ 0`.) Counted over *all* 58 splits of a graph the old binary makes
+**43 raw + 42 CSA + 20 HCA = 105 mask copies** per u-batch past the first and
+per generated token (63 for the first u-batch, 85 at reserve); the patched one
+makes 3. With `-nkvo` every layer is its own split so they never stack — but
+they are all still made, every u-batch, every token.
+
+**It was bandwidth, not only allocation.** Host-to-device split inputs do not
+take the async path: `ggml_backend_cuda_cpy_tensor_async` declines any
+non-CUDA source (`ggml-cuda.cu:4341`), so the scheduler falls back to
+`ggml_backend_synchronize` + a blocking `ggml_backend_tensor_copy`
+(`ggml-backend.cpp:2148–2158`) — the stream drains, then the span is copied
+while the GPU idles. At 122k depth and `-ub 8192` one span is
+`n_kv × 8192 × 2 B ≈ 2 GB`. Same binary, `tools/depthbench.sh 8192`, 2 repeats,
+131072, patched / old:
+
+| config | depth | prefill t/s | generation t/s |
+|---|---|---|---|
+| `-nkvo -ncmoe 19` (shipped profile) | 19 807 | **1 773.0** / 1 699.5 (+4.3 %) | **19.96** / 19.41 (+2.8 %) |
+| | 121 970 | **1 618.9** / 1 360.9 (**+19.0 %**) | **19.12** / 17.27 (**+10.7 %**) |
+| `--swa-compress -ncmoe 21` (§49.6 B) | 19 807 | 1 715.5 / died | 19.17 / died |
+| | 121 970 | 1 560.1 / died | 18.32 / died |
+| KV on GPU, no `--swa-compress`, `-ncmoe 21` | 19 807 | 1 768.6 / — | 19.25 / — |
+| | 121 970 | 1 600.6 / — | 18.37 / — |
+
+The old-graph `--swa-compress` run died on the first 20k prompt with
+`CUDA error: out of memory` inside `cudaGraphLaunch`, at the fourth u-batch:
+79 575 weights + 355 KV + 14 212 buffer leave ~3 GiB on the card and the CUDA
+graph instantiation wanted more (the same placement ran the 122k prompts of
+§49.6 on 2026-08-31, so this is headroom, not a hard limit — but it is the
+headroom the patch gives back: 4 616 there). The third config could not exist
+before the patch (57 984 MiB). Against the 2026-08-31 numbers of §49.7 the
+patched `--swa-compress` row is +2.9 % / +7.4 % at 122k.
+
+The arithmetic closes on this side too, to the extent a two-point estimate
+can. Old → patched at 122k the shipped profile spends 6.02 → 5.06 s per
+8192-token u-batch, **−0.96 s**. The inventory per u-batch is 43 raw spans of
+`n_kv × 8192 × 2 B`, 42 CSA masks a quarter that wide and 20 HCA a sixteenth
+— 54.75 raw-equivalents; at the prompt's mean `n_kv` of 65.5k one is 1.07 GB,
+so ≈ 59 GB per u-batch, and a pinned host-to-device copy runs at **50.0 GB/s**
+on this box (`tools/h2d-bandwidth.cu`, 1 GiB, best of 5; pageable 18.0) — 1.18 s,
+against 0.96 measured. At 20k the same inventory is 13 GB → 0.27 s; measured
+−0.20 s (4.82 → 4.62). Generation at 122k: 57.9 → 52.3 ms per token; the 105
+copies are `KQ_MASK_PAD = 16` rows each, spans of 3.7 / 1.0 / 0.24 MB, ≈ 204 MB
+→ 4.1 ms of copy plus 105 stream drains. The remaining spread is the
+estimate's, not the effect's: the effect is depth-proportional, as an H2D
+volume that scales with `n_kv` has to be.
+
+**Correctness.** Same 13 604-token prompt (two u-batches, so the second takes
+the `first > 0` window path), 48 tokens at temperature 0, patched vs
+`IK_MASK_SHARE=0`: byte-identical completions for both the shipped profile and
+the `--swa-compress -ncmoe 21` placement. The patch changes
+which tensor the masks are read from, never their contents.
+
+**What it changes for this box.** The shipped profile keeps 2 GiB more VRAM
+free at the same speed-up, which is one expert layer: `-nkvo -ncmoe 18` fits
+(89 367 + 4 992 = 94 359 of 97 887 MiB) where 17 does not. The
+`--swa-compress` placement can go to `-ncmoe 18` as well (the 21 → 18 that
+§49.9 predicted), and a third option now exists — KV on the GPU without
+`--swa-compress`, exact attention — that is within 1 % of the shipped profile.
+None of these sweeps is done yet; TODO #17.
+
+**What remains upstream.** Step 4 still copies one strided span of the host
+mask per graph (≈ 1–2 GiB at reserve, the difference between the 3 519.94 and
+3 106.18 rows). Cutting the window on the CPU side — a `ggml_cont` pinned to the
+CPU backend, 34 MiB at `-ub 4096` / 68 at 8192 — would remove it; it needs the
+build callback to pin one named tensor, the way `kqv_merged_cont` is pinned
+for `-nkvo`, and is left for ikawrakow to decide. 262144 was not re-probed.
+
+Downtime for the two matrices, the dumps, the A/B and the identity check:
+21:40–22:46 CEST; the unit is back on the rebuilt binary, Qwen Q8, 83 620 /
+6 996 MiB as shipped (the patch is DSV4-only and Qwen never enters
+`build_deepseek4`). The comment to ikawrakow is drafted with these numbers
+(`docs/external/comment-2344-mask-share.md`) and not posted.
+
 ## 50. ds4 #791: the PR that must not be sent (2026-09-01)
 
 tedin7 independently confirmed cause 1 on RTX 3090/3080 (sm_86, driver 580.x),

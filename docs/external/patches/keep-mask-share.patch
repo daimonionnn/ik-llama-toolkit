@@ -1,0 +1,136 @@
+diff --git a/src/graphs/build_deepseek4.cpp b/src/graphs/build_deepseek4.cpp
+--- a/src/graphs/build_deepseek4.cpp
++++ b/src/graphs/build_deepseek4.cpp
+@@ -142,6 +142,26 @@
+             mask->nb[1], mask->nb[1]*n_tokens_stream, mask->nb[1]*n_tokens_stream, 0);
+ }
+ 
++// LOCAL FIX (ik-llama-toolkit), RESULTS 49.9. The CSA mask is one host-side
++// input tensor, but dsv4_build_raw_mask_view is called twice per CSA layer
++// (indexer + top-k mask) and returned a fresh view of it every time.
++// ggml_backend_sched keys its split-input copies by tensor, so every view
++// became its own n_kv x n_tokens device copy, and all input copies of a split
++// are allocated at the START of that split. With N contiguous GPU-resident
++// expert layers -- one big split -- that is 2 x N x 256 MiB at 128k / -ub 4096
++// (512 MiB at -ub 8192): the whole "compute buffer grows with -ncmoe" curve,
++// and 2 x N host-to-device transfers of the same bytes per u-batch. When the
++// caller asks for the whole mask, hand back the mask itself: one tensor, one
++// copy per split, shared by every layer. IK_MASK_SHARE=0 restores the old
++// behaviour so the two can be measured against each other with one binary.
++static bool dsv4_share_full_mask() {
++    static const bool share = [] {
++        const char * env = getenv("IK_MASK_SHARE");
++        return env == nullptr || atoi(env) != 0;
++    }();
++    return share;
++}
++
+ static ggml_tensor * dsv4_build_raw_mask_view(
+         ggml_context * ctx,
+         ggml_tensor  * mask,
+@@ -154,10 +174,14 @@
+     const int64_t n_rows_stream = GGML_PAD(n_kv, 256);
+ 
+     if (raw_k_read_idxs == nullptr) {
+-        auto base = ggml_view_2d(ctx, mask, n_kv, n_tokens, mask->nb[1], 0);
+-        if (!ggml_is_contiguous(base)) {
+-            base = ggml_cont(ctx, base);
+-            cb(base, "mask_base", il);
++        // LOCAL FIX (ik-llama-toolkit), RESULTS 49.9 -- see dsv4_share_full_mask.
++        ggml_tensor * base = mask;
++        if (!dsv4_share_full_mask() || mask->ne[0] != n_kv || mask->ne[1] != n_tokens) {
++            base = ggml_view_2d(ctx, mask, n_kv, n_tokens, mask->nb[1], 0);
++            if (!ggml_is_contiguous(base)) {
++                base = ggml_cont(ctx, base);
++                cb(base, "mask_base", il);
++            }
+         }
+         return n_stream == 1 ? base : dsv4_build_mask_stream_view(ctx, base, n_stream, n_tokens);
+         //auto base = mask->ne[0] == n_kv && mask->ne[1] == n_tokens ? mask
+@@ -168,6 +192,18 @@
+     }
+ 
+     if (n_stream <= 0 || n_tokens % n_stream != 0 || raw_k_read_idxs->ne[0] < n_rows_stream*n_stream) {
++        // LOCAL FIX (ik-llama-toolkit), RESULTS 49.9 -- see dsv4_share_full_mask.
++        // The raw/SWA branch of every layer lands here when the raw plan is
++        // empty (the reserve graph, and prefill without --swa-compress): the
++        // view is the whole n_ctx x n_tokens mask -- 1 GiB at 128k / -ub 4096
++        // -- and the cont of it a second 1 GiB, per layer. The mask input is
++        // already contiguous and its rows beyond n_tokens are the -inf padding
++        // dsv4_pad_mask_tokens would add: hand it back as it is, one device
++        // copy per split. The SWA window cut further down is shared as well.
++        if (dsv4_share_full_mask() && n_stream <= 1 && mask->ne[0] == n_kv && mask->ne[1] >= n_tokens &&
++            ggml_is_contiguous(mask)) {
++            return mask;
++        }
+         ggml_tensor * base = ggml_cont(ctx, ggml_view_2d(ctx, mask, n_kv, n_tokens, mask->nb[1], 0));
+         cb(base, "mask_base1", il);
+         return dsv4_build_mask_stream_view(ctx, base, std::max<int64_t>(1, n_stream), n_tokens);
+@@ -774,7 +810,14 @@
+         ggml_tensor * w = ggml_view_2d(ctx0, indexer_weights,
+                 indexer_weights->ne[0], indexer_weights->ne[1], indexer_weights->nb[1],
+                 s*indexer_weights->nb[3]);
+-        ggml_tensor * mask = ggml_view_2d(ctx0, indexer_mask,
++        // LOCAL FIX (ik-llama-toolkit), RESULTS 49.9 -- see dsv4_share_full_mask.
++        // With one stream this view is the whole mask, and a per-layer view is
++        // a per-layer device copy: pass the mask through unchanged so every
++        // layer's INDEXER_TOPK reads the one copy the scheduler already makes.
++        ggml_tensor * mask = dsv4_share_full_mask() && n_stream == 1 && indexer_mask->ne[1] == n_tokens &&
++                             indexer_mask->ne[2] == 1 && indexer_mask->ne[3] == 1
++            ? indexer_mask
++            : ggml_view_2d(ctx0, indexer_mask,
+                 indexer_mask->ne[0], n_tokens, indexer_mask->nb[1],
+                 s*n_tokens*indexer_mask->nb[1]);
+ 
+@@ -1158,9 +1201,21 @@
+         if (first > 0) {
+             raw_k = ggml_view_4d(ctx0, raw_k, raw_k->ne[0], raw_k->ne[1], nton, raw_k->ne[3],
+                     raw_k->nb[1], raw_k->nb[2], raw_k->nb[3], raw_k->nb[2]*first);
+-            raw_mask = ggml_view_4d(ctx0, raw_mask, nton, raw_mask->ne[1], raw_mask->ne[2], raw_mask->ne[3],
+-                    raw_mask->nb[1], raw_mask->nb[2], raw_mask->nb[3], raw_mask->nb[0]*first);
+-            raw_mask = ggml_cont(ctx0, raw_mask);
++            // LOCAL FIX (ik-llama-toolkit), RESULTS 49.9 -- see dsv4_share_full_mask.
++            // first, nton and raw_mask are the same for every layer of this graph,
++            // so the window is cut and made contiguous once and shared. Cut per
++            // layer, each view of the host-side mask is its own split input, and
++            // the scheduler copies the strided span -- the whole mask -- once per
++            // layer, at the start of the split.
++            auto & win = lctx.dsv4.inputs.raw_mask_window;
++            if (!dsv4_share_full_mask() || win.window == nullptr || win.src != raw_mask ||
++                win.first != first || win.nton != nton) {
++                ggml_tensor * cut = ggml_view_4d(ctx0, raw_mask, nton, raw_mask->ne[1], raw_mask->ne[2], raw_mask->ne[3],
++                        raw_mask->nb[1], raw_mask->nb[2], raw_mask->nb[3], raw_mask->nb[0]*first);
++                cut = ggml_cont(ctx0, cut);
++                win.src = raw_mask; win.window = cut; win.first = first; win.nton = nton;
++            }
++            raw_mask = win.window;
+         }
+     }
+ 
+@@ -1309,6 +1364,7 @@
+     dsv4_new_i32_input(ctx0, &lctx.dsv4.inputs.raw_k_write_src_idxs, (int64_t) lctx.dsv4.raw.write_src_idxs.size(), "dsv4_raw_k_write_src_idxs");
+     dsv4_new_i32_input(ctx0, &lctx.dsv4.inputs.raw_k_write_idxs, (int64_t) lctx.dsv4.raw.write_dst_idxs.size(), "dsv4_raw_k_write_idxs");
+     dsv4_new_i32_input(ctx0, &lctx.dsv4.inputs.raw_k_read_idxs, (int64_t) lctx.dsv4.raw.read_dst_idxs.size(), "dsv4_raw_k_read_idxs");
++    lctx.dsv4.inputs.raw_mask_window = {}; // LOCAL FIX 49.9: per-graph cache, never outlives ctx0
+     dsv4_build_plan_inputs(ctx0, lctx.dsv4.inputs.csa, lctx.dsv4.csa_plan, "dsv4_csa", n_tokens, true, lctx.cparams.flash_attn);
+     dsv4_build_plan_inputs(ctx0, lctx.dsv4.inputs.hca, lctx.dsv4.hca_plan, "dsv4_hca", n_tokens, true, lctx.cparams.flash_attn);
+     dsv4_build_plan_inputs(ctx0, lctx.dsv4.inputs.lid, lctx.dsv4.lid_plan, "dsv4_lid", n_tokens, false, lctx.cparams.flash_attn);
+diff --git a/src/llama-context.h b/src/llama-context.h
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -597,6 +597,15 @@ struct llama_context {
+             comp_inputs csa;
+             comp_inputs hca;
+             comp_inputs lid;
++            // LOCAL FIX (ik-llama-toolkit), RESULTS 49.9: the SWA window cut out of
++            // the raw mask is the same for every layer of a graph; built once per
++            // graph and shared (see build_deepseek4.cpp, dsv4_share_full_mask).
++            struct {
++                struct ggml_tensor * src = nullptr;
++                struct ggml_tensor * window = nullptr;
++                int first = 0;
++                int nton = 0;
++            } raw_mask_window;
+         };
+ 
+         storage cache;

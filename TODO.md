@@ -6,9 +6,52 @@ and method live in [docs/RESULTS.md](docs/RESULTS.md) §8–§16.
 
 Status as of 2026-09-03: items 1–8 are resolved (kept, not deleted, for the
 reasoning). **Item 9, the NaN-logits abort, is resolved** — root cause in
-RESULTS §49.2, upstream #2344, soaked with 3 046 843 tokens and 0 aborts — which
-also closes item 16, whose whole question was whether `-ub` caused it. Items
-10–15 are as marked in their own headings. Nothing here blocks anything shipped.
+RESULTS §49.2, upstream #2344 (closed as completed 2026-09-03), soaked with
+3 046 843 tokens and 0 aborts — which also closes item 16, whose whole
+question was whether `-ub` caused it. Items 10–15 are as marked in their own
+headings. Item 17 is new, patched locally, and is the one thing still worth sending upstream.
+Nothing here blocks anything shipped.
+
+---
+
+## 17. The compute buffer was 105 copies of three masks — patched locally, +19 % prefill at 122k, sweeps owed
+
+**Status 2026-09-03 (RESULTS §49.9–§49.10).** Mechanism found, patched, measured;
+in the clone and in `docs/external/patches/keep-mask-share.patch`, not sent
+upstream yet.
+
+On DeepSeek-V4-Flash three host-side mask inputs — the CSA mask (two views per
+CSA layer), the HCA mask, and the raw/SWA mask window (every layer) — were
+re-viewed per layer in `src/graphs/build_deepseek4.cpp`. `ggml_backend_sched`
+keys split-input copies by tensor, allocates them at the start of the split,
+and copies host→CUDA through the blocking path (`cpy_tensor_async` declines CPU
+sources) with the *span* of a strided view, i.e. the whole mask. Result: the
+buffer grew with every GPU-resident expert layer (22 336 MiB at `-ncmoe 28`
+without `--swa-compress`), and the old graph did 105 synchronous H2D mask
+copies per u-batch and per token — ~59 GB per u-batch at 122k depth. Patched:
+3 copies, 3 519.94 MiB at that point, `-nkvo -ncmoe 19` 7 040 → 4 992, and
+prefill at 122k **1 360.9 → 1 618.9 t/s (+19 %)**, generation 17.27 → 19.12.
+Outputs byte-identical at temperature 0. `IK_MASK_SHARE=0` = the old graph.
+
+**Sweeps owed** (each is one depthbench pair, ~10 min, service down):
+
+1. `-nkvo -ncmoe 18` vs the shipped 19: the 2 GiB the patch freed is one
+   expert layer (89 367 + 4 992 = 94 359 of 97 887 MiB; 17 does not fit). If it
+   wins at 20k and 122k, move `deepseek-v4-flash-gpu-experts-128k` to 18.
+2. `--swa-compress -ncmoe 18` (the 21 → 18 that §49.9 predicted; 4 616 MiB
+   buffer, 17 is ~300 MiB short at `-ub 8192`, might fit at 4096).
+3. KV on the GPU without `--swa-compress`, `-ncmoe 21` — exact attention,
+   within 1 % of the shipped profile at both depths (§49.10). Possible new
+   default if the 128k KV (5 504 MiB) is worth more than the layer it costs.
+4. 262144 with the patch: `-nkvo` was 11 136 and `--swa-compress` 21 380 (§49.6);
+   both should collapse the same way, and the 256k profile's placement may move.
+
+**Upstream.** The follow-up comment for #2344 is drafted
+(`docs/external/comment-2344-mask-share.md`) with the patch and the numbers;
+not posted. One refinement to offer with it: step 4 of the patch still copies one
+strided span of the host mask per graph (1–2 GiB at reserve); a `ggml_cont`
+of the window pinned to the CPU backend (34/68 MiB) would remove it, via the
+build callback the way `kqv_merged_cont` is pinned for `-nkvo`.
 
 ---
 
