@@ -62,7 +62,9 @@ Docker containers tend to occupy — override with `--port` if you prefer.)
 
 ## What tuning bought on this box
 
-DeepSeek-V4-Flash MXFP4 at three context sizes, all measured with
+### DeepSeek-V4-Flash MXFP4
+
+At three context sizes, all measured with
 `tools/depthbench.sh` and `tools/sweep.sh` on the same machine, same build, same
 quant — `max_tokens` 160, temperature 0, a salt unique per request so nothing is
 served from cache:
@@ -94,6 +96,41 @@ Two of those three came from looking outside this repository. The full
 measurements, including the negative results and three conclusions that were
 measured correctly and read wrongly, are in [docs/RESULTS.md](docs/RESULTS.md).
 
+### Qwen3.8-Flash-Next
+
+A hybrid SSM/attention MoE — 176.9 B parameters, 512 experts with 10 used, and
+full attention on only every fourth of its 48 layers. Measured with
+`llama-sweep-bench` (RESULTS §51), shallow figures, `-ctk/-ctv q8_0`:
+
+| profile | prefill | generation | @32k | @~76–96k |
+|---|---:|---:|---|---|
+| **Q4_K_M 131072** *(fastest)* | **3486 tok/s** | **128.9 t/s** | — | 1440 / 62.2 |
+| Q4_K_M 262144 | 3342 | 128.6 | — | 1346 / 59.7 |
+| **Q8_0 131072** *(default)* | 2303 | 40.6 | 1854 / 35.3 | 1368 / 30.8 |
+| Q8_0 262144 | 2163 | 36.9 | 1757 / 32.4 | — |
+
+**The first draft of the Q4 profile, with the settings simply carried over from
+DeepSeek (`-ncmoe 13 -ub 4096`), measured 2753 tok/s and 60.6 t/s.** Tuning it
+was worth **+27 % prefill and +113 % generation** — and almost all of the second
+number came from one knob:
+
+* **Expert residency dominates here, far more than on DeepSeek.** Sweeping
+  `-ncmoe` from 13 to 0 gains 12 % prefill but **113 % generation** (60.6 →
+  128.9 t/s). Ten of 512 experts of width 640 per token is a wide, thin,
+  scattered read — the access pattern PCIe handles worst — so every layer kept
+  resident pays far more than the 2.8 % per layer DeepSeek showed in §21.
+* **`-ub` behaves oppositely in the two quants.** On Q4 the weight split does not
+  move with `-ub`, making it a free prefill knob (take the largest that fits:
+  2048 at 128k, 1024 at 256k). On Q8 a smaller `-ub` buys one more resident
+  expert layer worth +3.5 % generation and costs **51 % of prefill** — so the
+  micro-batch wins.
+* **`-ncmoe 0` is not "all on the GPU".** It works on Q4 by luck of where the
+  tensors land; the same flag on Q8_0 asks for 126 971 MiB and dies in
+  `cudaMalloc`. Q8 needs `-ncmoe 17`.
+
+Note the quant trade this exposes: **Q4_K_M generates 3.2× faster than Q8_0** on
+the same card, because Q8 leaves ~94 GiB of experts in host RAM against ~34.
+
 ### Against a pair of DGX Sparks
 
 The popular way to run this model is 2× DGX Spark at TP=2. On **prefill this one
@@ -112,12 +149,20 @@ Two things are worth knowing before trusting any such comparison:
   effectively lossless MXFP4 — 5.3× — so a hardware comparison drawn from that
   number is wrong by more than the hardware difference it is trying to show.
 
-**And the verdict flips by model.** On Qwen3.8-Flash-Next the same card wins:
-3486 tok/s prefill and **128.9 tok/s generation** at Q4_K_M, against ~1.8× and
-~2.1× less on the closest mature-software Spark reference. At Q8_0 it is a wash
-(40.6 t/s here, ~36–44 estimated there) — and no one has published FP8 of that
-model on a Spark pair at all, because FP8 measures *slower* than NVFP4 for MoE on
-that hardware.
+**And the verdict flips by model.** Same card, same repository, opposite result:
+
+| model + quant | this card | closest Spark reference | |
+|---|---:|---:|---|
+| DeepSeek-V4-Flash MXFP4 | 1830 pp / 19.3 tg | 2× Spark: ~1400–1900 pp / 40–53 tg | **they win tg 2–4×** |
+| Qwen3.8 Q4_K_M | **3486 pp / 128.9 tg** | 1× Spark, gpt-oss-120b: 1956 / 60.6 | **we win ~1.8× / ~2.1×** |
+| Qwen3.8 Q8_0 | 2303 pp / **40.6 tg** | 2× Spark FP8: ~1000–1500 / ~36–44 *(est.)* | wash on tg, ours on pp |
+
+The Spark column is not like-for-like and cannot be — the quants differ, and for
+Qwen the only mature-software data point is a different model of the same class
+(gpt-oss-120b, which *fits* in one Spark's 128 GB). Nobody has published FP8
+Qwen3.8 on a Spark pair at all, because FP8 measures *slower* than NVFP4 for MoE
+on that hardware (52 against 66.9 tok/s on a Spark MoE). Read
+[docs/VS-DGX-SPARK.md](docs/VS-DGX-SPARK.md) before quoting any of this.
 
 What decides it is neither the machine nor how much spills into DDR5 — Qwen at
 Q8_0 spills more than DeepSeek (95.9 GiB against 63) and still generates twice as
