@@ -40,6 +40,12 @@ dim()  { printf '%s%s%s\n' "$C_DIM" "$*" "$C_OFF" >&2; }
 load_config() {
     local profile="${1:-}"
 
+    # What the ENVIRONMENT asked for, captured before any profile is sourced.
+    # A profile's `: "${IK_NCMOE:=17}"` always wins over a bare IK_FIT=1 later,
+    # because := fills null values too -- so `IK_FIT=1 ./serve.sh` would silently
+    # keep the pinned split. Remember the intent here and act on it below.
+    local env_fit="${IK_FIT:-}"
+
     local default_cfg="$TOOLKIT_ROOT/config/default.env"
     [[ -f $default_cfg ]] || die "missing config file: $default_cfg"
 
@@ -76,6 +82,14 @@ available: $(ls "$TOOLKIT_ROOT/config/models/" 2>/dev/null | sed 's/\.env$//' | 
     source "$default_cfg"
     IK_PROFILE="$profile"
     export IK_PROFILE
+
+    # Explicit IK_FIT=1 from the environment beats a profile's pinned placement.
+    # unset, not blank: build_common_args tests -n, and := would refill a null.
+    if [[ $env_fit == 1 && ( -n ${IK_NCMOE:-} || -n ${IK_OT:-} ) ]]; then
+        log "IK_FIT=1 -- ignoring the profile's pinned -ncmoe/-ot, auto-fitting"
+        unset IK_NCMOE IK_OT
+        IK_FIT=1
+    fi
 
     autofit_unless_reference_gpu
 }

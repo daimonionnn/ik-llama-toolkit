@@ -94,11 +94,14 @@ Two things to know:
     is resident.
   - `IK_ASSUME_REFERENCE_GPU=1` forces the pinned values; `IK_REFERENCE_VRAM_MIN`
     moves the threshold.
-- **Setting `IK_FIT=1` by hand still does nothing** on a profile that pins
-  `IK_NCMOE`. Argument assembly checks `IK_OT`, then `IK_NCMOE`, and only reaches
-  `--fit` if neither is set — and `: "${IK_NCMOE:=17}"` counts as set even when
-  you pass `IK_NCMOE=`, because `:=` fills in null values too. The automatic path
-  above works because it `unset`s the variable rather than blanking it.
+- **`IK_FIT=1 ./serve.sh` forces auto-fitting on any profile**, including one
+  that pins `IK_NCMOE`, and logs that it did. This needs a small trick, worth
+  knowing if you touch `load_config`: argument assembly checks `IK_OT`, then
+  `IK_NCMOE`, and only reaches `--fit` if neither is set — and a profile's
+  `: "${IK_NCMOE:=17}"` counts as set even when you pass `IK_NCMOE=` on the
+  command line, because `:=` fills in null values too. So `load_config` captures
+  `IK_FIT` from the environment *before* sourcing any profile, and afterwards
+  `unset`s the pinned variables rather than blanking them.
 
 ### Can ik_llama.cpp use several GPUs in one PC, or is it only GPU+CPU?
 
