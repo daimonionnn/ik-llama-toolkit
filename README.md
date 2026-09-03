@@ -58,6 +58,26 @@ The server exposes an OpenAI-compatible API and a web UI at
 <http://127.0.0.1:8090>. (8090 rather than the usual 8080, which LM Studio and
 Docker containers tend to occupy — override with `--port` if you prefer.)
 
+**To keep it running unattended, use systemd rather than a shell.** This box
+ships a user unit that survives logout and reboot:
+
+```bash
+systemctl --user start   ik-llama-server.service     # or stop / restart
+systemctl --user enable  ik-llama-server.service     # start at boot
+systemctl --user is-active ik-llama-server.service
+journalctl --user -u ik-llama-server.service -f
+```
+
+It deliberately pins no profile: `ExecStart` runs `serve-host-0.0.0.0.sh`, which
+honours `IK_PROFILE` from [`config/default.env`](config/default.env), so changing
+the repository default changes what the unit serves. **Note that wrapper binds
+every interface with no authentication** — set `Environment=IK_API_KEY=...` in the
+unit, or point `ExecStart` at `./serve.sh` to stay on loopback. A copy of the
+unit is in [`config/systemd/ik-llama-server.service`](config/systemd/ik-llama-server.service).
+
+Check `systemctl --user is-active` before starting a server by hand: two of them
+collide over port 8090 and over VRAM.
+
 ---
 
 ## What tuning bought on this box

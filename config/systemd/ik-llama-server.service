@@ -1,0 +1,43 @@
+[Unit]
+# Replaces deepseek-server.service (multi-gpu-llm-toolkit on 8099), which was
+# disabled 2026-08-20 -- not deleted, so `systemctl --user enable --now
+# deepseek-server` puts the old one back. The two cannot both run: each wants
+# ~95 GB of a 96 GB card.
+Description=ik-llama-toolkit: serves config/default.env's profile on port 8090
+# The profile is NOT pinned here on purpose: ExecStart runs serve.sh, which
+# honours IK_PROFILE in config/default.env, so changing the default in the
+# repository changes what this unit serves without touching this file.
+#   2026-08-20 .. 09-03  deepseek-v4-flash-gpu-experts-128k
+#   2026-09-03 ..        qwen38-flash-next-q8-128k  (2303 pp / 40.6 tg, RESULTS 51)
+# To pin one regardless of the repository default, add:
+#   Environment=IK_PROFILE=qwen38-flash-next-q8-128k
+After=network-online.target
+
+[Service]
+Type=simple
+
+# serve.sh binds 127.0.0.1 only. To serve the LAN or a tailnet, add
+#   Environment=IK_HOST=0.0.0.0
+# and set an API key at the same time, because IK_API_KEY is empty by default
+# and there is otherwise no authentication at all:
+#   Environment=IK_API_KEY=something-long
+# Clients then need `Authorization: Bearer something-long`.
+# Absolute path required by systemd -- change it to wherever you cloned this.
+ExecStart=/home/matt/development/ik-llama-toolkit/serve.sh
+
+# Frees VRAM held by a GPU-resident LM Studio or Ollama model before loading.
+Environment=IK_KILL_SQUATTERS=1
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+Restart=on-failure
+RestartSec=15
+# 175 GiB off disk on a cold page cache is slow; do not call it hung.
+TimeoutStartSec=900
+# The server runs under gdb (IK_GDB=1) so a NaN abort leaves a backtrace. gdb
+# passes SIGTERM straight through, so a normal stop is still a clean shutdown
+# rather than a killed inferior -- verified 2026-08-20, RESULTS §33.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target
