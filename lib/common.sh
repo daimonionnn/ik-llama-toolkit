@@ -76,6 +76,73 @@ available: $(ls "$TOOLKIT_ROOT/config/models/" 2>/dev/null | sed 's/\.env$//' | 
     source "$default_cfg"
     IK_PROFILE="$profile"
     export IK_PROFILE
+
+    autofit_unless_reference_gpu
+}
+
+# ---------------------------------------------------------------------------
+# Expert placement on hardware this repository was not tuned on
+# ---------------------------------------------------------------------------
+# Every profile here pins -ncmoe (or -ot) against ONE card: an RTX PRO 6000
+# Blackwell with 96 GiB. Those numbers are the floor of what fits on that card,
+# so on anything smaller they do not merely run slowly -- they fail in
+# cudaMalloc at load, usually while allocating the KV cache, which reads as a
+# broken toolkit rather than as a wrong setting.
+#
+# So: if the GPU is not in that VRAM class, drop the pinned placement and let
+# --fit size itself. Three deliberate choices in how that is decided.
+#
+#   1. BY TOTAL VRAM, NOT BY GPU NAME. What the pinned numbers encode is a
+#      memory budget, not a marketing string. Name matching would also have to
+#      chase Workstation / Max-Q / Server variants, and would wrongly reject a
+#      different 96 GiB card for which our values are in fact about right.
+#
+#   2. BY *TOTAL*, NOT *FREE*. Free VRAM moves: on 2026-09-01 an idle ComfyUI
+#      held 33 GiB of this very card, and on 2026-09-03 it silently caused a
+#      benchmark to fail. Deciding placement on free memory would mean the
+#      reference machine quietly stops using its own tuned values whenever
+#      something else is resident -- i.e. benchmark numbers that cannot be
+#      reproduced. memory.total does not move.
+#
+#   3. LOUDLY. A silent fallback is how someone ends up reporting our numbers
+#      from an untuned --fit run, or the reverse.
+#
+# Escape hatches: IK_ASSUME_REFERENCE_GPU=1 forces the pinned values (use when
+# the query is unavailable but you know the card), IK_REFERENCE_VRAM_MIN moves
+# the threshold.
+
+autofit_unless_reference_gpu() {
+    # Nothing pinned -> the profile already sizes itself; nothing to protect.
+    [[ -n ${IK_NCMOE:-} || -n ${IK_OT:-} ]] || return 0
+
+    # Caller asserts this is the reference card (or accepts the consequences).
+    [[ ${IK_ASSUME_REFERENCE_GPU:-0} == 1 ]] && return 0
+
+    local min="${IK_REFERENCE_VRAM_MIN:-90000}"
+    local total; total="$(gpu_total_mib)"
+
+    if [[ -z $total ]]; then
+        # No nvidia-smi: a ROCm/Vulkan/Metal build, or a broken driver. Either
+        # way we cannot know the budget, and guessing this card's is the more
+        # expensive mistake.
+        warn "cannot query GPU memory -- assuming this is NOT the reference card"
+        warn "dropping the profile's pinned -ncmoe/-ot in favour of --fit"
+        warn "pass IK_ASSUME_REFERENCE_GPU=1 if you do have 96 GiB"
+        unset IK_NCMOE IK_OT
+        IK_FIT=1
+        return 0
+    fi
+
+    (( total >= min )) && return 0
+
+    warn "this GPU has ${total} MiB of VRAM; the profiles here are tuned for"
+    warn "an RTX PRO 6000 Blackwell (96 GiB, ~97887 MiB)."
+    warn "ignoring the profile's -ncmoe/-ot and auto-fitting the split instead."
+    warn "this WILL run, but it is not tuned -- measure yours with:"
+    warn "    ./bench.sh ncmoe ${IK_PROFILE:-<profile>}"
+    warn "(IK_ASSUME_REFERENCE_GPU=1 keeps the pinned values.)"
+    unset IK_NCMOE IK_OT
+    IK_FIT=1
 }
 
 list_profiles() {

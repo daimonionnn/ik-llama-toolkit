@@ -26,15 +26,20 @@ Step-3.7-Flash, mainline is as fast or faster; see
 > hardware is a config change, not a code change:
 >
 > ```bash
-> ./build.sh                          # detects and compiles for your GPU
-> ./serve.sh deepseek-v4-flash        # a --fit profile: sizes itself to your VRAM
-> ./bench.sh ncmoe <profile>          # or measure the best split for your card
+> ./build.sh                 # detects and compiles for your GPU
+> ./serve.sh                 # on a smaller card it auto-fits, and says so
+> ./bench.sh ncmoe <profile> # then measure the best split for your card
 > ```
 >
-> **Watch out for one sharp edge:** `IK_FIT=1 ./serve.sh` does *not* override a
-> profile that pins `IK_NCMOE` — the profile's `:=` default wins and you silently
-> get this card's split. Use a profile that leaves `IK_NCMOE` unset (such as
-> `deepseek-v4-flash`), or edit the `IK_NCMOE` line in the profile you want.
+> **You do not have to do anything for this.** If the GPU is not in the 96 GiB
+> class, the toolkit drops the profile's pinned `-ncmoe` / `-ot`, falls back to
+> `--fit`, and prints a warning telling you so. It decides on *total* VRAM, never
+> on free VRAM — otherwise another process holding memory would silently change
+> the split and make results irreproducible. `IK_ASSUME_REFERENCE_GPU=1` keeps
+> the pinned values; `IK_REFERENCE_VRAM_MIN` moves the threshold.
+>
+> Auto-fit gets you *running*, not *fast*. `./bench.sh ncmoe` is still what finds
+> your card's real floor.
 >
 > With less VRAM you push more expert layers to the host and lose throughput,
 > not function — the whole point of the project is that the model does not have
