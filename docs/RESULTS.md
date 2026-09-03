@@ -4958,7 +4958,7 @@ The server (Qwen Q8, the current default) was down 19:59–20:12 CEST for the
 eleven probes and is back under the systemd unit, 83 620 / 6 996 MiB as
 shipped.
 
-### 49.10 The fix, tried: three mask families, 22 GiB → 3.5, and +19 % prefill at 122k (2026-09-03)
+### 49.10 The fix, tried: three mask families, 22 GiB → 3.5, and +24 % prefill at 122k (2026-09-03)
 
 Patched locally the same evening (`docs/external/patches/keep-mask-share.patch`,
 `src/graphs/build_deepseek4.cpp` + one struct in `src/llama-context.h`, 100
@@ -5038,7 +5038,8 @@ non-CUDA source (`ggml-cuda.cu:4341`), so the scheduler falls back to
 (`ggml-backend.cpp:2148–2158`) — the stream drains, then the span is copied
 while the GPU idles. At 122k depth and `-ub 8192` one span is
 `n_kv × 8192 × 2 B ≈ 2 GB`. Same binary, `tools/depthbench.sh 8192`, 2 repeats,
-131072, patched / old:
+131072, patched / old (this run with the GPU capped at 400 W, which came out
+afterwards — the 600 W re-run is below):
 
 | config | depth | prefill t/s | generation t/s |
 |---|---|---|---|
@@ -5072,6 +5073,54 @@ copies are `KQ_MASK_PAD = 16` rows each, spans of 3.7 / 1.0 / 0.24 MB, ≈ 204 M
 estimate's, not the effect's: the effect is depth-proportional, as an H2D
 volume that scales with `n_kv` has to be.
 
+**Re-measured at the card's real power limit.** The A/B above ran with the
+GPU capped at 400 W. The RTX PRO 6000's default and maximum are 600 W; the
+cap is managed by LACT (`/etc/lact/config.yaml`), and LACT's config saves are
+in the journal: the 400 W setting dates from **2026-09-01 16:13**, the change
+before that is 2026-08-20 19:31, and the value in between is not on record —
+Matt recalls it as probably 500 W. (The same config carries a memory-clock
+offset, `clocks.mem` 15 368 MHz, in place since August — common to every
+number in this section and the August baselines.) Same script, same binary,
+23:25–23:42 CEST at 600 W, `nvidia-smi` sampling `power.draw` and the SM
+clock once a second alongside; patched / old (the old-graph `--swa-compress`
+row is not repeated — it dies of VRAM, not of power):
+
+| config | depth | prefill t/s | generation t/s |
+|---|---|---|---|
+| `-nkvo -ncmoe 19` (shipped profile) | 19 807 | **1 852.2** / 1 766.5 (+4.9 %) | **19.95** / 19.38 (+2.9 %) |
+| | 121 970 | **1 710.6** / 1 382.1 (**+23.8 %**) | **18.99** / 17.25 (**+10.1 %**) |
+| `--swa-compress -ncmoe 21` (§49.6 B) | 19 807 | 1 788.2 / — | 19.06 / — |
+| | 121 970 | 1 641.8 / — | 18.36 / — |
+| KV on GPU, no `--swa-compress`, `-ncmoe 21` | 19 807 | 1 852.9 / — | 19.25 / — |
+| | 121 970 | 1 695.0 / — | 18.32 / — |
+
+What the cap had been doing, from the samples aligned with the server's
+per-request timings: generation draws 160–200 W in every configuration,
+nowhere near either limit, and its numbers did not move (19.96 → 19.95,
+19.12 → 18.99 — noise). Prefill peaks at 450–572 W and spends 22–44 % of its
+seconds above 400 W, so the cap clipped it — but unequally. The patched graph
+averages 400–405 W over a 122k prefill and gained +5.7 % from the higher
+limit (1 618.9 → 1 710.6); the old graph averages 353–357 W, because the GPU
+idles through the blocking copies, and gained +1.6 % (1 360.9 → 1 382.1).
+That is the bandwidth finding from the other side: the old graph's 122k
+prefill is not power-bound. The A/B gap widens accordingly, +19.0 → +23.8 %,
+and the arithmetic closes tighter: 5.93 → 4.79 s per 8192-token u-batch at
+122k, **−1.14 s** against the 1.18 s the 59 GB estimate gives at 50.0 GB/s
+(400 W: −0.96); at 20k 4.65 → 4.42, −0.23 against 0.27. The 600 W numbers are
+the ones the comment carries.
+
+For the earlier sections: everything measured between 2026-08-20 19:31 and
+2026-09-01 16:13 — the 08-21 → 08-23 depthbenches, §49.6–§49.7 of 08-31 —
+ran at the pre-September setting (probably 500 W); only 09-01 → 09-03 ran at
+400 W, and that is the buffer probes of §49.8–§49.9, which do not depend on
+power, plus the first A/B above. The shipped profile's 08-19 → 08-23
+depthbenches (old graph, 7 040 MiB buffer) sit at 1 310–1 352 t/s prefill and
+16.8–17.3 t/s generation at 128k, i.e. the cap-insensitive old-graph number
+either way, so those prefill figures carry at most a few percent of
+cap-dependence and the generation figures none. Samples:
+`results/power-600w-20260903.csv`; the alignment: `tools/power-align.py <csv>
+logs/server-20260903-23{2515,2936,3346,3831}.log`.
+
 **Correctness.** Same 13 604-token prompt (two u-batches, so the second takes
 the `first > 0` window path), 48 tokens at temperature 0, patched vs
 `IK_MASK_SHARE=0`: byte-identical completions for both the shipped profile and
@@ -5083,8 +5132,9 @@ free at the same speed-up, which is one expert layer: `-nkvo -ncmoe 18` fits
 (89 367 + 4 992 = 94 359 of 97 887 MiB) where 17 does not. The
 `--swa-compress` placement can go to `-ncmoe 18` as well (the 21 → 18 that
 §49.9 predicted), and a third option now exists — KV on the GPU without
-`--swa-compress`, exact attention — that is within 1 % of the shipped profile.
-None of these sweeps is done yet; TODO #17.
+`--swa-compress`, exact attention — within 1 % of the shipped profile on
+prefill and 3–4 % behind on generation. None of these sweeps is done yet;
+TODO #17.
 
 **What remains upstream.** Step 4 still copies one strided span of the host
 mask per graph (≈ 1–2 GiB at reserve, the difference between the 3 519.94 and
@@ -5094,10 +5144,11 @@ build callback to pin one named tensor, the way `kqv_merged_cont` is pinned
 for `-nkvo`, and is left for ikawrakow to decide. 262144 was not re-probed.
 
 Downtime for the two matrices, the dumps, the A/B and the identity check:
-21:40–22:46 CEST; the unit is back on the rebuilt binary, Qwen Q8, 83 620 /
-6 996 MiB as shipped (the patch is DSV4-only and Qwen never enters
-`build_deepseek4`). The comment to ikawrakow is drafted with these numbers
-(`docs/external/comment-2344-mask-share.md`) and not posted.
+21:40–22:46 CEST, and 23:25–23:44 for the 600 W re-run; the unit is back on
+the rebuilt binary, Qwen Q8, 83 620 / 6 996 MiB as shipped (the patch is
+DSV4-only and Qwen never enters `build_deepseek4`). The comment to ikawrakow
+is drafted with the 600 W numbers (`docs/external/comment-2344-mask-share.md`)
+and not posted.
 
 ## 50. ds4 #791: the PR that must not be sent (2026-09-01)
 

@@ -14,7 +14,7 @@ Nothing here blocks anything shipped.
 
 ---
 
-## 17. The compute buffer was 105 copies of three masks — patched locally, +19 % prefill at 122k, sweeps owed
+## 17. The compute buffer was 105 copies of three masks — patched locally, +24 % prefill at 122k, sweeps owed
 
 **Status 2026-09-03 (RESULTS §49.9–§49.10).** Mechanism found, patched, measured;
 in the clone and in `docs/external/patches/keep-mask-share.patch`, not sent
@@ -30,7 +30,9 @@ buffer grew with every GPU-resident expert layer (22 336 MiB at `-ncmoe 28`
 without `--swa-compress`), and the old graph did 105 synchronous H2D mask
 copies per u-batch and per token — ~59 GB per u-batch at 122k depth. Patched:
 3 copies, 3 519.94 MiB at that point, `-nkvo -ncmoe 19` 7 040 → 4 992, and
-prefill at 122k **1 360.9 → 1 618.9 t/s (+19 %)**, generation 17.27 → 19.12.
+prefill at 122k **1 382.1 → 1 710.6 t/s (+24 %)**, generation 17.25 → 18.99
+(600 W; the first A/B ran under a 400 W cap nobody remembered and gave +19 % —
+the old graph idles through its copies and barely feels the cap, §49.10).
 Outputs byte-identical at temperature 0. `IK_MASK_SHARE=0` = the old graph.
 
 **Sweeps owed** (each is one depthbench pair, ~10 min, service down):
@@ -41,8 +43,9 @@ Outputs byte-identical at temperature 0. `IK_MASK_SHARE=0` = the old graph.
 2. `--swa-compress -ncmoe 18` (the 21 → 18 that §49.9 predicted; 4 616 MiB
    buffer, 17 is ~300 MiB short at `-ub 8192`, might fit at 4096).
 3. KV on the GPU without `--swa-compress`, `-ncmoe 21` — exact attention,
-   within 1 % of the shipped profile at both depths (§49.10). Possible new
-   default if the 128k KV (5 504 MiB) is worth more than the layer it costs.
+   within 1 % of the shipped profile on prefill, 3–4 % behind on generation
+   (§49.10). Possible new default if the 128k KV (5 504 MiB) is worth more
+   than the layer it costs.
 4. 262144 with the patch: `-nkvo` was 11 136 and `--swa-compress` 21 380 (§49.6);
    both should collapse the same way, and the 256k profile's placement may move.
 
