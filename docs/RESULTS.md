@@ -4902,3 +4902,131 @@ What #791 still owes upstream, re-verified on `ab06d19` stock:
   the image cache against session + graph-runtime headroom.
 
 No PR. Comment drafted for #791 with the table above and the OOM repro lines.
+
+## 51. Qwen3.8-Flash-Next: four profiles, and expert residency matters 2x more than on DeepSeek (2026-09-03)
+
+New profiles for `Qwen3.8-Flash-Next` in both quants the box has locally, at
+both 131072 and 262144:
+
+| profile | `-ncmoe` | `-ub` | CUDA0 weights | host | pp t/s | tg t/s |
+|---|---|---|---|---|---|---|
+| `qwen38-flash-next-q4km-128k` | 0 | 2048 | 79 710 | 33 910 | **3486.3** | **128.9** |
+| `qwen38-flash-next-q4km-256k` | 0 | 1024 | 79 710 | 33 910 | 3341.7 | 128.6 |
+| `qwen38-flash-next-q8-128k` | 17 | 2048 | 83 620 | 95 874 | 2302.7 | 40.6 |
+| `qwen38-flash-next-q8-256k` | 20 | 2048 | 75 970 | 103 524 | 2162.7 | 36.9 |
+
+Figures are `llama-sweep-bench` at shallow depth (N_KV 0-2048), `-ctk/-ctv
+q8_0`, `-t 8 -tb 24 -thp`, on the RTX PRO 6000 with the card otherwise free.
+
+### 51.1 The architecture, and why it behaves unlike DeepSeek
+
+`qwen4exp`: 176.944 B params ("512x56B"), 48 layers, **512 routed experts with
+10 used** and an expert FFN of only 640, `n_embd` 2560, GQA 24:2 at head dim
+256, a sparse attention indexer (`top_k` 2048), hyper-connections (count 4,
+low-rank 320), and -- the important one --
+**`full_attention_interval = 4`**: only every fourth layer keeps a KV cache,
+the other 36 are SSM/linear (`ssm_state` 128, `ssm_inner` 6144, conv kernel 4).
+
+Two consequences run through everything below. The KV cache is tiny for the
+context it buys: 2 224 MiB at 131072 and 4 337 at 262144 with q8_0, where a
+dense model of this shape would want ~12 and ~24 GiB. And the compute buffer,
+not the cache, is what competes with weights for VRAM -- it scales with
+`-ub` TIMES `n_kv`, cleanly enough that (ub 2048, 128k) and (ub 1024, 256k)
+land within 1 % of each other (9 044 against 8 938 MiB).
+
+Flags that do NOT apply here, all inherited habits from the DeepSeek profiles:
+`-mla` (deepseek2/4 only), `--swa-compress` (`n_swa = 0`). `-fidx` does apply --
+`build_qwen4exp.cpp` reads `cparams.fused_idx_topk` for the sparse indexer --
+but it is on by default with no CLI off-switch, so it appears in no flag list.
+
+### 51.2 Expert placement: a 2.1x swing in generation
+
+Q4_K_M at 131072, `-ub 4096`, sweeping `-ncmoe` down:
+
+| `-ncmoe` | CUDA0 | host | pp t/s | tg t/s |
+|---|---|---|---|---|
+| 13 | 58 160 | 55 460 | 2752.8 | 60.6 |
+| 9 | 64 560 | 49 060 | 2866.0 | 68.3 |
+| 5 | 70 960 | 42 660 | 2998.5 | 84.0 |
+| 3 | 74 460 | 39 160 | 3063.3 | 94.1 |
+| 0 | 79 710 | 33 910 | 3083.1 | **128.9** |
+
+Prefill gains 12 % across that whole range; **generation gains 113 %**. On
+DeepSeek (§21) each host expert layer cost 1.9 % prefill and 2.8 % generation --
+here the generation sensitivity is several times higher, and the reason is the
+routing shape: 10 of 512 experts of width 640 per token is a wide, thin,
+scattered read, which is the access pattern PCIe handles worst. Whatever else
+is tuned on this model, resident experts come first.
+
+`-ncmoe 0` and `--fit --fit-margin 2048` produce byte-identical placement on
+this file (79 710 CUDA0 / 33 910 CPU), and the split does not move when `-ub`
+shrinks and frees VRAM -- so ~5 GiB of card sits unused and no flag in the
+profile reclaims it. `-ot` would be the lever if it ever matters.
+
+### 51.3 `-ncmoe 0` is not "all on the GPU", and Q8_0 proves it
+
+The Q4 result invites the reading that `-ncmoe 0` means full residency. It does
+not: the same flag on the Q8_0 file (175.288 GiB) asks for **126 971 MiB** on
+the card and dies in `cudaMalloc` before the KV cache is reached. `-ncmoe 13`
+gets as far as 93 820 MiB of weights and then dies allocating the 2 224 MiB KV.
+The floor at `-ub 2048` is **17**.
+
+So 79 710 is where the Q4 file's tensors happen to land under `-ncmoe 0`, not a
+ceiling the loader enforces. Worth stating plainly because the first reading of
+the Q4 numbers was exactly that, and it was wrong.
+
+### 51.4 The `-ub` trade inverts between the two quants
+
+Q8_0 at 131072:
+
+| `-ncmoe` | `-ub` | compute buffer | pp t/s | tg t/s |
+|---|---|---|---|---|
+| 16 | 1024 | 3 498 | 1124.7 | 42.0 |
+| 17 | 2048 | 6 996 | **2302.7** | 40.6 |
+
+Dropping to `-ub 1024` buys one more resident expert layer, worth +3.5 %
+generation, and costs **51 % of prefill**. On Q4 the weight split does not move
+with `-ub` at all, so `-ub` is a free prefill knob there and the largest that
+fits wins (2048 at 128k, 1024 at 256k -- 4096 overflows by ~2.6 GiB). On Q8 the
+knobs are coupled and the micro-batch still wins, because with ~94 GiB on the
+host one layer cannot move generation while the batch size moves prefill 2:1.
+
+### 51.5 What the two quants cost each other
+
+At 131072, both at `-ub 2048` so the comparison is clean:
+
+| quant | `-ncmoe` | pp t/s | tg t/s |
+|---|---|---|---|
+| Q4_K_M | 0 | 3486.3 | 128.9 |
+| Q8_0 | 17 | 2302.7 | 40.6 |
+
+A 34 % prefill penalty and a **3.2x generation penalty** for Q8_0. The whole gap
+is host traffic -- ~34 GiB of experts streaming per token against ~94.
+
+Context is nearly free on Q4 (256k costs 4 % prefill, 0.2 % generation) and
+genuinely expensive on Q8 (6.1 % and 9.1 %), because Q8_0 is already ~10 GiB
+past what the card holds, so every byte the context takes comes out of resident
+weights.
+
+**How deep these were actually validated.** Every run was stopped by a wall-clock
+timeout, not by filling the context, so none of the four reached its configured
+`-c`. Deepest clean row per profile, no OOM and no error in any of them:
+
+| profile | deepest N_KV reached | of `-c` |
+|---|---|---|
+| q4km-128k | 96 256 | 131072 |
+| q4km-256k | 103 424 | 262144 |
+| q8-128k | 75 776 | 131072 |
+| q8-256k | 53 248 | 262144 |
+
+That matters because §21 records a configuration on this box that loaded, served
+a shallow prompt and then died deep. These four are proven well past the depth
+where that failure appeared, but "proven to the ceiling" they are not.
+
+Two operational notes. `-thp` does not take on this model -- the log carries
+`mmap with huge page size 2 MiB failed (Cannot allocate memory)` -- so the huge
+page win measured for DeepSeek does not transfer, and whether raising
+`vm.nr_hugepages` would help is unmeasured. And one probe in this series failed
+spuriously (`cudaMalloc` OOM at 75 970 MiB with 96 GiB nominally free) because a
+previous sweep-bench had not exited; the numbers above were all re-taken on a
+verified-idle card.
