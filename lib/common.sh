@@ -41,10 +41,14 @@ load_config() {
     local profile="${1:-}"
 
     # What the ENVIRONMENT asked for, captured before any profile is sourced.
-    # A profile's `: "${IK_NCMOE:=17}"` always wins over a bare IK_FIT=1 later,
-    # because := fills null values too -- so `IK_FIT=1 ./serve.sh` would silently
-    # keep the pinned split. Remember the intent here and act on it below.
+    # After sourcing there is no way to tell a profile's `: "${IK_NCMOE:=17}"`
+    # from a user's `--ncmoe 25`, and the two must not be treated alike: the
+    # first is a default we may override, the second is an instruction we may
+    # not. (:= also fills null values, so `IK_NCMOE= IK_FIT=1` cannot express
+    # the difference either.) Record the intent here and act on it below.
     local env_fit="${IK_FIT:-}"
+    local env_placement=""
+    [[ -n ${IK_NCMOE:-} || -n ${IK_OT:-} ]] && env_placement=1
 
     local default_cfg="$TOOLKIT_ROOT/config/default.env"
     [[ -f $default_cfg ]] || die "missing config file: $default_cfg"
@@ -91,7 +95,10 @@ available: $(ls "$TOOLKIT_ROOT/config/models/" 2>/dev/null | sed 's/\.env$//' | 
         IK_FIT=1
     fi
 
-    autofit_unless_reference_gpu
+    # A placement the USER gave (--ncmoe, -ot, IK_NCMOE=... in the environment)
+    # is never second-guessed by the VRAM check below -- that is how someone
+    # tunes a card this repository knows nothing about.
+    [[ $env_placement == 1 ]] || autofit_unless_reference_gpu
 }
 
 # ---------------------------------------------------------------------------
@@ -151,7 +158,8 @@ autofit_unless_reference_gpu() {
 
     warn "this GPU has ${total} MiB of VRAM; the profiles here are tuned for"
     warn "an RTX PRO 6000 Blackwell (96 GiB, ~97887 MiB)."
-    warn "ignoring the profile's -ncmoe/-ot and auto-fitting the split instead."
+    warn "ignoring the profile's pinned split and auto-fitting instead"
+    warn "(an explicit --ncmoe / -ot of your own is always respected)."
     warn "this WILL run, but it is not tuned -- measure yours with:"
     warn "    ./bench.sh ncmoe ${IK_PROFILE:-<profile>}"
     warn "(IK_ASSUME_REFERENCE_GPU=1 keeps the pinned values.)"
