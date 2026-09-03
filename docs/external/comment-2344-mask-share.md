@@ -2,8 +2,11 @@
 
 *Drafted 2026-09-03 after the issue was closed, shortened and re-based on the
 600 W numbers 2026-09-04 (RESULTS §49.9–§49.10). The patch it refers to is
-`patches/mask-share-upstream.patch`; links point at `blob/main`. The body below
-the rule is what gets posted; the long first draft is in git history.*
+`patches/mask-share-upstream.patch`; links point at `blob/main`. Posted
+2026-09-04 as
+<https://github.com/ikawrakow/ik_llama.cpp/issues/2344#issuecomment-5532719298>;
+the body below the rule is what was posted, the long first draft is in git
+history.*
 
 ---
 

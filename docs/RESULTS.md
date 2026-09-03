@@ -5147,8 +5147,9 @@ Downtime for the two matrices, the dumps, the A/B and the identity check:
 21:40–22:46 CEST, and 23:25–23:44 for the 600 W re-run; the unit is back on
 the rebuilt binary, Qwen Q8, 83 620 / 6 996 MiB as shipped (the patch is
 DSV4-only and Qwen never enters `build_deepseek4`). The comment to ikawrakow
-is drafted with the 600 W numbers (`docs/external/comment-2344-mask-share.md`)
-and not posted.
+went out on 2026-09-04 with the 600 W numbers
+(`docs/external/comment-2344-mask-share.md`,
+<https://github.com/ikawrakow/ik_llama.cpp/issues/2344#issuecomment-5532719298>).
 
 ## 50. ds4 #791: the PR that must not be sent (2026-09-01)
 

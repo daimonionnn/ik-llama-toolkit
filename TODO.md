@@ -9,16 +9,16 @@ reasoning). **Item 9, the NaN-logits abort, is resolved** — root cause in
 RESULTS §49.2, upstream #2344 (closed as completed 2026-09-03), soaked with
 3 046 843 tokens and 0 aborts — which also closes item 16, whose whole
 question was whether `-ub` caused it. Items 10–15 are as marked in their own
-headings. Item 17 is new, patched locally, and is the one thing still worth sending upstream.
+headings. Item 17 is new, patched locally, and sent upstream as a comment on #2344.
 Nothing here blocks anything shipped.
 
 ---
 
 ## 17. The compute buffer was 105 copies of three masks — patched locally, +24 % prefill at 122k, sweeps owed
 
-**Status 2026-09-03 (RESULTS §49.9–§49.10).** Mechanism found, patched, measured;
-in the clone and in `docs/external/patches/keep-mask-share.patch`, not sent
-upstream yet.
+**Status 2026-09-04 (RESULTS §49.9–§49.10).** Mechanism found, patched, measured;
+in the clone and in `docs/external/patches/keep-mask-share.patch`; sent
+upstream as a comment on #2344 with a PR offered, waiting for ikawrakow.
 
 On DeepSeek-V4-Flash three host-side mask inputs — the CSA mask (two views per
 CSA layer), the HCA mask, and the raw/SWA mask window (every layer) — were
@@ -49,10 +49,12 @@ Outputs byte-identical at temperature 0. `IK_MASK_SHARE=0` = the old graph.
 4. 262144 with the patch: `-nkvo` was 11 136 and `--swa-compress` 21 380 (§49.6);
    both should collapse the same way, and the 256k profile's placement may move.
 
-**Upstream.** The follow-up comment for #2344 is drafted
-(`docs/external/comment-2344-mask-share.md`) with the patch and the numbers;
-not posted. One refinement to offer with it: step 4 of the patch still copies one
-strided span of the host mask per graph (1–2 GiB at reserve); a `ggml_cont`
+**Upstream.** The follow-up comment for #2344 is posted (2026-09-04,
+`docs/external/comment-2344-mask-share.md`,
+<https://github.com/ikawrakow/ik_llama.cpp/issues/2344#issuecomment-5532719298>)
+with the patch and the numbers; a PR was offered. One refinement it names:
+step 4 of the patch still copies one strided span of the host mask per graph
+(1–2 GiB at reserve); a `ggml_cont`
 of the window pinned to the CPU backend (34/68 MiB) would remove it, via the
 build callback the way `kqv_merged_cont` is pinned for `-nkvo`.
 
