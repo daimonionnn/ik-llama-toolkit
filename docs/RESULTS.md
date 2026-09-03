@@ -20,7 +20,7 @@ reports — all happened on it.
 the architecture class ik_llama.cpp is built for, and where all the recent
 tuning lives: [§6](#6-re-measurement-2026-08-10) (fair re-match vs mainline),
 §7 (fit-in-VRAM + MTP, the 87–94 tok/s config), §8–§12 (fit-margin, depth
-sweeps, 512k, the kvram placement that is now the default), §13 (ds4 head to
+sweeps, 512k, and the kvram placement that was the default until 2026-08-17), §13 (ds4 head to
 head), §14–§16 (what is left on MXFP4: MTP at both contexts, and prefill).
 
 - Architecture: 43 layers, 256 experts (6 + 1 shared active), MLA latent KV,
@@ -4797,6 +4797,14 @@ context length in VRAM terms even as it narrows in throughput.
 Soak continues on A: **2 468 649 tokens, 0 aborts** before this benchmark
 interruption (9.1 expected without the fix, P = 0.01 %).
 
+**FINAL SOAK TOTAL (2026-09-03): 3 046 843 prefilled tokens, 0 aborts**, summed
+over the eight server runs on this configuration from 2026-08-30 onward. Against
+the untreated rate of 1 abort per 246 767 tokens that is **12.3 expected**, so
+P(0 by chance) = **0.0004 %**. The configuration soaked is the original
+abort-producing one -- `-nkvo`, `-ncmoe 19`, `-ub 8192`, CUDA graphs on, no
+instrumentation -- not the `--swa-compress` path, which never executes the fixed
+branch.
+
 ### 49.7 The ~20k data point, and the upstream report
 
 Added because 84.8 % of this box's requests live below 20k, which made ~6.4k
@@ -4923,8 +4931,22 @@ both 131072 and 262144:
 | `qwen38-flash-next-q8-128k` | 17 | 2048 | 83 620 | 95 874 | 2302.7 | 40.6 |
 | `qwen38-flash-next-q8-256k` | 20 | 2048 | 75 970 | 103 524 | 2162.7 | 36.9 |
 
-Figures are `llama-sweep-bench` at shallow depth (N_KV 0-2048), `-ctk/-ctv
-q8_0`, `-t 8 -tb 24 -thp`, on the RTX PRO 6000 with the card otherwise free.
+`llama-sweep-bench`, `-ctk/-ctv q8_0`, `-t 8 -tb 24 -thp`, card otherwise free.
+
+**Which sweep step each headline number comes from, because the two metrics peak
+in different rows and every figure in this repository follows this convention:**
+
+* **prefill from the N_KV 2048 step.** The N_KV 0 row is the first prefill of a
+  run and comes in a few per cent low (2193.5 against 2302.7 on Q8 128k), so it
+  measures warm-up rather than throughput.
+* **generation from the N_KV 0 step.** Generation legitimately decays with cache
+  depth, so the shallowest row is the honest "at low context" figure. It is also
+  the larger one (128.9 against 118.9 on Q4 128k, 40.6 against 40.1 on Q8), so
+  stating the convention matters: a table mixing the two without saying so would
+  be quietly flattering.
+
+Both rows for both metrics are in docs/VS-DGX-SPARK.md §5, and the full curves
+are in the raw logs.
 
 ### 51.1 The architecture, and why it behaves unlike DeepSeek
 

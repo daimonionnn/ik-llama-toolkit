@@ -36,3 +36,8 @@ logs/origin-capture-*/
 tools/fattn-repro
 tools/replay-nan-dump
 tools/fattn-nan-repro
+
+# Local convenience wrapper that binds 0.0.0.0 with no authentication.
+# Deliberately not shipped -- see its own header. config/systemd/ carries a
+# loopback-only unit instead.
+serve-host-0.0.0.0.sh

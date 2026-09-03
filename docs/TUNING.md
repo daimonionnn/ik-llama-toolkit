@@ -81,7 +81,8 @@ Two things this makes concrete:
 ### The three ways to place experts
 
 ```bash
-IK_NCMOE=22 IK_FIT=0        # (the default) experts of layers 0..21 on CPU
+IK_NCMOE=22 IK_FIT=0        # experts of layers 0..21 on CPU (a Step-3.7 value;
+                            # each profile pins its own -- today's default is 17)
 IK_FIT=1                    # auto: measures free VRAM, ~5 tok/s slower, always fits
 IK_OT='blk\.([3-9]|1[0-9]|2[01])\.ffn_.*_exps\.weight=CPU'   # full manual control
 ```
@@ -131,7 +132,8 @@ IK_THREADS_BATCH=24   # prompt processing
 This is measured, and it overturned the obvious guess. The intuition was that
 generation — one token at a time, thin matrix-vector products over the experts —
 is pure memory streaming, so it should saturate the two DDR5 channels at ~6
-threads (the P-core count) and get slower past that. **The measurement says
+threads (roughly the P-core count -- this CPU has 8) and get slower past that.
+**The measurement says
 otherwise** (`./bench.sh threads`, at the default `ncmoe=22`):
 
 | generation threads   | tg       |
@@ -304,7 +306,7 @@ CPU-resident layers proportionally across GPUs rather than taking the first N.
 2. `./serve.sh --dry-run` — check the command looks right
 3. `./bench.sh quick` — get a baseline
 4. `./bench.sh ncmoe` — confirm or beat `--fit`'s choice
-5. `./bench.sh threads` — confirm 6/18
+5. `./bench.sh threads` — confirm 24/24 (§2 superseded the old 6/18 pairing)
 6. `./bench.sh batch` — confirm 4096/1024
 7. Write the winners into `config/models/step-3.7-flash-q4.env`
 8. `./bench.sh sweep` — verify it holds up as context fills

@@ -2,8 +2,8 @@
 # =============================================================================
 # serve.sh -- start the ik_llama.cpp inference server
 # =============================================================================
-#   ./serve.sh                          default profile (DeepSeek-V4-Flash MXFP4,
-#                                       kvram 128k -- see config/default.env)
+#   ./serve.sh                          default profile (Qwen3.8-Flash-Next Q8_0
+#                                       at 131072 -- see config/default.env)
 #   ./serve.sh step-3.7-flash-q4        the original default, still available
 #   ./serve.sh --ctx 131072             override context length
 #   ./serve.sh --port 9000 --host 0.0.0.0

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# serve-...-gpu-experts-128k-ub1024.sh -- the default profile at -ub 1024
+# serve-...-gpu-experts-128k-ub1024.sh -- the gpu-experts profile at -ub 1024
 # =============================================================================
 # Same code path as serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh, with one
 # variable changed: -ub 1024 instead of 8192, and --n-cpu-moe re-floored to 17.

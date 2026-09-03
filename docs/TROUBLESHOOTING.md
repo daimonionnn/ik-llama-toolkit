@@ -197,9 +197,11 @@ Otherwise, work through the quality-affecting settings in order:
 
 ### Replies degrade in long conversations
 
-Check you have not exceeded `IK_CTX`. 33 of 45 layers use a 512-token sliding
-window, so the model is designed for this — but the 12 full-attention layers
-still need cache, and past `IK_CTX` the server starts discarding context.
+Check you have not exceeded `IK_CTX`. Every model here keeps full attention on
+only a minority of layers — 12 of 45 on Step-3.7-Flash (the rest a 512-token
+sliding window), 12 of 48 on Qwen3.8-Flash-Next (`full_attention_interval = 4`,
+`n_swa = 0`, the rest SSM) — so they are designed for long context, but those
+layers still need cache, and past `IK_CTX` the server starts discarding it.
 
 ```bash
 IK_CTX=131072 ./serve.sh    # costs ~2 GiB of KV, about one layer of experts
@@ -218,8 +220,10 @@ In rough order of likelihood:
 2. **Too many expert layers on the CPU.** The server log prints the split at
    load time. Each CPU layer costs about 1 ms per token
    ([TUNING.md §1](TUNING.md#what-it-costs)).
-3. **Thread count.** Run `./bench.sh threads`. Generation wants ~6 (the P-core
-   count); more can be slower because every barrier waits on the slowest thread.
+3. **Thread count.** Run `./bench.sh threads`. Generation is flat from about 12
+   threads upward and pinning to P-cores measured *slower*, not faster
+   ([TUNING.md §2](TUNING.md)); this CPU has 8 P-cores plus 16 E-cores and the
+   shipped default is 24.
 4. **Expert pages evicted from the page cache.** If something else consumed
    RAM, the CPU-side experts get re-read from disk. Check `free -g` — `buff/cache`
    should be large.
@@ -227,7 +231,8 @@ In rough order of likelihood:
 
 ### Prompt processing is slow
 
-Raise `IK_UBATCH` (1024 → 2048) and confirm `IK_THREADS_BATCH` is 18. Verify
+Raise `IK_UBATCH` and confirm `IK_THREADS_BATCH` is 24 — TUNING §2 measured
++32 % prefill going from 12 to 24. Verify
 with `./bench.sh batch`. Watch that `tg` does not fall in exchange — bigger
 compute buffers mean fewer experts on the GPU.
 

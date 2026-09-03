@@ -4,8 +4,11 @@ Open threads from the 2026-08-12/13 measurement sessions. Each is a question the
 data raised but did not answer, with enough context to pick it up cold. Numbers
 and method live in [docs/RESULTS.md](docs/RESULTS.md) §8–§16.
 
-Items 1–3 and 5 are resolved (kept, folded, for the reasoning); 4 and 6–8 are
-open. Nothing here blocks anything shipped.
+Status as of 2026-09-03: items 1–8 are resolved (kept, not deleted, for the
+reasoning). **Item 9, the NaN-logits abort, is resolved** — root cause in
+RESULTS §49.2, upstream #2344, soaked with 3 046 843 tokens and 0 aborts — which
+also closes item 16, whose whole question was whether `-ub` caused it. Items
+10–15 are as marked in their own headings. Nothing here blocks anything shipped.
 
 ---
 
@@ -232,12 +235,25 @@ suits one profile. Revisit if startup time ever starts to hurt.
 
 ---
 
-## 9. NaN logits abort — OPEN, filed upstream 2026-08-20
+## 9. NaN logits abort — ~~OPEN~~ **RESOLVED 2026-08-29**
 
 > **[ikawrakow/ik_llama.cpp#2344](https://github.com/ikawrakow/ik_llama.cpp/issues/2344).**
-> Thirteen aborts, cause still unknown. The abort is no longer fatal here
-> (RESULTS §33), so this is now a correctness question rather than an
-> availability one.
+> **Root cause found and fixed.** The SWA window view in
+> `src/graphs/build_deepseek4.cpp` computed `first` from `raw_k->ne[2]`, the
+> 256-PADDED kv length, while the mask rows index from `kv_head`. When the
+> padding slack exceeded the window slack — which requires a non-256-aligned
+> `kv_head`, i.e. prompt-cache reuse, exactly what an agent client produces —
+> the view started past what the leading rows needed and those rows arrived
+> entirely `-inf`. Flash-attention turned them into NaN. One clamp fixes it
+> (RESULTS §49.2).
+>
+> That is also why nine days of synthetic sweeps came back clean: any
+> 256-aligned batch cannot trigger it.
+>
+> **Soaked on the original abort-producing configuration: 3 046 843 prefilled
+> tokens, 0 aborts, against 12.3 expected. P(0 by chance) = 0.0004 %.**
+> The thirteen historical aborts and the investigation that missed the cause
+> three times are kept below, because the wrong turns are the useful part.
 
 > **2026-08-19: not solved. See RESULTS §32.** The fix below is in the running
 > build and the abort came back anyway — twice, at a rate real traffic cannot
@@ -920,7 +936,15 @@ with `tools/ckpt-value.sh` that the restore rate does not fall.
 
 ---
 
-## 16. Does `-ub` bear on the NaN abort after all? — OPEN (2026-08-20)
+## 16. Does `-ub` bear on the NaN abort after all? — ~~OPEN~~ **ANSWERED: no (2026-08-29)**
+
+> Settled by item 9. The cause was the SWA window view, which needs a
+> non-256-aligned `kv_head`, not any particular micro-batch. `-ub` correlated
+> only through which request shapes each setting produced — the arithmetic below
+> already put the coincidence at 22.5 %, and §49.2 removed the need for it. The
+> `-ub 1024` profile built to settle this is now just a narrower-link variant.
+> The analysis is kept because the correlation was real and the reasoning about
+> per-work rather than per-hour incidence stands.
 
 Matt's impression that it started aborting more often prompted a look at abort
 incidence per unit of *work* rather than per hour, since a small `-ub` prefills

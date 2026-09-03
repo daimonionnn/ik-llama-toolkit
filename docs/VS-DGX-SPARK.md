@@ -128,9 +128,16 @@ RTX PRO 6000 Blackwell 96 GB, ik_llama.cpp, `llama-sweep-bench`, `-ctk/-ctv
 q8_0`, `-t 8 -tb 24`, card otherwise idle. Full curves; the profiles are
 `config/models/qwen38-flash-next-*.env`.
 
+Headline figures in this repository take **prefill from the N_KV 2048 step** (the
+N_KV 0 row is a cold first prefill and reads low) and **generation from the N_KV 0
+step** (generation decays with depth, so the shallowest row is the honest one).
+Both are shown here so the convention is visible rather than looking like a
+discrepancy — see RESULTS §51.
+
 | depth | Q4_K_M @128k pp | tg | Q8_0 @128k pp | tg | Q8_0 @256k pp | tg |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | **3486** | **128.9** | 2193 | 40.6 | 2082 | 36.9 |
+| 0 *(cold pp)* | 3083 | **128.9** | 2193 | **40.6** | 2082 | **36.9** |
+| 2 048 | **3486** | 118.9 | **2303** | 40.1 | **2163** | 35.6 |
 | 8 192 | — | — | 2168 | 38.2 | 2048 | 34.5 |
 | 16 384 | — | — | 2062 | 37.1 | 1936 | 33.4 |
 | 32 768 | — | — | 1854 | 35.3 | 1757 | 32.4 |

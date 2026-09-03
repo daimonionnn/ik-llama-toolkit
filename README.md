@@ -460,8 +460,9 @@ any `serve.sh` flag. Their names spell out quant, placement and context:
   against the kvram profile's 478 / 486 / 437 — 2.8x, 3.7x and 3.0x — for 3-7 %
   less generation. Against `multi-gpu-llm-toolkit` on the same card and the same
   file it wins at depth and loses shallow — **+12.5 % at 128k, -31 % at 4k**
-  (RESULTS §23), because `-ub 8192` needs depth before it pays. Not the default yet: the §19 abort has not been re-tested in
-  this path, and that soak is what is still owed.
+  (RESULTS §23), because `-ub 8192` needs depth before it pays. It was the default
+  from 2026-08-17 until Qwen took over on 09-03, and the §19 abort that once
+  qualified it is fixed (§49.2) and soaked.
 - **`serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh`** → `serve.sh deepseek-v4-flash`.
   The ~146 GiB MXFP4 quant (effectively lossless QAT) at 131072 ctx; `--fit`
   fills VRAM to ~93.8 GiB (margin tuned down to 4096 for this context, worth
@@ -482,7 +483,7 @@ any `serve.sh` flag. Their names spell out quant, placement and context:
   this one.
 - **`serve-deepseek-v4-flash-mxfp4-gpu-experts-512k.sh`** → `serve.sh deepseek-v4-flash-512k`.
   The same quant at **524288 context**, with the placement inverted: the KV goes
-  to RAM (`-nkvo`) and the VRAM it frees goes to experts (`--n-cpu-moe 19`,
+  to RAM (`-nkvo`) and the VRAM it frees goes to experts (`--n-cpu-moe 25`,
   no `--fit`). Worth **+22 % generation and +35 % prefill** over `--fit` at that
   context — see RESULTS §10. A full 500k prefill still takes ~52 minutes, and
   the prompt cache is off, so this is for long single-shot contexts, not chat.
@@ -540,8 +541,8 @@ permanent.
 
 | variable                 | default         | what it does |
 |--------------------------|-----------------|-----|
-| `IK_CTX`                 | `262144`        | Context length. Drives KV-cache size, which drives everything |
-| `IK_NCMOE`               | `22`            | Keep experts of the first N layers on CPU (the tuned split for 262 144) |
+| `IK_CTX`                 | `65536`         | Context length. Drives KV-cache size, which drives everything. Every profile overrides it — the default profile uses 131072 |
+| `IK_NCMOE`               | *(unset)*       | Keep experts of the first N layers on CPU. Set per profile, not globally — the default profile pins 17 |
 | `IK_FIT`                 | `1`             | Fallback if `IK_NCMOE` is unset: let ik_llama size the split itself |
 | `IK_FIT_MARGIN`          | `2048`          | MiB of VRAM to leave free (only used by `--fit`) |
 | `IK_OT`                  | *(unset)*       | Full manual control via `-ot` regexes |
@@ -575,9 +576,18 @@ ik-llama-toolkit/
 ├── serve.sh              one-command server launch
 ├── stop.sh               stop any running server (any profile/port)
 │
+├── serve-qwen38-flash-next-q8-128k.sh
+│                         THE DEFAULT: Qwen3.8 Q8_0, 2303 pp / 40.6 tg
+├── serve-qwen38-flash-next-q8-256k.sh
+│                         Q8_0 at 262144: 2163 / 36.9
+├── serve-qwen38-flash-next-q4km-128k.sh
+│                         fastest of all: 3486 pp / 128.9 tg (4-bit)
+├── serve-qwen38-flash-next-q4km-256k.sh
+│                         Q4_K_M at 262144: 3342 / 128.6
+│
 │  DeepSeek MXFP4, experts computed ON THE GPU -- the tuned line (RESULTS §21-§29)
 ├── serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh
-│                         the default: 1830 tok/s pp / 19.3 tg at 32k
+│                         1830 tok/s pp / 19.3 tg at 32k (default until 2026-09-03)
 ├── serve-deepseek-v4-flash-mxfp4-gpu-experts-256k.sh
 │                         1637 / 17.4 at 32k, checkpoints capped at 32 GiB
 ├── serve-deepseek-v4-flash-mxfp4-gpu-experts-512k.sh

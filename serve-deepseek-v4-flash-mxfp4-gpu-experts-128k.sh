@@ -32,11 +32,14 @@
 #   * a GPU faster than the CPU at quantised GEMM. True here (Blackwell vs an
 #     Arrow Lake with no AVX-512); a Zen 4/5 with AVX-512 could flip it back.
 #
-# THIS IS NOW THE DEFAULT PROFILE (config/default.env), so `./serve.sh` with no
-# arguments does the same thing. The wrapper stays for the explicit name.
-# Provisional: the NaN abort that blocked it is still OPEN (RESULTS §32). The
-# upstream DSA fix did not stop it, and no other profile here is known to be
-# safer from it. Expect a restart every few hours of heavy use.
+# THE DEFAULT PROFILE from 2026-08-17 to 09-03; `./serve.sh` with no arguments
+# now starts qwen38-flash-next-q8-128k instead, so use this wrapper (or the
+# explicit profile name) for DeepSeek.
+#
+# The NaN abort that kept it "provisional" is FIXED -- a malformed SWA window
+# view, clamped in RESULTS §49.2 and reported as ikawrakow/ik_llama.cpp#2344.
+# Soaked on this exact configuration: 3 046 843 prefilled tokens, 0 aborts,
+# against 12.3 expected untreated.
 #
 # Two deliberate defaults (same as the other wrappers):
 #   * Port 8090, not 8080 -- LM Studio's API server usually holds 8080.

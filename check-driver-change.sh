@@ -71,11 +71,14 @@ fi
 
 if [[ ${1:-} == --bench ]]; then
     echo
-    echo "=== re-measuring the shipped default (kvram 128k, 32k prompt) ==="
+    echo "=== re-measuring the shipped default (config/default.env, 32k prompt) ==="
     echo "    baseline on ${BASELINE_DRIVER}: ${BASELINE_PP} tok/s prefill / ${BASELINE_TG} generation"
-    echo "    NOTE: -rtr means the model is re-read at every start; allow a few minutes."
-    # Port 8090 explicitly: bare ./serve.sh takes default.env's 8080, which LM
-    # Studio usually holds -- and the probe below talks to 8090.
+    echo "    NOTE: the baseline above was taken on the DeepSeek kvram profile that"
+    echo "          was the default until 2026-09-03. If default.env now points"
+    echo "          elsewhere the comparison is apples to oranges -- set"
+    echo "          IK_PROFILE to the profile the baseline belongs to."
+    # Port 8090 explicitly, matching the probe below. (default.env also says
+    # 8090; passing it here keeps this working if that ever changes.)
     IK_PORT=8090 IK_KILL_SQUATTERS=1 ./serve.sh > /tmp/driver-check-server.log 2>&1 &
     pid=$!
     for ((i=0;i<400;i++)); do

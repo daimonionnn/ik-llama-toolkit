@@ -49,7 +49,7 @@ Two metrics, and they respond to completely different things:
 
 **`pp` — prompt processing / prefill, tokens/s.** How fast your input is
 ingested. Compute-bound, batched, runs mostly on the GPU. Improved by larger
-`-ub` and more `IK_THREADS_BATCH`. Expect it in the thousands.
+`-ub` and more `IK_THREADS_BATCH`. Expect it in the thousands on the current default; the "hundreds, not thousands" note further down predates the gpu-experts placement.
 
 **`tg` — token generation, tokens/s.** How fast the reply streams. Bound by
 reading the 8 active experts per layer, and specifically by the layers sitting
@@ -70,7 +70,7 @@ The short version, all on this box with the GPU idle:
 - **What tuning bought**: hand-picking `--n-cpu-moe` instead of `--fit` lifted
   tg to **~46 t/s** at 65 536 — a +70% win, entirely from putting more experts
   on the GPU. `--fit` was leaving ~6 expert layers on the CPU unnecessarily.
-- **The shipped default** (262 144 context, `-ncmoe 22`, q8_0 KV): tg **~25 t/s**.
+- **Step-3.7-Flash at 262 144 context** (`-ncmoe 22`, q8_0 KV): tg **~25 t/s**. (This was the shipped default when §1-§5 were written; today's default is `qwen38-flash-next-q8-128k` at 2303 pp / 40.6 tg.)
   Lower than the 65 536 number *by design* — the full 262k window costs 24 GiB
   of KV cache, which is ~9 expert layers of VRAM handed back to the CPU.
 
@@ -93,7 +93,7 @@ cliff instead, something else is wrong — start with
 
 ## Getting comparable results
 
-Benchmarking a 114 GiB model has more traps than a small one.
+Benchmarking a model of this size has more traps than a small one. (The figures below were taken on Step-3.7-Flash at ~114 GiB; the current default is 175 GiB, so allow proportionally more.)
 
 **Free the GPU first.** `bench.sh` warns about other processes holding VRAM but
 does not stop. With `--fit` in play, a benchmark run against 20 GiB of free VRAM
