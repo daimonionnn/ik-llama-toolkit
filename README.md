@@ -126,11 +126,14 @@ patch has served since 2026-09-04 and real traffic is its soak.
 |---|---:|---|---|---|
 | **`deepseek-v4-flash-gpu-experts-128k`** *(default)* | 131072 | `-nkvo -ncmoe 19 -ub 8192` | **1 850 / 19.9** at 20k, 1 720 / 19.1 at 122k | everything — the deepest request ever seen here was 139k |
 | `deepseek-v4-flash-gpu-experts-256k` | 262144 | `--swa-compress -ncmoe 21 -ub 4096` | 1 223 / 16.1 at 52k, 1 107 / 15.8 at 122k (§49.4) | when the window is really needed; costs ~13 % of every turn |
-| `deepseek-v4-flash-512k` | 524288 | `-nkvo -ncmoe 25 -ub 8192`, checkpoints off | 1 721 / 16.3 at 32k, 1 335 / 14.9 at 128k (§29) | long single shots, not chat: checkpoints and prompt cache are off (54 GiB of RAM and 26 % of generation at this size, §9.3), so a re-sent conversation re-prefills |
+| `deepseek-v4-flash-512k` | 524288 | `-nkvo -ncmoe 21 -ub 8192`, checkpoints off | 1 965 / 18.4 at 32k, 1 741 / 17.6 at 128k, 1 359 / 16.8 at 256k (§49.13) | long single shots, not chat: checkpoints and prompt cache are off (54 GiB of RAM and 26 % of generation at this size, §9.3), so a re-sent conversation re-prefills |
 | `deepseek-v4-flash-mtp` | 65536 | antirez IQ2XXS, entirely in VRAM, + MTP draft | **~87 t/s** generation (§7) | when 2-bit quality is acceptable; the fastest coherent DeepSeek here |
 
-The 256k and 512k figures predate the mask patch, which cut their compute
-buffers to 3.1 and 7.3 GiB; both are due a re-placement (TODO #17).
+The 256k figures predate the mask patch, which cut that profile's compute
+buffer to 3.1 GiB; it is due a re-placement (TODO #17). The 512k profile had
+its re-placement on 2026-09-04: the buffer went 21.4 → 7.3 GiB and four expert
+layers moved back to the GPU, +43 % prefill and +27 % generation at 256k
+against what it shipped with.
 
 Eight further profiles are **legacy**, kept so RESULTS §5–§16 can be re-run
 rather than reconstructed: the `-rtr` family (`deepseek-v4-flash-128k-kvram`,
@@ -436,7 +439,7 @@ ik-llama-toolkit/
 │  DeepSeek MXFP4, experts computed ON THE GPU -- the tuned line (RESULTS §21-§29, §49)
 ├── serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh      THE DEFAULT: 1850 pp / 19.9 tg at 20k
 ├── serve-deepseek-v4-flash-mxfp4-gpu-experts-256k.sh      1223 / 16.1 at 52k, --swa-compress
-├── serve-deepseek-v4-flash-mxfp4-gpu-experts-512k.sh      1721 / 16.3 at 32k, caches off
+├── serve-deepseek-v4-flash-mxfp4-gpu-experts-512k.sh      1965 / 18.4 at 32k, caches off
 ├── serve-deepseek-v4-flash-antirez-IQ2XXS-gpu-mtp-65k.sh  2-bit, all in VRAM + MTP, ~87 tg
 │
 │  Legacy -- the CPU path (-rtr), --fit, and the -ub 1024 experiment; ~480 pp

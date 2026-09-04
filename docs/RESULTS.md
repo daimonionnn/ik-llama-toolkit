@@ -5319,6 +5319,87 @@ the patched graph's headroom does. Files:
 results/power-400w-20260904.csv logs/server-20260904-{095836,100255}.log`.
 The unit is back on the same binary since 10:08 (`4744.03 MiB`).
 
+### 49.13 524288 with the patch: +37 % prefill at 256k from the graph alone, the freed 14 GiB buys four expert layers, and half a million tokens prefill in 10 minutes — the 512k profile moves to `-ncmoe 21` (2026-09-04)
+
+TODO #17 item 5, and the depth where the mask copies were expected to hurt
+most: at 524288 the old graph's compute buffer was 21 376 MiB (§29.2) and the
+patched one is 7 304 (§49.11), and every mask span the old graph copied per
+u-batch was sized by the context, not the prompt. Four runs at 600 W (the
+benchmark setting; LACT journal-confirmed, Matt's standing cap is 400 W),
+10:19–11:09 CEST, unit stopped, `tools/depthbench.sh 8192 -p
+deepseek-v4-flash-512k -r 2 32768 128000 256000` with `IK_GDB=0`, the profile
+as shipped except where noted (`-nkvo -ctx-ckpt 0 --cache-ram 0`, f16 KV,
+`-ub 8192 -b 8192`, `--fit` off), `power.draw`, SM clock and `memory.used`
+sampled once a second. `IK_MASK_SHARE=0` turns off *both* DSV4 patches — the
+CPU window cut in `build_deepseek4.cpp` requires the shared mask — so B is the
+graph as it was before 09-02, from the same binary.
+
+| run | graph, placement | buffer | 32 701 pp / tg | 127 981 pp / tg | 255 961 pp / tg | peak VRAM / headroom |
+|---|---|---:|---|---|---|---|
+| A | patched, `-ncmoe 25` (the shipped profile) | 7 304 | 1 853.9 / 16.39 | 1 654.6 / 15.80 | 1 304.1 / 15.08 | 80 122 / 17 765 |
+| B | old graph, `-ncmoe 25` (`IK_MASK_SHARE=0`) | 21 376 | 1 712.9 / 15.82 | 1 330.1 / 14.50 | 953.5 / 13.19 | 94 174 / 3 713 |
+| C | patched, `-ncmoe 22` | 7 304 | 1 931.2 / 17.78 | 1 716.2 / 17.11 | 1 344.5 / 16.34 | 89 838 / 8 049 |
+| **D** | **patched, `-ncmoe 21`** | 7 304 | **1 964.6 / 18.39** | **1 740.9 / 17.61** | **1 359.4 / 16.80** | 93 054 / 4 833 |
+
+Spreads 2.8–2.9 % at 32k (the first request after a start, as always), 0.0–0.3 %
+deeper. MiB throughout; 97 887 MiB on the card.
+
+**The graph alone (A vs B, same placement):** prefill **+8.2 % / +24.4 % /
++36.8 %** at 32k / 128k / 256k, generation +3.6 % / +9.0 % / +14.3 %. The gap
+grows with depth exactly as the mechanism says it should — the old graph's
+per-u-batch mask traffic scales with `n_kv`, the patched graph's does not —
+and 256k is the largest A/B gap measured anywhere (122k on the 128k profile:
++23.8 %, §49.10). In seconds, the 256k prefill is 268 → 196.
+
+**The placement (C, D vs A):** with the buffer 14 GiB smaller the profile can
+put expert layers back on the GPU. `memory.used` shows the peak is reached by
+the first u-batch and does not move with depth to 256k — A holds 80 122 from
+10:20 to the end of its 256k run, B 94 174, C 89 838, D 93 054 (500k adds
+652, below) — so the reserve is essentially a load-time quantity here, and one
+expert layer is 3 239 MiB (C−A over three layers; D−C 3 216). Each layer moved is worth ≈ 3 % of generation: A → C
++8.5 % at 32k over three, C → D +3.4 % over one, prefill +1–2 % a layer. D
+keeps 4 833 MiB free at 256k, more than the 3 713 the old graph at n25 —
+the profile that has served 512k since 08-19 — ran on for the whole of B.
+n20 would leave ≈ 1.6 GiB; not tried.
+
+**Full depth, once (E).** The profile's whole claim is 524288, and A–D stop
+at 256k, so D's placement was run once more at the ceiling: `-r 1 500000`,
+11:10–11:22, `results/depthbench-ub8192-20260904-111049.md`. At **499 951
+tokens: 805.5 pp / 15.64 tg**, the prefill 620.7 s — 10.3 minutes for half a
+million tokens, against the "~52 minutes" the profile's header used to promise
+(August, `-ub 512`, 161.8 pp / 10.08 tg). Peak `memory.used` 93 706 MiB, 652
+above the 256k figure, so the reserve is not perfectly flat after all, only
+nearly; 4 181 MiB stayed free. Mean 386 W over the prefill, 48 % of the
+samples above 400 W, generation 178 W.
+
+**D against what the profile shipped (B is the old header's own numbers,
+re-measured today):** prefill **+14.7 % / +30.9 % / +42.6 %**, generation
+**+16.2 % / +21.4 % / +27.4 %** at 32k / 128k / 256k. Against the §29 figures
+in the README (1 721 / 16.3 at 32k, 1 335 / 14.9 at 128k; August, ~500 W):
++14 % / +13 % and +30 % / +18 %. At 128k the 512k profile is now within 2 %
+of the default 128k profile's prefill (1 741 vs 1 711 at 122k, §49.10) and
+7 % behind it on generation (17.6 vs 19.0) — two more layers on the host,
+n21 against n19 — which is a smaller price for four times the context than
+the 2026-08-19 profile paid.
+
+**Power.** The pattern of §49.10 and §49.12 at four times the context: at 256k
+the patched graph is the compute-bound one — A averages 406 W over its 196 s
+prefill with 42–48 % of the samples above 400 W, C 420 W / 61 %, D 423–424 W /
+62–63 % (max 567 W, mean SM clock 2 694–2 697 MHz) — and the old graph is the
+idle one, 331–333 W over 268 s, 6–8 % above 400 W, because it is waiting on
+its copies. Generation 170–217 W in every run. So at the standing 400 W cap
+expect D's prefill 5–7 % lower than the table and its generation unchanged;
+that is the cost of the patched graph actually using the card.
+
+**Shipped:** `deepseek-v4-flash-512k` moves from `IK_NCMOE=25` to **21**
+(header rewritten, the n24-dies-at-32k history kept as history). Files:
+`results/depthbench-ub8192-20260904-{101936,103104,104548,105833,111049}.md`,
+`results/power-512k-600w-20260904.csv` (A–C),
+`results/power-512k-600w-n21-20260904.csv` (D) and
+`results/power-512k-600w-n21-full-20260904.csv` (E); alignment
+`tools/power-align.py <csv> logs/server-20260904-{101937,103110,104554,105834,111050}.log`.
+The unit is back on the 128k default since 11:22 (`4744.03 MiB`).
+
 ## 50. ds4 #791: the PR that must not be sent (2026-09-01)
 
 tedin7 independently confirmed cause 1 on RTX 3090/3080 (sm_86, driver 580.x),

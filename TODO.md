@@ -56,12 +56,13 @@ Outputs byte-identical at temperature 0. `IK_MASK_SHARE=0` = the old graph.
    than the layer it costs.
 4. 262144 with the patch: `-nkvo` was 11 136 and `--swa-compress` 21 380 (§49.6);
    both should collapse the same way, and the 256k profile's placement may move.
-5. **524288 re-placement.** `deepseek-v4-flash-512k` sits at `-ncmoe 25`
-   because its buffer was 21 376 MiB; on the current build it is 7 304
-   (11 135 without the CPU cut, §49.11). With the 3.5 GiB runtime share and the
-   ≥ 7 GiB of headroom its header says depth needs, 22 should load and 21 is
-   marginal — three layers, each worth a few percent of generation at 130k.
-   One reserve probe per candidate, then a depthbench at 130k for the winner.
+5. ~~**524288 re-placement.**~~ — **DONE 2026-09-04, shipped at `-ncmoe 21`**
+   (§49.13). The graph alone was worth +8 / +24 / **+37 %** prefill and +4 /
+   +9 / +14 % generation at 32k / 128k / 256k on the old n25; n22 and n21 both
+   fit (VRAM peaks at the first u-batch and stays flat with depth, 3 239 MiB a
+   layer), and n21 against the old profile is +15 / +31 / +43 % prefill, +16 /
+   +21 / +27 % generation, with 4.8 GiB to spare against the 3.7 the old n25
+   ran on. n20 (≈ 1.6 GiB) not tried.
 
 **Upstream.** The follow-up comment for #2344 is posted (2026-09-04,
 `docs/external/comment-2344-mask-share.md`,
