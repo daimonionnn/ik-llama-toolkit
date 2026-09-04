@@ -209,17 +209,22 @@ EOF
 do_rtr() {
     section "Run-time repack (-rtr)"
     note <<'EOF'
-`-rtr` repacks CPU-side quantised tensors into the row-interleaved layout the
-AVX2/VNNI kernels prefer. It forces `--no-mmap`, so the whole model is re-read
-from disk at every start.
+`-rtr` repacks CPU-side experts into the row-interleaved `_R4`/`_R8` layout the
+AVX2/VNNI kernels prefer -- and, since those types have no CUDA kernel, it moves
+the expert GEMM onto the CPU instead of streaming the experts to the GPU per
+micro-batch. So this is a CPU-vs-GPU comparison and it turns on `-ub`: at 512
+the CPU tends to win, at 4096 the GPU won 3x here (RESULTS 21). Both rows below
+run at the profile's `-b`/`-ub`, the ones you would serve with. It forces
+`--no-mmap`, so the whole model is re-read from disk at every start.
 
-Only enable it if `tg` gains meaningfully. If it does, prefer repacking the file
-once offline with `llama-quantize --repack` over paying the cost at each launch.
+Enable it only if `pp` gains at that `-ub`. Do not repack the file offline with
+`llama-quantize --repack`: that pins the experts to the CPU permanently (TODO 8).
 EOF
     for r in 0 1; do
         log "  -rtr $r"
         { echo; echo "\`-rtr $r\`:"; echo; } >> "$REPORT"
-        IK_BENCH_RTR="$r" run_bench -p 2048 -n 128 -tgb "$TG"
+        IK_BENCH_RTR="$r" run_bench -p 2048 -n 128 \
+                  -b "${IK_BATCH:-4096}" -ub "${IK_UBATCH:-1024}" -tgb "$TG"
     done
 }
 
