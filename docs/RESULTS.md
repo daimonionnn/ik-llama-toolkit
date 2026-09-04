@@ -5129,7 +5129,10 @@ which tensor the masks are read from, never their contents.
 
 **What it changes for this box.** The shipped profile keeps 2 GiB more VRAM
 free at the same speed-up, which is one expert layer: `-nkvo -ncmoe 18` fits
-(89 367 + 4 992 = 94 359 of 97 887 MiB) where 17 does not. The
+(89 367 + 4 992 = 94 359 of 97 887 MiB) where 17 does not. *Corrected in
+§49.11: that sum counts the logged buffers only; ≈ 3.5 GiB of runtime
+allocations sit on top of them, `-ncmoe 18` loads and dies in the first
+u-batch, and the 2 GiB is headroom, not a layer.* The
 `--swa-compress` placement can go to `-ncmoe 18` as well (the 21 → 18 that
 §49.9 predicted), and a third option now exists — KV on the GPU without
 `--swa-compress`, exact attention — within 1 % of the shipped profile on
@@ -5139,9 +5142,12 @@ TODO #17.
 **What remains upstream.** Step 4 still copies one strided span of the host
 mask per graph (≈ 1–2 GiB at reserve, the difference between the 3 519.94 and
 3 106.18 rows). Cutting the window on the CPU side — a `ggml_cont` pinned to the
-CPU backend, 34 MiB at `-ub 4096` / 68 at 8192 — would remove it; it needs the
+CPU backend, 34 MiB at `-ub 4096` / 132 at 8192 (the window is 256-padded
+`n_tokens + 128` rows × `n_tokens` columns × 2 B) — would remove it; it needs the
 build callback to pin one named tensor, the way `kqv_merged_cont` is pinned
 for `-nkvo`, and is left for ikawrakow to decide. 262144 was not re-probed.
+*Tried the next morning, §49.11: it removes the span exactly as described and
+is worth 248 MiB and no throughput at 131072, 3.8 GiB at 524288.*
 
 Downtime for the two matrices, the dumps, the A/B and the identity check:
 21:40–22:46 CEST, and 23:25–23:44 for the 600 W re-run; the unit is back on
@@ -5150,6 +5156,118 @@ DSV4-only and Qwen never enters `build_deepseek4`). The comment to ikawrakow
 went out on 2026-09-04 with the 600 W numbers
 (`docs/external/comment-2344-mask-share.md`,
 <https://github.com/ikawrakow/ik_llama.cpp/issues/2344#issuecomment-5532719298>).
+
+### 49.11 The CPU-side window cut, tried: the 2 GiB span goes, nothing follows it at 131072 — and `-ncmoe 18` does not fit after all (2026-09-04)
+
+Two things were owed from §49.10: the `-nkvo -ncmoe 18` sweep (TODO #17 item
+1), and the "what remains upstream" refinement — cutting the SWA window on the
+CPU so that the scheduler ships the 132 MiB window instead of the 2 GiB span.
+Both done, 04:05–04:40 CEST, unit stopped, 600 W, the §49.10 depthbench call
+(`tools/depthbench.sh 8192 -p deepseek-v4-flash-gpu-experts-128k -r 2 20000
+122000`, `IK_GDB=0`). Neither came out the way §49.10 predicted.
+
+**`-ncmoe 18` loads and dies.** On the 21:59 binary (mask-share on) it loads
+with the same 4 991.80 MiB buffer, serves nothing, and aborts in the first
+8192-token u-batch of the 20k prompt: `CUDA error: out of memory` from
+`cuMemCreate` in `ggml_cuda_pool_vmm::alloc` (ggml-cuda.cu:473), the pool the
+host-resident experts are streamed into. `nvidia-smi` had it at 97 198 MiB of
+97 887 when it went. §49.10's "fits (89 367 + 4 992 = 94 359)" counted the
+logged buffers only; the same sampler on the `-ncmoe 19` control peaks at
+**94 648 MiB** against 86 103 + 4 992 = 91 095 logged, i.e. **≈ 3.5 GiB of
+runtime allocations** — the CUDA context, cuBLAS workspaces and the VMM pool —
+that no `buffer size` line ever shows. Add a 3 317 MiB layer to that and the
+sum is 97 965: over the card by 80 MiB before the pool's chunk granularity, and
+the pool is what asks last. `-ncmoe 17` does not reach that far
+(`ggml_gallocr_reserve_n: failed to allocate CUDA0 buffer of size 4974477440`).
+So the 2 GiB the patch freed is not a layer; it is the headroom the shipped
+profile never had. Before the patch the same arithmetic read 86 103 + 7 040 +
+3 553 = 96 696 of 97 887 — 1.2 GiB from the edge, which is where it had been
+serving since 08-19. The correction is also written into §49.10 above; the
+profile stays at 19. Control this session, same binary as §49.10's 600 W row:
+19 790 tokens 1 853.5 pp / 19.90 tg, 121 981 tokens 1 713.4 / 19.04 (that row:
+1 852.2 / 19.95, 1 710.6 / 18.99 — reproduced to 0.3 %).
+
+**The CPU cut, mechanism.** `build_deepseek4` names the once-per-graph cont
+`dsv4_raw_mask_window_cpu` when it is a view of the host-side mask input, and
+the `cb` lambda of `llama_build_graph` — the one place that can assign a
+node's backend — pins that name to `lctx.backend_cpu`, the way
+`kqv_merged_cont` is pinned for `-nkvo` (`keep-window-cpu.patch`, 46 lines).
+Pins survive `ggml_backend_sched_reserve` (it splits before it resets), so the
+reserve graph is affected too. `GGML_SCHED_DEBUG=1` on the reserve graph of the
+shipped profile shows the intended swap and nothing else:
+
+```
+# IK_MASK_WINDOW_CPU=0
+## SPLIT #3: CUDA0 # 4 inputs: [dsv4_raw_mask_padded-0 (view) (2047M)] [raw_k-0 ...] [raw_k-0 ...] [inp_tokens (32K)]
+node # 34 (CONT): dsv4_raw_mask_window (132M) [CUDA0]: CUDA0#dsv4_raw_mask_ (2047M) [NULL]
+# pinned
+## SPLIT #4: CPU # 0 inputs:
+node # 34 (CONT): dsv4_raw_mask_window (132M) [CPU]: dsv4_raw_mask_padded (2047M) [CPU]
+## SPLIT #5: CUDA0 # 4 inputs: [raw_k-0 ...] [raw_k-0 ...] [dsv4_raw_mask_window_cpu-0 (132M)] [inp_tokens (32K)]
+```
+
+**What it is worth, buffers:**
+
+| context | `-ncmoe` | CUDA0 compute, scheduler's cont | CUDA0 compute, CPU cut | Δ | CUDA_Host compute |
+|---|---|---|---|---|---|
+| 131072 (shipped) | 19 | 4 991.80 | **4 744.03** | −248 | 2 688.36 → 2 692.36 |
+| 524288 (`deepseek-v4-flash-512k`) | 25 | 11 135.05 | **7 304.03** | **−3 831** | 10 368.36 → 10 372.36 |
+
+−248, not −2 047, because at 131072 the span copy never sets the buffer's
+peak: it is allocated at the start of split #3 and freed after the cont, and
+what is live around it (`hc_init` 512 MiB, `attn_norm` 128, `q_rope` 1 024,
+the copy 2 047, the window 132) is 3.8 GiB against a 4.7 GiB peak somewhere in
+the attention/MoE body — the 248 MiB is fragmentation around it. The
+CUDA_Host side grows by 4 MiB because the 132 MiB window reuses the slot of
+`inp_embd` (128 MiB, dead after its copy in split #1). At 524288 the span is
+8 191 MiB and *is* the peak, so the cut returns 3.8 GiB — more than one expert
+layer (3 317 MiB). The 512k profile is on the mask-share build already without
+anyone having re-placed it: its `-ncmoe 25` was set when the buffer was 21 376
+MiB (its profile header), it is 11 135 now and 7 304 with the cut. TODO #17
+item 5.
+
+**What it is worth, throughput** (600 W, `-r 2`, means; `IK_MASK_WINDOW_CPU`
+selects the variant from one binary):
+
+| binary / variant | 19 790 pp | tg | 121 981 pp | tg | buffer |
+|---|---:|---:|---:|---:|---:|
+| 21:59, no cut (control) | 1 853.5 | 19.90 | 1 713.4 | 19.04 | 4 991.80 |
+| 04:11, `IK_MASK_WINDOW_CPU=0` | 1 842.5 | 19.87 | 1 709.1 | 18.94 | 4 991.80 |
+| 04:11, cut on every graph | 1 849.2 | **19.73** | 1 716.0 | **18.75** | 4 744.03 |
+| 04:35, cut when `n_tokens ≥ 256` (shipped) | 1 854.4 | 19.92 | **1 719.5** | **19.10** | 4 744.03 |
+
+Prefill: the four 122k figures span 0.6 %, the 20k ones 0.6 %, both inside
+the floor (§49.10: 0.1–0.4 % at 122k, 2–3 % at 20k). That is the expected
+size: the span is 2 GiB at 122k, ≈ 50 ms of host→device per u-batch against a
+4.77 s u-batch, ≈ 1 %, and 460 MiB at 20k. The 105-copies finding of §49.9
+was worth +24 % because it was 105 of these per u-batch; the last one is worth
+the noise. Generation: cutting on every graph costs **−0.7 % / −1.0 %**, the
+same direction in all four pairs, with the 21:59 → 04:11 identical-graph
+control moving only −0.2 / −0.5 %. The per-token graph gains a CPU split and
+its two synchronisations (the reserve graph goes 126 → 128 splits, the token
+graph the same way) to save a 16 MiB copy; that is the wrong trade at
+`n_tokens = 1`. Gated on the u-batch — `IK_MASK_WINDOW_CPU`
+is now a token threshold, default 256, 0 = off — the reserve graph
+(`n_tokens = n_ubatch`) and every prefill u-batch take the CPU cut and the
+token graph does not: generation back at 19.92 / 19.10, buffer still 4 744.03.
+That variant is what the unit has served since 04:40.
+
+**Correctness.** 19 198-token prompt (three u-batches, the last two through
+the `first > 0` window), 48 tokens at temperature 0: byte-identical
+`reasoning_content` for the scheduler's cont, the CPU cut on every graph and
+the gated cut.
+
+**Verdict.** The refinement I offered ikawrakow in the #2344 comment is
+correct as a mechanism and worthless as a speed-up at 131072; it buys 248 MiB
+here and 3.8 GiB at 524288, where it is the difference of a layer. It ships
+here gated, because it is free that way; it is not worth a follow-up comment
+on its own — the numbers go into the PR if he asks for one, as the
+compute-buffer line of the 512k case. The unit runs the 04:35 binary
+(`libllama.so` 04:35:27; `keep-window-cpu.patch` on top of
+`keep-mask-share.patch`), `CUDA0 compute buffer size = 4744.03 MiB` is its
+signature. Files: `results/depthbench-ub8192-20260904-04{0553,0650,1231,1657,2128,3555}.md`
+(0553 and 2128 are the two `-ncmoe 18` deaths), the sched dumps are session
+scratch.
 
 ## 50. ds4 #791: the PR that must not be sent (2026-09-01)
 

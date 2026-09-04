@@ -1,0 +1,73 @@
+diff --git a/src/graphs/build_deepseek4.cpp b/src/graphs/build_deepseek4.cpp
+--- a/src/graphs/build_deepseek4.cpp
++++ b/src/graphs/build_deepseek4.cpp
+@@ -162,6 +162,32 @@
+     return share;
+ }
+ 
++// LOCAL FIX (ik-llama-toolkit), RESULTS 49.11. The SWA window cut below is a
++// strided view of the host-side mask input. Left to the scheduler, its
++// ggml_cont lands on the GPU, so the VIEW becomes the split input and is
++// copied by its span -- first-to-last byte, i.e. the whole n_kv x n_tokens
++// mask, 2 GiB at 131072 / -ub 8192, 8 GiB at 524288 -- once per graph,
++// through the blocking host-to-device path, and allocated in the CUDA compute
++// buffer for the duration of the cont. Cut on the CPU instead, the window is
++// one contiguous nton x n_tokens tensor (132 MiB at -ub 8192) and that is all
++// that crosses the bus. The cut only gets its "_cpu" name here;
++// llama_build_graph's callback does the pinning, the way it pins
++// kqv_merged_cont for -nkvo.
++//
++// Measured (49.11): at 131072 the span never sets the buffer's peak, so the
++// CPU cut is worth 248 MiB of VRAM and no throughput; at 524288 it is the
++// peak and the cut saves 3.8 GiB. Per token it costs an extra CPU split and
++// its sync (-1 % generation), so it is only applied to u-batches of at least
++// IK_MASK_WINDOW_CPU tokens (default 256): every prefill u-batch, and the
++// worst-case graph the compute buffer is reserved from. 0 disables it.
++static int dsv4_window_cpu_min_tokens() {
++    static const int min_tokens = [] {
++        const char * env = getenv("IK_MASK_WINDOW_CPU");
++        return env == nullptr ? 256 : atoi(env);
++    }();
++    return min_tokens;
++}
++
+ static ggml_tensor * dsv4_build_raw_mask_view(
+         ggml_context * ctx,
+         ggml_tensor  * mask,
+@@ -1213,6 +1239,15 @@
+                 ggml_tensor * cut = ggml_view_4d(ctx0, raw_mask, nton, raw_mask->ne[1], raw_mask->ne[2], raw_mask->ne[3],
+                         raw_mask->nb[1], raw_mask->nb[2], raw_mask->nb[3], raw_mask->nb[0]*first);
+                 cut = ggml_cont(ctx0, cut);
++                // LOCAL FIX (ik-llama-toolkit), RESULTS 49.11 -- see dsv4_window_cpu_min_tokens.
++                // Pin only when the mask really is the host input: after a
++                // GPU-side cont (IK_MASK_SHARE=0, a padded mask, n_stream > 1)
++                // a CPU cut would pull the span DOWN instead of pushing it up.
++                const int min_tokens = dsv4_window_cpu_min_tokens();
++                const bool cut_on_cpu = min_tokens > 0 && n_tokens >= min_tokens &&
++                    dsv4_share_full_mask() &&
++                    raw_mask->view_src == nullptr && (raw_mask->flags & GGML_TENSOR_FLAG_INPUT);
++                cb(cut, cut_on_cpu ? "dsv4_raw_mask_window_cpu" : "dsv4_raw_mask_window", il);
+                 win.src = raw_mask; win.window = cut; win.first = first; win.nton = nton;
+             }
+             raw_mask = win.window;
+diff --git a/src/llama-build-context.cpp b/src/llama-build-context.cpp
+--- a/src/llama-build-context.cpp
++++ b/src/llama-build-context.cpp
+@@ -2703,6 +2703,17 @@
+             }
+         }
+ 
++        // LOCAL FIX (ik-llama-toolkit), RESULTS 49.11. build_deepseek4 names its
++        // SWA window cut "dsv4_raw_mask_window_cpu" when the cut is a view of the
++        // host-side mask input and the u-batch is large enough to be worth it
++        // (see dsv4_window_cpu_min_tokens there): computed on the CPU, only the
++        // contiguous window crosses to the GPU instead of the view's span, which
++        // is the whole mask. This callback is the one place that can assign a
++        // node's backend, hence the name as the signal.
++        if (strcmp(name, "dsv4_raw_mask_window_cpu") == 0) {
++            ggml_backend_sched_set_tensor_backend(lctx.sched, cur, lctx.backend_cpu);
++        }
++
+         // norm may be automatically assigned to the backend of the previous layer, increasing data transfer between backends
+         // FIXME: fix in ggml_backend_sched
+         const bool full_offload = lctx.model.n_gpu_layers > (int)lctx.model.hparams.n_layer;

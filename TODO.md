@@ -16,9 +16,13 @@ Nothing here blocks anything shipped.
 
 ## 17. The compute buffer was 105 copies of three masks — patched locally, +24 % prefill at 122k, sweeps owed
 
-**Status 2026-09-04 (RESULTS §49.9–§49.10).** Mechanism found, patched, measured;
+**Status 2026-09-04 (RESULTS §49.9–§49.11).** Mechanism found, patched, measured;
 in the clone and in `docs/external/patches/keep-mask-share.patch`; sent
-upstream as a comment on #2344 with a PR offered, waiting for ikawrakow.
+upstream as a comment on #2344 with a PR offered, waiting for ikawrakow. The
+CPU-side window cut named in that comment is tried as well
+(`keep-window-cpu.patch`, §49.11): it does what it says and buys 248 MiB and
+no throughput at 131072, 3.8 GiB at 524288; shipped gated on `n_tokens ≥ 256`
+because on the token graph it costs −1 % generation. The unit runs it.
 
 On DeepSeek-V4-Flash three host-side mask inputs — the CSA mask (two views per
 CSA layer), the HCA mask, and the raw/SWA mask window (every layer) — were
@@ -37,26 +41,36 @@ Outputs byte-identical at temperature 0. `IK_MASK_SHARE=0` = the old graph.
 
 **Sweeps owed** (each is one depthbench pair, ~10 min, service down):
 
-1. `-nkvo -ncmoe 18` vs the shipped 19: the 2 GiB the patch freed is one
-   expert layer (89 367 + 4 992 = 94 359 of 97 887 MiB; 17 does not fit). If it
-   wins at 20k and 122k, move `deepseek-v4-flash-gpu-experts-128k` to 18.
+1. ~~`-nkvo -ncmoe 18` vs the shipped 19~~ — **DONE 2026-09-04, it does not
+   fit** (§49.11). Loads with the same buffer, dies in the pool's `cuMemCreate`
+   on the first 8192-token u-batch, with or without the CPU cut; the logged
+   buffers leave out ≈ 3.5 GiB of runtime allocations (context, cuBLAS, VMM
+   pool), measured as 94 648 MiB peak at 19 against 91 095 logged. The 2 GiB
+   is headroom the profile lacked, not a layer. Stays at 19.
 2. `--swa-compress -ncmoe 18` (the 21 → 18 that §49.9 predicted; 4 616 MiB
-   buffer, 17 is ~300 MiB short at `-ub 8192`, might fit at 4096).
+   buffer, 17 is ~300 MiB short at `-ub 8192`, might fit at 4096). Budget it
+   with the 3.5 GiB above before running.
 3. KV on the GPU without `--swa-compress`, `-ncmoe 21` — exact attention,
    within 1 % of the shipped profile on prefill, 3–4 % behind on generation
    (§49.10). Possible new default if the 128k KV (5 504 MiB) is worth more
    than the layer it costs.
 4. 262144 with the patch: `-nkvo` was 11 136 and `--swa-compress` 21 380 (§49.6);
    both should collapse the same way, and the 256k profile's placement may move.
+5. **524288 re-placement.** `deepseek-v4-flash-512k` sits at `-ncmoe 25`
+   because its buffer was 21 376 MiB; on the current build it is 7 304
+   (11 135 without the CPU cut, §49.11). With the 3.5 GiB runtime share and the
+   ≥ 7 GiB of headroom its header says depth needs, 22 should load and 21 is
+   marginal — three layers, each worth a few percent of generation at 130k.
+   One reserve probe per candidate, then a depthbench at 130k for the winner.
 
 **Upstream.** The follow-up comment for #2344 is posted (2026-09-04,
 `docs/external/comment-2344-mask-share.md`,
 <https://github.com/ikawrakow/ik_llama.cpp/issues/2344#issuecomment-5532719298>)
-with the patch and the numbers; a PR was offered. One refinement it names:
-step 4 of the patch still copies one strided span of the host mask per graph
-(1–2 GiB at reserve); a `ggml_cont`
-of the window pinned to the CPU backend (34/68 MiB) would remove it, via the
-build callback the way `kqv_merged_cont` is pinned for `-nkvo`.
+with the patch and the numbers; a PR was offered. The refinement it names —
+the window `ggml_cont` pinned to the CPU backend via the build callback — is
+now measured (§49.11): mechanism as described, 248 MiB / no throughput at
+131072, 3.8 GiB at 524288. Not worth a comment of its own; it goes into the PR
+if he asks for one, with the 512k buffer line as its justification.
 
 ---
 
