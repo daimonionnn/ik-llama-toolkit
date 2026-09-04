@@ -5269,6 +5269,56 @@ signature. Files: `results/depthbench-ub8192-20260904-04{0553,0650,1231,1657,212
 (0553 and 2128 are the two `-ncmoe 18` deaths), the sched dumps are session
 scratch.
 
+### 49.12 The A/B again at 400 W, on the shipped build: the cap costs 4–5 % of prefill and nothing else (2026-09-04)
+
+The card went back to its standing 400 W cap at 09:56 (LACT, journal-confirmed;
+the 600 W of §49.10's re-run and §49.11 was for the measurement), so the
+§49.10 A/B was run once more the same way — `tools/depthbench.sh 8192 -p
+deepseek-v4-flash-gpu-experts-128k -r 2 20000 122000`, `IK_GDB=0`, patched /
+`IK_MASK_SHARE=0` from one binary — this time on the 04:35 build the unit
+serves (mask-share + the gated window cut), 09:58–10:08 CEST, unit stopped,
+`power.draw` and the SM clock sampled once a second alongside:
+
+| cap, binary | depth | prefill t/s | generation t/s |
+|---|---:|---|---|
+| **400 W, 04:35 build (this run)** | 19 790 | **1 776.8** / 1 697.5 (+4.7 %) | **19.97** / 19.42 (+2.8 %) |
+| | 121 981 | **1 626.5** / 1 360.5 (**+19.6 %**) | **19.03** / 17.19 (**+10.7 %**) |
+| 400 W, 21:59 build (§49.10, 09-03) | 19 807 | 1 773.0 / 1 699.5 (+4.3 %) | 19.96 / 19.41 (+2.8 %) |
+| | 121 970 | 1 618.9 / 1 360.9 (+19.0 %) | 19.12 / 17.27 (+10.7 %) |
+| 600 W, 21:59 build (§49.10, 09-03) | 19 807 | 1 852.2 / 1 766.5 (+4.9 %) | 19.95 / 19.38 (+2.9 %) |
+| | 121 970 | 1 710.6 / 1 382.1 (+23.8 %) | 18.99 / 17.25 (+10.1 %) |
+
+Spreads 2.6–2.9 % at 20k, 0.2–0.3 % at 122k, the usual floor.
+
+**Against the first 400 W A/B** every one of the eight figures is within
+0.5 % (patched +0.2 / +0.5 % prefill, 0.0 / −0.5 % generation; old −0.1 / 0.0
+and 0.0 / −0.5). A day apart, a different binary, the same numbers — which is
+also §49.11's "the window cut is throughput-neutral at 131072" confirmed at
+the cap the card actually runs at, and the reproducibility figure to hold the
+next measurement against.
+
+**What the cap costs.** 600 → 400 W on the same graph: patched prefill
+−4.1 % at 20k and −4.9 % at 122k, old −3.9 % and −1.6 %, generation ±0.2 %
+everywhere. The samples say why the split is unequal, as in §49.10: over a
+122k prefill the patched graph averages 347–354 W and spends 23 % of its
+seconds pinned at the cap (samples 401–420 W), mean SM clock 2 499–2 533 MHz;
+the old graph averages 338–339 W, 14–15 % at the cap, and clocks *higher*,
+2 678–2 687 MHz, because it idles through its blocking copies and the
+governor has power to spare when it does compute. At 600 W the same graphs
+averaged 400–405 and 353–357 W. Generation draws 162–180 W in both, never
+within reach of either cap; it did not move. Per 8192-token u-batch at 122k:
+6.02 → 5.04 s, **−0.98 s** — §49.10's 400 W pair was 6.02 → 5.06, −0.96.
+
+**What to quote.** The README's 1 850 / 1 720 pp and 19.9 / 19.1 tg are the
+600 W numbers; at the standing 400 W the shipped profile is **1 777 / 1 627
+pp** and the same generation. The A/B gap is +19.6 % / +10.7 % capped and
++23.8 % / +10.1 % uncapped; the mechanism does not care about the cap, only
+the patched graph's headroom does. Files:
+`results/depthbench-ub8192-20260904-{095835,100250}.md`,
+`results/power-400w-20260904.csv`; alignment: `tools/power-align.py
+results/power-400w-20260904.csv logs/server-20260904-{095836,100255}.log`.
+The unit is back on the same binary since 10:08 (`4744.03 MiB`).
+
 ## 50. ds4 #791: the PR that must not be sent (2026-09-01)
 
 tedin7 independently confirmed cause 1 on RTX 3090/3080 (sm_86, driver 580.x),

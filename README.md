@@ -92,7 +92,9 @@ weights, so effectively lossless — served by the
 | ~122k | 1 720 | 19.1 |
 
 (RESULTS §49.10–§49.11, 2026-09-04, `tools/depthbench.sh`, temperature 0, a
-salt per request so nothing is served from cache.) `./serve.sh` with no
+salt per request so nothing is served from cache, the card at its 600 W
+maximum. At the 400 W cap this machine normally runs, prefill is 4–5 % lower
+— 1 777 / 1 627 — and generation the same, §49.12.) `./serve.sh` with no
 arguments starts it; the profile is `IK_PROFILE` in
 [`config/default.env`](config/default.env).
 
