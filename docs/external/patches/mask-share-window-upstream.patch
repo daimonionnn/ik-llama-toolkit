@@ -1,0 +1,195 @@
+diff --git a/src/graphs/build_deepseek4.cpp b/src/graphs/build_deepseek4.cpp
+index 720abe51..914609e0 100644
+--- a/src/graphs/build_deepseek4.cpp
++++ b/src/graphs/build_deepseek4.cpp
+@@ -142,6 +142,52 @@ static ggml_tensor * dsv4_build_mask_stream_view(
+             mask->nb[1], mask->nb[1]*n_tokens_stream, mask->nb[1]*n_tokens_stream, 0);
+ }
+ 
++// LOCAL FIX (ik-llama-toolkit), RESULTS 49.9. The CSA mask is one host-side
++// input tensor, but dsv4_build_raw_mask_view is called twice per CSA layer
++// (indexer + top-k mask) and returned a fresh view of it every time.
++// ggml_backend_sched keys its split-input copies by tensor, so every view
++// became its own n_kv x n_tokens device copy, and all input copies of a split
++// are allocated at the START of that split. With N contiguous GPU-resident
++// expert layers -- one big split -- that is 2 x N x 256 MiB at 128k / -ub 4096
++// (512 MiB at -ub 8192): the whole "compute buffer grows with -ncmoe" curve,
++// and 2 x N host-to-device transfers of the same bytes per u-batch. When the
++// caller asks for the whole mask, hand back the mask itself: one tensor, one
++// copy per split, shared by every layer. IK_MASK_SHARE=0 restores the old
++// behaviour so the two can be measured against each other with one binary.
++static bool dsv4_share_full_mask() {
++    static const bool share = [] {
++        const char * env = getenv("IK_MASK_SHARE");
++        return env == nullptr || atoi(env) != 0;
++    }();
++    return share;
++}
++
++// LOCAL FIX (ik-llama-toolkit), RESULTS 49.11. The SWA window cut below is a
++// strided view of the host-side mask input. Left to the scheduler, its
++// ggml_cont lands on the GPU, so the VIEW becomes the split input and is
++// copied by its span -- first-to-last byte, i.e. the whole n_kv x n_tokens
++// mask, 2 GiB at 131072 / -ub 8192, 8 GiB at 524288 -- once per graph,
++// through the blocking host-to-device path, and allocated in the CUDA compute
++// buffer for the duration of the cont. Cut on the CPU instead, the window is
++// one contiguous nton x n_tokens tensor (132 MiB at -ub 8192) and that is all
++// that crosses the bus. The cut only gets its "_cpu" name here;
++// llama_build_graph's callback does the pinning, the way it pins
++// kqv_merged_cont for -nkvo.
++//
++// Measured (49.11): at 131072 the span never sets the buffer's peak, so the
++// CPU cut is worth 248 MiB of VRAM and no throughput; at 524288 it is the
++// peak and the cut saves 3.8 GiB. Per token it costs an extra CPU split and
++// its sync (-1 % generation), so it is only applied to u-batches of at least
++// IK_MASK_WINDOW_CPU tokens (default 256): every prefill u-batch, and the
++// worst-case graph the compute buffer is reserved from. 0 disables it.
++static int dsv4_window_cpu_min_tokens() {
++    static const int min_tokens = [] {
++        const char * env = getenv("IK_MASK_WINDOW_CPU");
++        return env == nullptr ? 256 : atoi(env);
++    }();
++    return min_tokens;
++}
++
+ static ggml_tensor * dsv4_build_raw_mask_view(
+         ggml_context * ctx,
+         ggml_tensor  * mask,
+@@ -154,10 +200,14 @@ static ggml_tensor * dsv4_build_raw_mask_view(
+     const int64_t n_rows_stream = GGML_PAD(n_kv, 256);
+ 
+     if (raw_k_read_idxs == nullptr) {
+-        auto base = ggml_view_2d(ctx, mask, n_kv, n_tokens, mask->nb[1], 0);
+-        if (!ggml_is_contiguous(base)) {
+-            base = ggml_cont(ctx, base);
+-            cb(base, "mask_base", il);
++        // LOCAL FIX (ik-llama-toolkit), RESULTS 49.9 -- see dsv4_share_full_mask.
++        ggml_tensor * base = mask;
++        if (!dsv4_share_full_mask() || mask->ne[0] != n_kv || mask->ne[1] != n_tokens) {
++            base = ggml_view_2d(ctx, mask, n_kv, n_tokens, mask->nb[1], 0);
++            if (!ggml_is_contiguous(base)) {
++                base = ggml_cont(ctx, base);
++                cb(base, "mask_base", il);
++            }
+         }
+         return n_stream == 1 ? base : dsv4_build_mask_stream_view(ctx, base, n_stream, n_tokens);
+         //auto base = mask->ne[0] == n_kv && mask->ne[1] == n_tokens ? mask
+@@ -168,6 +218,18 @@ static ggml_tensor * dsv4_build_raw_mask_view(
+     }
+ 
+     if (n_stream <= 0 || n_tokens % n_stream != 0 || raw_k_read_idxs->ne[0] < n_rows_stream*n_stream) {
++        // LOCAL FIX (ik-llama-toolkit), RESULTS 49.9 -- see dsv4_share_full_mask.
++        // The raw/SWA branch of every layer lands here when the raw plan is
++        // empty (the reserve graph, and prefill without --swa-compress): the
++        // view is the whole n_ctx x n_tokens mask -- 1 GiB at 128k / -ub 4096
++        // -- and the cont of it a second 1 GiB, per layer. The mask input is
++        // already contiguous and its rows beyond n_tokens are the -inf padding
++        // dsv4_pad_mask_tokens would add: hand it back as it is, one device
++        // copy per split. The SWA window cut further down is shared as well.
++        if (dsv4_share_full_mask() && n_stream <= 1 && mask->ne[0] == n_kv && mask->ne[1] >= n_tokens &&
++            ggml_is_contiguous(mask)) {
++            return mask;
++        }
+         ggml_tensor * base = ggml_cont(ctx, ggml_view_2d(ctx, mask, n_kv, n_tokens, mask->nb[1], 0));
+         cb(base, "mask_base1", il);
+         return dsv4_build_mask_stream_view(ctx, base, std::max<int64_t>(1, n_stream), n_tokens);
+@@ -774,7 +836,14 @@ static ggml_tensor * dsv4_build_lid_top_k_shared(
+         ggml_tensor * w = ggml_view_2d(ctx0, indexer_weights,
+                 indexer_weights->ne[0], indexer_weights->ne[1], indexer_weights->nb[1],
+                 s*indexer_weights->nb[3]);
+-        ggml_tensor * mask = ggml_view_2d(ctx0, indexer_mask,
++        // LOCAL FIX (ik-llama-toolkit), RESULTS 49.9 -- see dsv4_share_full_mask.
++        // With one stream this view is the whole mask, and a per-layer view is
++        // a per-layer device copy: pass the mask through unchanged so every
++        // layer's INDEXER_TOPK reads the one copy the scheduler already makes.
++        ggml_tensor * mask = dsv4_share_full_mask() && n_stream == 1 && indexer_mask->ne[1] == n_tokens &&
++                             indexer_mask->ne[2] == 1 && indexer_mask->ne[3] == 1
++            ? indexer_mask
++            : ggml_view_2d(ctx0, indexer_mask,
+                 indexer_mask->ne[0], n_tokens, indexer_mask->nb[1],
+                 s*n_tokens*indexer_mask->nb[1]);
+ 
+@@ -1136,9 +1205,30 @@ static ggml_tensor * ds4_attention(ggml_cgraph * gf, ggml_context * ctx0, llm_bu
+         if (first > 0) {
+             raw_k = ggml_view_4d(ctx0, raw_k, raw_k->ne[0], raw_k->ne[1], nton, raw_k->ne[3],
+                     raw_k->nb[1], raw_k->nb[2], raw_k->nb[3], raw_k->nb[2]*first);
+-            raw_mask = ggml_view_4d(ctx0, raw_mask, nton, raw_mask->ne[1], raw_mask->ne[2], raw_mask->ne[3],
+-                    raw_mask->nb[1], raw_mask->nb[2], raw_mask->nb[3], raw_mask->nb[0]*first);
+-            raw_mask = ggml_cont(ctx0, raw_mask);
++            // LOCAL FIX (ik-llama-toolkit), RESULTS 49.9 -- see dsv4_share_full_mask.
++            // first, nton and raw_mask are the same for every layer of this graph,
++            // so the window is cut and made contiguous once and shared. Cut per
++            // layer, each view of the host-side mask is its own split input, and
++            // the scheduler copies the strided span -- the whole mask -- once per
++            // layer, at the start of the split.
++            auto & win = lctx.dsv4.inputs.raw_mask_window;
++            if (!dsv4_share_full_mask() || win.window == nullptr || win.src != raw_mask ||
++                win.first != first || win.nton != nton) {
++                ggml_tensor * cut = ggml_view_4d(ctx0, raw_mask, nton, raw_mask->ne[1], raw_mask->ne[2], raw_mask->ne[3],
++                        raw_mask->nb[1], raw_mask->nb[2], raw_mask->nb[3], raw_mask->nb[0]*first);
++                cut = ggml_cont(ctx0, cut);
++                // LOCAL FIX (ik-llama-toolkit), RESULTS 49.11 -- see dsv4_window_cpu_min_tokens.
++                // Pin only when the mask really is the host input: after a
++                // GPU-side cont (IK_MASK_SHARE=0, a padded mask, n_stream > 1)
++                // a CPU cut would pull the span DOWN instead of pushing it up.
++                const int min_tokens = dsv4_window_cpu_min_tokens();
++                const bool cut_on_cpu = min_tokens > 0 && n_tokens >= min_tokens &&
++                    dsv4_share_full_mask() &&
++                    raw_mask->view_src == nullptr && (raw_mask->flags & GGML_TENSOR_FLAG_INPUT);
++                cb(cut, cut_on_cpu ? "dsv4_raw_mask_window_cpu" : "dsv4_raw_mask_window", il);
++                win.src = raw_mask; win.window = cut; win.first = first; win.nton = nton;
++            }
++            raw_mask = win.window;
+         }
+     }
+ 
+@@ -1287,6 +1377,7 @@ ggml_cgraph * llm_build_context::build_deepseek4() {
+     dsv4_new_i32_input(ctx0, &lctx.dsv4.inputs.raw_k_write_src_idxs, (int64_t) lctx.dsv4.raw.write_src_idxs.size(), "dsv4_raw_k_write_src_idxs");
+     dsv4_new_i32_input(ctx0, &lctx.dsv4.inputs.raw_k_write_idxs, (int64_t) lctx.dsv4.raw.write_dst_idxs.size(), "dsv4_raw_k_write_idxs");
+     dsv4_new_i32_input(ctx0, &lctx.dsv4.inputs.raw_k_read_idxs, (int64_t) lctx.dsv4.raw.read_dst_idxs.size(), "dsv4_raw_k_read_idxs");
++    lctx.dsv4.inputs.raw_mask_window = {}; // LOCAL FIX 49.9: per-graph cache, never outlives ctx0
+     dsv4_build_plan_inputs(ctx0, lctx.dsv4.inputs.csa, lctx.dsv4.csa_plan, "dsv4_csa", n_tokens, true, lctx.cparams.flash_attn);
+     dsv4_build_plan_inputs(ctx0, lctx.dsv4.inputs.hca, lctx.dsv4.hca_plan, "dsv4_hca", n_tokens, true, lctx.cparams.flash_attn);
+     dsv4_build_plan_inputs(ctx0, lctx.dsv4.inputs.lid, lctx.dsv4.lid_plan, "dsv4_lid", n_tokens, false, lctx.cparams.flash_attn);
+diff --git a/src/llama-build-context.cpp b/src/llama-build-context.cpp
+index 61373eca..54bf10bd 100644
+--- a/src/llama-build-context.cpp
++++ b/src/llama-build-context.cpp
+@@ -2703,6 +2703,17 @@ ggml_cgraph * llm_build_context::llama_build_graph(
+             }
+         }
+ 
++        // LOCAL FIX (ik-llama-toolkit), RESULTS 49.11. build_deepseek4 names its
++        // SWA window cut "dsv4_raw_mask_window_cpu" when the cut is a view of the
++        // host-side mask input and the u-batch is large enough to be worth it
++        // (see dsv4_window_cpu_min_tokens there): computed on the CPU, only the
++        // contiguous window crosses to the GPU instead of the view's span, which
++        // is the whole mask. This callback is the one place that can assign a
++        // node's backend, hence the name as the signal.
++        if (strcmp(name, "dsv4_raw_mask_window_cpu") == 0) {
++            ggml_backend_sched_set_tensor_backend(lctx.sched, cur, lctx.backend_cpu);
++        }
++
+         // norm may be automatically assigned to the backend of the previous layer, increasing data transfer between backends
+         // FIXME: fix in ggml_backend_sched
+         const bool full_offload = lctx.model.n_gpu_layers > (int)lctx.model.hparams.n_layer;
+diff --git a/src/llama-context.h b/src/llama-context.h
+index c1c4a548..ad722c9c 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -597,6 +597,15 @@ struct llama_context {
+             comp_inputs csa;
+             comp_inputs hca;
+             comp_inputs lid;
++            // LOCAL FIX (ik-llama-toolkit), RESULTS 49.9: the SWA window cut out of
++            // the raw mask is the same for every layer of a graph; built once per
++            // graph and shared (see build_deepseek4.cpp, dsv4_share_full_mask).
++            struct {
++                struct ggml_tensor * src = nullptr;
++                struct ggml_tensor * window = nullptr;
++                int first = 0;
++                int nton = 0;
++            } raw_mask_window;
+         };
+ 
+         storage cache;

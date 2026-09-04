@@ -5269,6 +5269,25 @@ signature. Files: `results/depthbench-ub8192-20260904-04{0553,0650,1231,1657,212
 (0553 and 2128 are the two `-ncmoe 18` deaths), the sched dumps are session
 scratch.
 
+**Soak of the mask-sharing build, for the record.** Before the window cut
+went in, the 21:59 binary (mask share alone, `4991.80 MiB`) served the unit
+from 00:22 to 04:04 under `tools/soak.sh` — `logs/server-20260904-002250.log`,
+soak logs `logs/soak-20260904-{002840,003012,003450,011210}.log`. The
+long run (from 01:12, seed 1788477130, 5.5 h asked, stopped at 03:28 once
+Hermes traffic showed up beside it — no soak while the model is in use) did
+**493 requests, 4.70 M prefilled and 64 003 generated tokens in 128 min**, conversations climbed to `n_past` 124 644 and branched 93 times
+back to non-aligned cache positions, 0 aborts, 0 probe mismatches (the fixed
+~3k prompt at temperature 0 answered identically every cycle). The earlier
+35-minute run stopped itself on a false positive — the server echoes prompt
+text around a cache divergence, and the prose it was fed is this repo's docs,
+which contain the string `IK_NAN_CHECK`; the detector is anchored to the
+server's own line formats since. Over the whole server process: **646
+completions, 7 045 887 prefilled tokens, zero `ERR` lines** (the only non-200
+responses were two `GET`s from a client probing `/api/tags`; the total
+includes the Hermes requests that ended the soak). Combined with
+§49.6's 3 046 843 on the clamp alone, the fixed graph now has ≈ 10 M prefilled
+tokens of abort-free traffic behind it, in the shape that produced every abort.
+
 ### 49.12 The A/B again at 400 W, on the shipped build: the cap costs 4–5 % of prefill and nothing else (2026-09-04)
 
 The card went back to its standing 400 W cap at 09:56 (LACT, journal-confirmed;

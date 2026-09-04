@@ -24,8 +24,11 @@ Apply in table order; `keep-mask-share.patch` is generated on top of
 | `keep-fattn-new-mma.patch` | guards three unprotected `0/0` divisions in the new-MMA FA kernel (combine, stream-k fixup, main-kernel rowsum). Hardening only — none of them was the cause. §48.1 |
 
 `mask-share-upstream.patch` is the same change rebased onto the upstream
-tree without the NaN clamp — the version to hand to ikawrakow (applies to
-`15dddc60` with `git apply`).
+tree without the NaN clamp — the version handed to ikawrakow in the #2344
+comment (applies to `15dddc60` with `git apply`).
+`mask-share-window-upstream.patch` is that plus `keep-window-cpu` (+119 −8,
+three files), generated 2026-09-04 by applying the two on a clean `15dddc60`
+worktree; it re-applies clean there and carries no clamp.
 
 ## Archived — `diagnostics-full-8337e4cd.patch`, 1982 lines
 
