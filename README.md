@@ -80,26 +80,70 @@ collide over port 8090 and over VRAM.
 
 ---
 
-## What tuning bought on this box
+## The default model: DeepSeek-V4-Flash
 
-### DeepSeek-V4-Flash MXFP4
+**DeepSeek-V4-Flash-0731 in MXFP4** — lmstudio-community's repack of the QAT
+weights, so effectively lossless — served by the
+`deepseek-v4-flash-gpu-experts-128k` profile at 131072 context:
 
-At three context sizes, all measured with
-`tools/depthbench.sh` and `tools/sweep.sh` on the same machine, same build, same
-quant — `max_tokens` 160, temperature 0, a salt unique per request so nothing is
-served from cache:
+| depth | prefill | generation |
+|---|---:|---:|
+| ~20k | **1 850 tok/s** | **19.9 t/s** |
+| ~122k | 1 720 | 19.1 |
 
-| context | prefill @32k | generation @32k | checkpoints |
-|---|---:|---:|---|
-| **131072** *(default)* | **1830 tok/s** | 19.3 t/s | on, upstream defaults |
-| 262144 | 1637 | 17.4 | on, `--cache-ram 32768` ceiling |
-| 524288 | 1721 | 16.3 | off — twice the cost at this size |
+(RESULTS §49.10–§49.11, 2026-09-04, `tools/depthbench.sh`, temperature 0, a
+salt per request so nothing is served from cache.) `./serve.sh` with no
+arguments starts it; the profile is `IK_PROFILE` in
+[`config/default.env`](config/default.env).
 
-The 131072 profile started this work at **486 tok/s**. It is now **3.8× faster**,
-and the model, the quant and the answers are unchanged — every gain is placement,
-batching or scheduling.
+The model is ~146 GiB against 96 GiB of VRAM, so the routed experts of 19 of
+its 43 layers live in host RAM. What makes the profile fast is *who computes
+them*: they are streamed across PCIe every micro-batch and the GEMM runs on the
+GPU — which is what happens as soon as `-rtr` is not passed, because `-rtr`
+repacks them into a CPU-only type (§21). The KV cache goes to host RAM too
+(`-nkvo`): MLA's latent is small and DeepSeek Sparse Attention reads only ~512
+positions of it, and the VRAM this frees holds two more expert layers (§49.6).
+`-ub 8192` amortises the streaming (§22.4). The VRAM is full to within about
+2 GiB — and that is headroom, not room for another layer: `-ncmoe 18` loads and
+dies in the first u-batch, because ≈ 3.5 GiB of runtime allocations sit outside
+the buffers the load log reports (§49.11).
 
-Three findings did nearly all of it:
+**It runs on a locally patched `ik_llama.cpp`** — the SWA-mask clamp that ended
+the NaN aborts and the mask sharing that shrank the compute buffer, the last two
+findings below. The diffs and their apply order are in
+[`docs/external/patches/`](docs/external/patches/README.md); `build.sh` does
+*not* apply them, so re-apply after `./build.sh --update`. The load log's
+`CUDA0 compute buffer size = 4744.03 MiB` is the proof they are active (the
+unpatched graph reports 7040.03). Soak: **3 046 843 prefilled tokens with zero
+aborts** after the clamp, where 12.3 were expected at the old rate; the mask
+patch has served since 2026-09-04 and real traffic is its soak.
+
+### DeepSeek profiles
+
+| profile | context | placement | measured pp / tg | when |
+|---|---:|---|---|---|
+| **`deepseek-v4-flash-gpu-experts-128k`** *(default)* | 131072 | `-nkvo -ncmoe 19 -ub 8192` | **1 850 / 19.9** at 20k, 1 720 / 19.1 at 122k | everything — the deepest request ever seen here was 139k |
+| `deepseek-v4-flash-gpu-experts-256k` | 262144 | `--swa-compress -ncmoe 21 -ub 4096` | 1 223 / 16.1 at 52k, 1 107 / 15.8 at 122k (§49.4) | when the window is really needed; costs ~13 % of every turn |
+| `deepseek-v4-flash-512k` | 524288 | `-nkvo -ncmoe 25 -ub 8192`, checkpoints off | 1 721 / 16.3 at 32k, 1 335 / 14.9 at 128k (§29) | long single shots, not chat: checkpoints and prompt cache are off (54 GiB of RAM and 26 % of generation at this size, §9.3), so a re-sent conversation re-prefills |
+| `deepseek-v4-flash-mtp` | 65536 | antirez IQ2XXS, entirely in VRAM, + MTP draft | **~87 t/s** generation (§7) | when 2-bit quality is acceptable; the fastest coherent DeepSeek here |
+
+The 256k and 512k figures predate the mask patch, which cut their compute
+buffers to 3.1 and 7.3 GiB; both are due a re-placement (TODO #17).
+
+Eight further profiles are **legacy**, kept so RESULTS §5–§16 can be re-run
+rather than reconstructed: the `-rtr` family (`deepseek-v4-flash-128k-kvram`,
+`-128k-kvram-mtp`, `-256k-kvram`, `-256k-kvram-mtp`), which computes the
+experts on the CPU at ~480 tok/s prefill against ~1 850 (§21); the `--fit`
+profiles (`deepseek-v4-flash`, `mxfp4-tuned`); the `-ub 1024` experiment; and
+`step-3.7-flash-q4-r4`, whose model file was deleted. `./serve.sh --list` groups
+them separately, and the `# LEGACY:` line in each header says why. Their
+measurements are in the headers and in RESULTS; nothing here recommends them.
+
+### How it got here
+
+The profile started at **486 tok/s** prefill. It is now **3.8× faster** with the
+same model, the same quant and the same answers — every gain is placement,
+batching, scheduling or a graph fix. Four findings did nearly all of it:
 
 * **`-rtr` was computing the experts on the wrong processor** (§21). It repacks
   host-resident experts into `MXFP4_R8`, a type with no CUDA kernel, which pins
@@ -108,104 +152,92 @@ Three findings did nearly all of it:
 * **The micro-batch has to be large enough to amortise weight streaming** (§22.4).
   `-ub 8192` over 2048 is +17 % at depth; `-b` must be raised with it or it is
   silently clamped.
-* **An upstream f16 overflow in DSA attention** (§24) was causing an
-  intermittent all-`nan` abort roughly every 100–330 k prefilled tokens. Fixed in
-  `ff141691`; our checkout predated it by three and a half hours.
+* **An intermittent all-`nan` abort every 100–330k prefilled tokens** kept the
+  micro-batch at 1024 for weeks. The cause was a malformed SWA mask — the window
+  view was anchored on the padded KV length rather than on `kv_head`, so leading
+  rows could arrive entirely `-inf` and flash-attention turned them into NaN. A
+  one-line clamp, zero aborts since (§49.2, upstream
+  [#2344](https://github.com/ikawrakow/ik_llama.cpp/issues/2344), closed).
+* **The compute buffer was 105 copies of three masks** (§49.9–§49.11). Every
+  layer re-viewed the same host-side masks and the scheduler copied each view
+  separately, by its span — 22 GiB at one placement. Sharing them is 3 copies,
+  7 040 → 4 744 MiB on the shipped profile, and the bandwidth it frees is
+  **+24 % prefill / +10 % generation at 122k**. Found because upstream said our
+  buffer numbers did not pass the smell test; offered back in the same issue.
 
-Two of those three came from looking outside this repository. The full
-measurements, including the negative results and three conclusions that were
-measured correctly and read wrongly, are in [docs/RESULTS.md](docs/RESULTS.md).
+The full measurements, including the negative results and the conclusions that
+were measured correctly and read wrongly, are in
+[docs/RESULTS.md](docs/RESULTS.md).
+
+---
+
+## The other models
 
 ### Qwen3.8-Flash-Next
 
 A hybrid SSM/attention MoE — 176.9 B parameters, 512 experts with 10 used, and
-full attention on only every fourth of its 48 layers. Measured with
-`llama-sweep-bench` (RESULTS §51), shallow figures, `-ctk/-ctv q8_0`:
+full attention on only every fourth of its 48 layers. The Q8_0 profile was the
+default for one day (2026-09-03, for Hermes); DeepSeek took the slot back with
+the mask patch. Measured with `llama-sweep-bench` (RESULTS §51), shallow figures,
+`-ctk/-ctv q8_0`:
 
 | profile | prefill | generation | @32k | @~76–96k |
 |---|---:|---:|---|---|
-| **Q4_K_M 131072** *(fastest)* | **3486 tok/s** | **128.9 t/s** | — | 1440 / 62.2 |
-| Q4_K_M 262144 | 3342 | 128.6 | — | 1346 / 59.7 |
-| **Q8_0 131072** *(default)* | 2303 | 40.6 | 1854 / 35.3 | 1368 / 30.8 |
-| Q8_0 262144 | 2163 | 36.9 | 1757 / 32.4 | — |
+| **`qwen38-flash-next-q4km-128k`** *(fastest)* | **3486 tok/s** | **128.9 t/s** | — | 1440 / 62.2 |
+| `qwen38-flash-next-q4km-256k` | 3342 | 128.6 | — | 1346 / 59.7 |
+| `qwen38-flash-next-q8-128k` | 2303 | 40.6 | 1854 / 35.3 | 1368 / 30.8 |
+| `qwen38-flash-next-q8-256k` | 2163 | 36.9 | 1757 / 32.4 | — |
 
-**The first draft of the Q4 profile, with the settings simply carried over from
-DeepSeek (`-ncmoe 13 -ub 4096`), measured 2753 tok/s and 60.6 t/s.** Tuning it
-was worth **+27 % prefill and +113 % generation** — and almost all of the second
-number came from one knob:
+The first draft of the Q4 profile, with the settings carried over from DeepSeek
+(`-ncmoe 13 -ub 4096`), measured 2753 tok/s and 60.6 t/s; tuning was worth
++27 % prefill and **+113 % generation**, almost all of it from one knob.
+**Expert residency dominates here, far more than on DeepSeek**: sweeping
+`-ncmoe` from 13 to 0 gains 12 % prefill but 113 % generation, because ten of
+512 experts of width 640 per token is a wide, thin, scattered read — the access
+pattern PCIe handles worst. (`-ncmoe 0` is not "all on the GPU": it works on Q4
+by luck of where the tensors land, and on Q8_0 dies in `cudaMalloc`; Q8 needs
+17.) **`-ub` behaves oppositely in the two quants** — a free prefill knob on Q4,
+while on Q8 a smaller one buys a resident expert layer worth +3.5 % generation
+for 51 % of prefill. And **Q4_K_M generates 3.2× faster than Q8_0** on the same
+card, because Q8 leaves ~94 GiB of experts in host RAM against ~34.
 
-* **Expert residency dominates here, far more than on DeepSeek.** Sweeping
-  `-ncmoe` from 13 to 0 gains 12 % prefill but **113 % generation** (60.6 →
-  128.9 t/s). Ten of 512 experts of width 640 per token is a wide, thin,
-  scattered read — the access pattern PCIe handles worst — so every layer kept
-  resident pays far more than the 2.8 % per layer DeepSeek showed in §21.
-* **`-ub` behaves oppositely in the two quants.** On Q4 the weight split does not
-  move with `-ub`, making it a free prefill knob (take the largest that fits:
-  2048 at 128k, 1024 at 256k). On Q8 a smaller `-ub` buys one more resident
-  expert layer worth +3.5 % generation and costs **51 % of prefill** — so the
-  micro-batch wins.
-* **`-ncmoe 0` is not "all on the GPU".** It works on Q4 by luck of where the
-  tensors land; the same flag on Q8_0 asks for 126 971 MiB and dies in
-  `cudaMalloc`. Q8 needs `-ncmoe 17`.
+### Step-3.7-Flash — the original default
 
-Note the quant trade this exposes: **Q4_K_M generates 3.2× faster than Q8_0** on
-the same card, because Q8 leaves ~94 GiB of experts in host RAM against ~34.
+Where the toolkit started (RESULTS §1–§5), still shipped as
+`./serve.sh step-3.7-flash-q4`: Unsloth Dynamic `Q4_K_XL`, ~220 B parameters
+with ~7.4 B active, 288 experts with 8 used, GQA rather than MLA. It trains to
+262144 and the profile serves that, at `-ncmoe 22` for **~25 tok/s** generation
+and ~208 tok/s prefill; every halving of the context buys a few tokens per
+second (the table is in [docs/TUNING.md §1](docs/TUNING.md)). Its KV cache is
+full-length on all 45 layers, which is why context is expensive here and cheap
+on the MLA models. `step-3.7-flash-q8` is the ~195 GiB quality reference at
+~13 tok/s. This is also the model on which mainline llama.cpp is as fast or
+faster — see the intro.
 
 ### Against a pair of DGX Sparks
 
-The popular way to run this model is 2× DGX Spark at TP=2. On **prefill this one
-card is in their band** — above the poorly-tuned FP8 runs, level with the good
-ones, below the NVFP4 record of 2639 tok/s. On **generation they win by 2–4×**,
-and it is structural rather than a tuning gap: each node holds half the model in
-unified memory at ~273 GB/s, against ~107 GB/s of DDR5 here for the experts that
-do not fit in VRAM.
-
-Two things are worth knowing before trusting any such comparison:
-
-* **Published 2× Spark prefill ranges from 176 to 2639 tok/s** — fifteen-fold, on
-  identical hardware. Quantisation, engine and tuning decide it, not the machine.
-* **The published figure for an RTX PRO 6000 is 344 tok/s**, measured with
-  `ds4.c` on a 2-bit quant. This repository gets **1830** out of the same card on
-  effectively lossless MXFP4 — 5.3× — so a hardware comparison drawn from that
-  number is wrong by more than the hardware difference it is trying to show.
-
-**And the verdict flips by model.** Same card, same repository, opposite result:
+The popular way to run these models is 2× DGX Spark at TP=2, and **the verdict
+flips by model**:
 
 | model + quant | this card | closest Spark reference | |
 |---|---:|---:|---|
-| DeepSeek-V4-Flash MXFP4 | 1830 pp / 19.3 tg | 2× Spark: ~1400–1900 pp / 40–53 tg | **they win tg 2–4×** |
+| DeepSeek-V4-Flash MXFP4 | 1850 pp / 19.9 tg | 2× Spark: ~1400–1900 pp / 40–53 tg | **they win tg 2–4×** |
 | Qwen3.8 Q4_K_M | **3486 pp / 128.9 tg** | 1× Spark, gpt-oss-120b: 1956 / 60.6 | **we win ~1.8× / ~2.1×** |
 | Qwen3.8 Q8_0 | 2303 pp / **40.6 tg** | 2× Spark FP8: ~1000–1500 / ~36–44 *(est.)* | wash on tg, ours on pp |
 
-The Spark column is not like-for-like and cannot be — the quants differ, and for
-Qwen the only mature-software data point is a different model of the same class
-(gpt-oss-120b, which *fits* in one Spark's 128 GB). Nobody has published FP8
-Qwen3.8 on a Spark pair at all, because FP8 measures *slower* than NVFP4 for MoE
-on that hardware (52 against 66.9 tok/s on a Spark MoE). Read
-[docs/VS-DGX-SPARK.md](docs/VS-DGX-SPARK.md) before quoting any of this.
-
-What decides it is neither the machine nor how much spills into DDR5 — Qwen at
-Q8_0 spills more than DeepSeek (95.9 GiB against 63) and still generates twice as
-fast. It is **expert geometry**: DeepSeek's 6-of-256 experts on a 4096-wide
-residual with a 2048 FFN move 6.49 B active parameters per token, against 2.36 B
-for Qwen's 10-of-512 at 2560 × 640. Decode is bandwidth-bound, so the model that
-reads fewer bytes per token wins — even at twice the bits per weight.
-
-Tables and sources for both models in [docs/VS-DGX-SPARK.md](docs/VS-DGX-SPARK.md).
+What decides it is expert geometry, not the machine: DeepSeek moves 6.49 B
+active parameters per token, Qwen 2.36 B, and decode is bandwidth-bound.
+Published 2× Spark prefill for DeepSeek ranges from 176 to 2639 tok/s on
+identical hardware, so read [docs/VS-DGX-SPARK.md](docs/VS-DGX-SPARK.md) before
+quoting any of this.
 
 ---
 
 ## The reference machine
 
-These are the specs the shipped defaults are tuned for — **the whole repository
-is one machine's tuned answer**, and the `-ncmoe` / `-ub` values in every profile
-encode this card's 96 GiB rather than a general truth.
-
-On different hardware everything still works. Fewer gigabytes of VRAM means more
-expert layers on the host and less throughput, not a failure to run: the project
-exists precisely because the model is bigger than the card. Re-run `./bench.sh
-ncmoe` to re-pick the split, or start from a `--fit` profile that sizes itself
-(see [docs/FAQ.md](docs/FAQ.md) and [docs/TUNING.md](docs/TUNING.md)).
+The specs the shipped defaults are tuned for. On different hardware everything
+still works — fewer gigabytes of VRAM means more expert layers on the host and
+less throughput, not a failure to run.
 
 | resource | reference configuration |
 |----------|-----|
@@ -229,111 +261,6 @@ that does not fit on the GPU is disproportionately expensive. Almost all of the
 tuning in this toolkit is about deciding *what* gets exiled to system RAM — which
 is exactly the problem any "model bigger than VRAM" setup faces, on any GPU.
 
-## The default model
-
-**Qwen3.8-Flash-Next**, `Q8_0`, served by the `qwen38-flash-next-q8-128k`
-profile — 131072 context, **2303 tok/s prefill**, 40.6 t/s generation
-(RESULTS §51). A hybrid SSM/attention MoE: 176.9 B parameters, 512 experts with
-10 used per token, and a KV cache on only every fourth of its 48 layers, which
-is why 131072 costs 2 224 MiB of cache instead of the ~12 GiB the shape suggests.
-
-`./serve.sh` with no arguments starts it; the profile is `IK_PROFILE` in
-[`config/default.env`](config/default.env).
-
-> **This default is not soaked.** It became the default on 2026-09-03 because it
-> is what this box serves, but it has a handful of benchmark runs behind it,
-> validated to N_KV 75 776 of 131072 — against weeks of real traffic and a
-> nine-day NaN-abort hunt behind the profile it replaced. Treat early production
-> use as the soak.
-
-**Three sibling profiles** cover the other trade-offs:
-
-| profile | prefill | generation | when |
-|---|---:|---:|---|
-| `qwen38-flash-next-q4km-128k` | 3486 | **128.9** | when 4-bit quality is acceptable — 3.2× the generation |
-| `qwen38-flash-next-q4km-256k` | 3342 | 128.6 | same, with the full 262144 window |
-| `qwen38-flash-next-q8-256k` | 2163 | 36.9 | Q8 quality at 262144, −6 % pp / −9 % tg |
-
-### The previous default: DeepSeek-V4-Flash
-
-Still shipped, still the subject of §19–§49, now behind an explicit
-`./serve.sh deepseek-v4-flash-gpu-experts-128k` — MXFP4 at 131072, **~1850 tok/s
-prefill at 32k**, ~20 tok/s generation. Its experts that do not fit in VRAM are
-computed *on the GPU* rather than on the CPU, worth roughly 3× prefill
-(RESULTS §21–§24).
-
-That profile carried a "do not raise `IK_UBATCH` above 1024" warning here for
-weeks, because of an intermittent all-`nan` logits abort. **That is resolved.**
-The cause was a malformed SWA mask — the window view was anchored on the padded
-KV length rather than on `kv_head`, so leading rows could arrive entirely `-inf`
-and flash-attention turned them into NaN (RESULTS §49.2, reported upstream as
-[ik_llama.cpp#2344](https://github.com/ikawrakow/ik_llama.cpp/issues/2344)). With
-the one-line clamp the profile has run **3 046 843 prefilled tokens with zero
-aborts** where 12.3 were expected, and it now ships `-ub 8192`.
-
-Four further DeepSeek profiles cover 256k and 512k context and MTP variants that
-swap prefill for generation. See the wrapper list under [Usage](#usage).
-
-### The original default: Step-3.7-Flash
-
-Still shipped and still the subject of §1–§5, now behind an explicit
-`./serve.sh step-3.7-flash-q4`. Unsloth Dynamic `Q4_K_XL`, from
-`$IK_MODELS_ROOT/unsloth/Step-3.7-Flash-GGUF/`.
-
-| property              | value                                       |
-|-----------------------|---------------------------------------------|
-| architecture          | `step35`                                    |
-| layers                | 45 — 3 dense, then 42 MoE                   |
-| experts               | 288 total, **8 active** per token           |
-| expert FFN width      | 1280 (plus one shared expert per layer)     |
-| embedding width       | 4096                                        |
-| attention             | 8 KV heads × 128, GQA                       |
-| sliding window        | 512 tokens, pattern **1 full : 3 windowed** |
-| trained context       | 262 144                                     |
-| total / active params | ~220 B / **~7.4 B**                         |
-| file size (Q4_K_XL)   | ~114 GiB across 4 shards                    |
-| vision                | yes — `mmproj-F32.gguf` ships alongside     |
-
-Two properties of this model drive everything:
-
-1. **~91% of the weights are routed experts.** Attention, norms, embeddings,
-   the shared experts and the 3 dense layers together are only ~4.4 GiB. So
-   "how much fits on the GPU" is essentially "how many layers of experts fit".
-
-2. **Only 8 of 288 experts run per token.** Generation touches ~7.4 B
-   parameters, not 220 B. That is why this is fast at all — but it also means
-   expert access is scattered, so the CPU side is bound by memory *latency and
-   bandwidth*, not by arithmetic.
-
-`Q8_K_XL` is also configured (`./serve.sh step-3.7-flash-q8`) but is not the
-default: at ~230 GiB it pushes ~145 GiB onto the CPU instead of ~25 GiB, for a
-quality gain that Unsloth's dynamic Q4 largely already captures.
-
-### Measured performance (this box, GPU idle)
-
-Generation speed is a straight trade against context length, because the KV
-cache is large here (full-length on all 45 layers — see
-[docs/TUNING.md §3](docs/TUNING.md)) and every gigabyte of cache is a gigabyte
-not holding experts:
-
-| context            | KV cache | `-ncmoe` | generation    |
-|--------------------|----------|----------|---------------|
-| 262 144 (profile default) | 24 GiB | 22    | **~25 tok/s** |
-| 131 072            | 12 GiB   | 16       | ~33 tok/s     |
-| 65 536             | 6 GiB    | 14       | ~38 tok/s     |
-| 262 144, `q4_0` KV | 13 GiB   | 18       | ~30 tok/s     |
-
-**Prefill** is ~208 tok/s at the default. If your work is prefill-heavy (long
-prompts, RAG), the `step-3.7-flash-q4-r4` profile serves a copy whose
-CPU-resident experts are pre-repacked, lifting prefill to **~246 tok/s (+18%)**
-with generation unchanged and no startup penalty — but it is locked to the
-262144 / `-ncmoe 22` config (see the profile header for why).
-
-The `step-3.7-flash-q4` profile ships at the **full 262 144 context**. If you
-want more speed and don't need the whole window, lower `IK_CTX` and `IK_NCMOE`
-together (see the table in [docs/TUNING.md §1](docs/TUNING.md)). Prompt processing runs at a few
-hundred tok/s regardless — inherent to a model larger than VRAM.
-
 ---
 
 ## Install
@@ -353,11 +280,10 @@ sudo apt install -y cuda-toolkit-13-1
 `sm_120`, and refuses to build against one that fails — so you will get a clear
 error rather than a binary that dies at load time.
 
-**Any CUDA ≥ 12.8 is fine, 12 or 13.** Mainline llama.cpp built with CUDA 13.x
-collapses on Blackwell past 8192 context, and `build-cuda12.sh` builds this
-engine with CUDA 12.8 in a container as insurance — but the two measure
-identically here, so it is a check that was run, not a step you need. Details
-in [docs/TUNING.md §9](docs/TUNING.md).
+**Any CUDA ≥ 12.8 is fine, 12 or 13.** `build-cuda12.sh` builds the engine with
+CUDA 12.8 in a container as insurance against the CUDA-13 collapse mainline
+llama.cpp shows on Blackwell — the two measure identically here, so it is a
+check that was run, not a step you need ([docs/TUNING.md §9](docs/TUNING.md)).
 
 ### 2. Build
 
@@ -374,50 +300,32 @@ the fallback).
 ./build.sh --update    # git pull ik_llama.cpp, then rebuild
 ```
 
+The clone is gitignored, so the local patches live only in its working tree:
+`--update` warns when it sees them, and they are re-applied by hand from
+[`docs/external/patches/`](docs/external/patches/README.md) afterwards.
+
 ### 3. Free the GPU
 
 LM Studio and Ollama both keep models resident long after their last request.
-`serve.sh` checks for this and tells you who is holding VRAM:
-
-```
-warn other processes are holding GPU memory:
-       1052139  55552 MiB  .../llama-server
-       2276218  21922 MiB  /usr/local/lib/ollama/llama-server
-```
-
-Quit them, or let the toolkit do it:
-
-```bash
-IK_KILL_SQUATTERS=1 ./serve.sh
-```
-
-This matters more than it looks: `--fit` sizes the GPU/CPU split from *free*
-VRAM at launch. Starting with 20 GiB free instead of 95 GiB silently pushes
-~28 extra layers of experts onto the CPU and roughly halves your token rate.
+`serve.sh` checks for this and prints who is holding VRAM, with PIDs and sizes;
+quit them, or let the toolkit do it with `IK_KILL_SQUATTERS=1 ./serve.sh` (the
+wrappers set it). It matters more than it looks: a pinned profile simply fails
+to load, and `--fit` sizes the split from *free* VRAM at launch — starting with
+20 GiB free instead of 95 GiB silently pushes ~28 extra layers of experts onto
+the CPU and roughly halves your token rate.
 
 ---
 
 ## Usage
 
 ```bash
-./serve.sh                              # default: Qwen3.8-Flash-Next Q8_0 128k (2303 pp / 40.6 tg)
-./serve.sh step-3.7-flash-q4            # the old default: Step-3.7-Flash Q4_K_XL, ~26 tok/s
-./serve.sh mxfp4-tuned                  # DeepSeek-V4-Flash MXFP4, the tuned profile
-./serve-qwen38-flash-next-q8-128k.sh                      # THE DEFAULT: Qwen3.8 Q8_0, 2303 pp / 40.6 tg
-./serve-qwen38-flash-next-q4km-128k.sh                   # fastest overall: 3486 pp / 128.9 tg (4-bit)
-./serve-qwen38-flash-next-q4km-256k.sh                   # same at 262144: 3342 / 128.6
-./serve-qwen38-flash-next-q8-256k.sh                     # Q8 at 262144: 2163 / 36.9
-./serve-deepseek-v4-flash-antirez-IQ2XXS-gpu-mtp-65k.sh   # fastest DeepSeek: all in VRAM + MTP, ~87 tok/s
-./serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh           # lossless DeepSeek, experts in DDR5, ~21 tok/s
-./serve-deepseek-v4-flash-mxfp4-kvram-128k.sh             # experts on the CPU: 486 tok/s pp
-./serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh       # experts on the GPU: 1794 tok/s pp (3.7x)
-./serve-deepseek-v4-flash-mxfp4-kvram-mtp-128k.sh         # same, MTP: 24 tok/s tg, less prefill
-./serve-deepseek-v4-flash-mxfp4-kvram-256k.sh             # same treatment at 256k: 406 pp
-./serve-deepseek-v4-flash-mxfp4-kvram-mtp-256k.sh         # 256k + MTP: 20.5 tok/s tg (+26 %)
-./serve-deepseek-v4-flash-mxfp4-gpu-experts-512k.sh       # half-million ctx: 1721 tok/s pp at 32k
-./serve-step-3.7-flash-q8.sh            # Step-3.7-Flash Q8_K_XL quality reference, ~13 tok/s
-./serve.sh --list                       # what profiles exist
-./serve.sh --ctx 131072                 # override context length
+./serve.sh                                      # the default: DeepSeek-V4-Flash MXFP4 at 131072, ~1850 pp / 19.9 tg
+./serve.sh deepseek-v4-flash-gpu-experts-256k   # any profile by name; --list shows them all
+./serve.sh qwen38-flash-next-q4km-128k          # the fastest thing here: 3486 pp / 128.9 tg, 4-bit
+./serve.sh step-3.7-flash-q4                    # the original default, ~25 tg
+./serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh   # wrapper: frees the GPU, then the same as line 1
+./serve.sh --list                       # what profiles exist, legacy ones grouped apart
+./serve.sh --ctx 65536                  # override context length
 ./serve.sh --port 9000 --host 0.0.0.0   # expose on the LAN
 ./serve.sh --dry-run                    # print the command, run nothing
 ./serve.sh -- --verbose                 # pass extra flags to llama-server
@@ -430,76 +338,19 @@ with **`./stop.sh`** — it finds this toolkit's server by any port/profile,
 stops it cleanly, and reports the freed VRAM. `./stop.sh --all` additionally
 evicts a GPU-resident LM Studio or Ollama model.
 
-The `serve-*.sh` scripts are thin wrappers that free the GPU first and forward
-any `serve.sh` flag. Their names spell out quant, placement and context:
-
-- **`serve-deepseek-v4-flash-antirez-IQ2XXS-gpu-mtp-65k.sh`** →
-  `serve.sh deepseek-v4-flash-mtp`. The ~81 GiB antirez 2-bit quant runs
-  **entirely on the GPU** (no DDR5 spill) with a 5.5 GiB MTP draft on top:
-  **~87 tok/s at 65536 ctx**, the fastest coherent DeepSeek config here. 131072
-  does not fit alongside the draft.
-- **`serve-deepseek-v4-flash-mxfp4-gpu-experts-256k.sh`** →
-  `serve.sh deepseek-v4-flash-gpu-experts-256k`. The 262144 sibling of the wrapper
-  below, converted 2026-08-19: **1101 / 1637 / 1259 tok/s prefill at 4k / 32k /
-  128k**, 2.4–3.5× the `-rtr` version it replaces, for ~10 % less generation
-  (RESULTS §27.3). Needs `--n-cpu-moe 21` rather than 19, because the compute
-  buffer scales with context as well as micro-batch — 11 136 MiB here against
-  7040 at 131072 (§27.2). `deepseek-v4-flash-256k-kvram` is the same context on
-  the `-rtr` path, kept as the fallback.
-- **`serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh`** →
-  `serve.sh deepseek-v4-flash-gpu-experts-128k`. **A different principle from
-  every other wrapper here.** The others decide where weights *live*; this decides
-  who *computes* them. The overflow experts still sit in host RAM, but they are
-  shipped across PCIe each pass and the GEMM runs **on the GPU** — which is what
-  happens as soon as `-rtr` is not passed, because `-rtr` repacks them into a
-  CPU-only type. **1376 tok/s prefill at 4k and 1529 at 32k, roughly 3× the kvram
-  profile** (RESULTS §21), for 1–4 % less generation and no quality trade. Needs a
-  wide PCIe link and a GPU faster than the CPU at quantised GEMM; on a narrow link
-  the `-rtr` profiles win instead. Now swept (RESULTS §22): `--n-cpu-moe 19`,
-  `-ub 8192`, `-b 8192`, which is **1329 / 1794 / 1328 tok/s at 4k / 32k / 128k**
-  against the kvram profile's 478 / 486 / 437 — 2.8x, 3.7x and 3.0x — for 3-7 %
-  less generation. Against `multi-gpu-llm-toolkit` on the same card and the same
-  file it wins at depth and loses shallow — **+12.5 % at 128k, -31 % at 4k**
-  (RESULTS §23), because `-ub 8192` needs depth before it pays. It was the default
-  from 2026-08-17 until Qwen took over on 09-03, and the §19 abort that once
-  qualified it is fixed (§49.2) and soaked.
-- **`serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh`** → `serve.sh deepseek-v4-flash`.
-  The ~146 GiB MXFP4 quant (effectively lossless QAT) at 131072 ctx; `--fit`
-  fills VRAM to ~93.8 GiB (margin tuned down to 4096 for this context, worth
-  +7 % — see RESULTS §8) and the remaining ~52 GiB of experts run **on the CPU
-  out of DDR5**, which pins generation to **~21 tok/s**.
-- **`serve-deepseek-v4-flash-mxfp4-kvram-128k.sh`** → `serve.sh deepseek-v4-flash-128k-kvram`.
-  Same quant, same context, different placement: the KV goes to RAM (`-nkvo`),
-  the freed VRAM goes to experts (`--n-cpu-moe 17`), the CPU experts are
-  repacked for AVX2/VNNI (`-rtr`), and the micro-batch that this unlocks does the
-  rest — **484 tok/s prefill (+69 %) and ~21 tok/s generation** vs the `--fit`
-  wrapper, prompt cache intact (RESULTS §11). The trade is robustness: manual
-  placement, ~1.6 GiB VRAM headroom, and `-rtr` re-reads the model each start.
-  Prefer the `--fit` wrapper for anything that must come up unattended.
-- **`serve-deepseek-v4-flash-mxfp4-kvram-mtp-128k.sh`** → the same with MTP
-  speculative decoding: **24.1 tok/s generation against 434 prefill**, versus
-  21.3 / 499 without (RESULTS §14). A straight prefill-for-generation swap on
-  identical weights — long prompts want the wrapper above, long answers want
-  this one.
-- **`serve-deepseek-v4-flash-mxfp4-gpu-experts-512k.sh`** → `serve.sh deepseek-v4-flash-512k`.
-  The same quant at **524288 context**, with the placement inverted: the KV goes
-  to RAM (`-nkvo`) and the VRAM it frees goes to experts (`--n-cpu-moe 25`,
-  no `--fit`). Worth **+22 % generation and +35 % prefill** over `--fit` at that
-  context — see RESULTS §10. A full 500k prefill still takes ~52 minutes, and
-  the prompt cache is off, so this is for long single-shot contexts, not chat.
-
-  All three default to **port 8090** (8080 is usually taken — LM Studio's API
-  server, or a Docker container mapping it)
-  and enable MLA + the fused DSA indexer.
-- **`serve-step-3.7-flash-q8.sh`** → `serve.sh step-3.7-flash-q8`, the ~195 GiB
-  quality reference. e.g. `./serve-step-3.7-flash-q8.sh --ctx 65536`.
+The `serve-*.sh` scripts are thin wrappers: each frees the GPU
+(`IK_KILL_SQUATTERS=1`), takes port 8090, and `exec`s `serve.sh <profile>`,
+forwarding any flag. Their names spell out model, quant, placement and context;
+[Layout](#layout) maps every wrapper to its profile, and the profile's header in
+[`config/models/`](config/models/) carries the measurements that justify each
+setting.
 
 Query it like any OpenAI endpoint:
 
 ```bash
 curl http://127.0.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"step-3.7-flash","messages":[{"role":"user","content":"Hi"}]}'
+  -d '{"model":"deepseek-v4-flash-gpu-experts-128k","messages":[{"role":"user","content":"Hi"}]}'
 ```
 
 ### Benchmarks
@@ -516,7 +367,9 @@ curl http://127.0.0.1:8090/v1/chat/completions \
 
 Reports are written to `results/<profile>-<mode>-<timestamp>.md` with the full
 hardware and git context recorded in the header. See
-[docs/BENCHMARKING.md](docs/BENCHMARKING.md) for how to read them.
+[docs/BENCHMARKING.md](docs/BENCHMARKING.md) for how to read them. The DeepSeek
+numbers above come from `tools/depthbench.sh` and `tools/sweep.sh`, which
+measure a real server at real prompt depths rather than `llama-bench`.
 
 ---
 
@@ -531,7 +384,7 @@ config/default.env  <  config/models/<profile>.env  <  environment  <  CLI flag
 So a one-off experiment never needs a file edit:
 
 ```bash
-IK_CTX=131072 IK_THREADS=8 ./serve.sh
+IK_CTX=65536 IK_THREADS=8 ./serve.sh
 ```
 
 When a benchmark finds something better, write it into the profile to make it
@@ -542,28 +395,28 @@ permanent.
 | variable                 | default         | what it does |
 |--------------------------|-----------------|-----|
 | `IK_CTX`                 | `65536`         | Context length. Drives KV-cache size, which drives everything. Every profile overrides it — the default profile uses 131072 |
-| `IK_NCMOE`               | *(unset)*       | Keep experts of the first N layers on CPU. Set per profile, not globally — the default profile pins 17 |
+| `IK_NCMOE`               | *(unset)*       | Keep experts of the first N layers on CPU. Set per profile, not globally — the default profile pins 19, and 18 does not fit (§49.11) |
 | `IK_FIT`                 | `1`             | Fallback if `IK_NCMOE` is unset: let ik_llama size the split itself |
 | `IK_FIT_MARGIN`          | `2048`          | MiB of VRAM to leave free (only used by `--fit`) |
 | `IK_OT`                  | *(unset)*       | Full manual control via `-ot` regexes |
-| `IK_CTK` / `IK_CTV`      | `q8_0`          | KV cache precision (`q4_0` frees ~11 GiB at 262k) |
+| `IK_CTK` / `IK_CTV`      | `q8_0`          | KV cache precision. The DeepSeek profiles override to `f16` — the MLA latent is already compressed; on Step-3.7 `q4_0` frees ~11 GiB at 262k |
 | `IK_THREADS`             | `24`            | CPU threads for generation (all cores; generation is flat past 12 — see TUNING §2) |
 | `IK_THREADS_BATCH`       | `24`            | CPU threads for prompt processing — **worth +32% prefill over 12** |
 | `IK_MODELS_ROOT`         | `$HOME/.lmstudio/models` | Where the GGUFs live. Profiles are written against this, so the toolkit runs on any machine — `IK_MODELS_ROOT=/mnt/models ./serve.sh` |
 | `IK_BATCH` / `IK_UBATCH` | per profile | Prefill batch sizes. Bounded by the compute buffer, which scales with `-ub` × `n_kv` — raising it can stop the profile loading |
-| `IK_RTR`                 | `0`             | Repack CPU experts — faster prefill, but disables mmap |
+| `IK_RTR`                 | `0`             | Repack CPU experts. On DeepSeek it pins them to the CPU — 3× slower prefill (§21); on Step-3.7 it was +16 %. Disables mmap either way |
 | `IK_SER`                 | *(unset)*       | Use fewer than 8 experts. Faster, changes output |
 
 The three placement modes (`IK_OT`, `IK_NCMOE`, `IK_FIT`) are mutually
 exclusive and checked in that order, so a profile's pinned `IK_NCMOE` wins over a
 bare `IK_FIT=1` in the profile. An **explicit** `IK_FIT=1` in the environment
 does override it (`load_config` records what you asked for before the profile is
-sourced), and so does the automatic fallback on a GPU outside the 96 GiB class. **`IK_NCMOE` is context-specific**: if you lower `IK_CTX`
-you can lower it too (more experts fit on the GPU → faster); if you raise
-`IK_CTX` past the default you must raise it or switch to `IK_FIT=1`, or the
-server OOMs. The measured splits are tabulated in
-[docs/TUNING.md §1](docs/TUNING.md). Full annotated list in
-[`config/default.env`](config/default.env).
+sourced), and so does the automatic fallback on a GPU outside the 96 GiB class.
+**`IK_NCMOE` is context-specific**: if you lower `IK_CTX` you can lower it too
+(more experts fit on the GPU → faster); if you raise `IK_CTX` past the default
+you must raise it or switch to `IK_FIT=1`, or the server OOMs. The measured
+splits are tabulated in [docs/TUNING.md §1](docs/TUNING.md). Full annotated list
+in [`config/default.env`](config/default.env).
 
 ---
 
@@ -573,49 +426,44 @@ server OOMs. The measured splits are tabulated in
 ik-llama-toolkit/
 ├── build.sh              compile ik_llama.cpp (CUDA + host compiler probing)
 ├── build-cuda12.sh       same, with CUDA 12.8 in a container (optional; see TUNING §9)
-├── serve.sh              one-command server launch
+├── check-driver-change.sh  did a driver/CUDA update move the numbers? (--bench re-measures)
+├── serve.sh              one-command server launch; --list shows the profiles
 ├── stop.sh               stop any running server (any profile/port)
 │
-├── serve-qwen38-flash-next-q8-128k.sh
-│                         THE DEFAULT: Qwen3.8 Q8_0, 2303 pp / 40.6 tg
-├── serve-qwen38-flash-next-q8-256k.sh
-│                         Q8_0 at 262144: 2163 / 36.9
-├── serve-qwen38-flash-next-q4km-128k.sh
-│                         fastest of all: 3486 pp / 128.9 tg (4-bit)
-├── serve-qwen38-flash-next-q4km-256k.sh
-│                         Q4_K_M at 262144: 3342 / 128.6
+│  Wrappers: free the GPU, then exec serve.sh <profile>.
+│  DeepSeek MXFP4, experts computed ON THE GPU -- the tuned line (RESULTS §21-§29, §49)
+├── serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh      THE DEFAULT: 1850 pp / 19.9 tg at 20k
+├── serve-deepseek-v4-flash-mxfp4-gpu-experts-256k.sh      1223 / 16.1 at 52k, --swa-compress
+├── serve-deepseek-v4-flash-mxfp4-gpu-experts-512k.sh      1721 / 16.3 at 32k, caches off
+├── serve-deepseek-v4-flash-antirez-IQ2XXS-gpu-mtp-65k.sh  2-bit, all in VRAM + MTP, ~87 tg
 │
-│  DeepSeek MXFP4, experts computed ON THE GPU -- the tuned line (RESULTS §21-§29)
-├── serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh
-│                         1830 tok/s pp / 19.3 tg at 32k (default until 2026-09-03)
-├── serve-deepseek-v4-flash-mxfp4-gpu-experts-256k.sh
-│                         1637 / 17.4 at 32k, checkpoints capped at 32 GiB
-├── serve-deepseek-v4-flash-mxfp4-gpu-experts-512k.sh
-│                         1721 / 16.3 at 32k, checkpoints off (they cost 28 % here)
+│  Legacy -- the CPU path (-rtr), --fit, and the -ub 1024 experiment; ~480 pp
+├── serve-deepseek-v4-flash-mxfp4-kvram-128k.sh            -> deepseek-v4-flash-128k-kvram
+├── serve-deepseek-v4-flash-mxfp4-kvram-mtp-128k.sh        -> deepseek-v4-flash-128k-kvram-mtp
+├── serve-deepseek-v4-flash-mxfp4-kvram-256k.sh            -> deepseek-v4-flash-256k-kvram
+├── serve-deepseek-v4-flash-mxfp4-kvram-mtp-256k.sh        -> deepseek-v4-flash-256k-kvram-mtp
+├── serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh          -> deepseek-v4-flash (--fit)
+├── serve-deepseek-v4-flash-mxfp4-gpu-experts-128k-ub1024.sh
 │
-│  Same model on the CPU path (-rtr). Kept as fallbacks: a different code path
-├── serve-deepseek-v4-flash-mxfp4-kvram-128k.sh      486 / 21.7 at 32k
-├── serve-deepseek-v4-flash-mxfp4-kvram-256k.sh
-├── serve-deepseek-v4-flash-mxfp4-kvram-mtp-128k.sh  27 tg at 4k -- MTP, the fastest
-├── serve-deepseek-v4-flash-mxfp4-kvram-mtp-256k.sh  generation here; will not
-│                                                    convert (RESULTS §27.4)
-├── serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh    --fit placement, unattended
-│
-│  Other models
-├── serve-deepseek-v4-flash-antirez-IQ2XXS-gpu-mtp-65k.sh
-│                         DeepSeek IQ2XXS all-in-VRAM + MTP, ~87 tok/s
-├── serve-step-3.7-flash-q8.sh    Step-3.7-Flash Q8, the quality reference
+│  Qwen3.8-Flash-Next (RESULTS §51) and Step-3.7-Flash
+├── serve-qwen38-flash-next-q4km-128k.sh   3486 pp / 128.9 tg, 4-bit -- the fastest of all
+├── serve-qwen38-flash-next-q4km-256k.sh   3342 / 128.6
+├── serve-qwen38-flash-next-q8-128k.sh     2303 / 40.6, the quality reference
+├── serve-qwen38-flash-next-q8-256k.sh     2163 / 36.9
+├── serve-step-3.7-flash-q8.sh             Step-3.7-Flash Q8_K_XL, ~13 tg
 │
 ├── tools/                the measurement harness -- RESULTS §17 onwards is its output
 │   ├── depthbench.sh     prefill + generation vs prompt depth, one profile
 │   ├── sweep.sh          the same across configurations, one server per arm
-│   ├── stress.sh         drive short prompts hard, to reproduce the §19 abort fast
+│   ├── stress.sh         drive short prompts hard, on a server of its own
+│   ├── soak.sh           hours of mixed traffic against the running unit
 │   └── ckpt-value.sh     do context checkpoints pay off on YOUR traffic? (§30)
 ├── bench.sh              older llama-bench harness (§1-§16)
 │
 ├── config/
-│   ├── default.env       global defaults, fully annotated
-│   └── models/*.env      per-model profiles
+│   ├── default.env       global defaults, fully annotated; IK_PROFILE lives here
+│   ├── models/*.env      per-model profiles, each with its measurements in the header
+│   └── systemd/          the user unit that serves the default
 ├── lib/common.sh         shared helpers: config, preflight, arg assembly
 ├── docs/
 │   ├── RESULTS.md        every measurement taken, including the negative ones
@@ -624,10 +472,11 @@ ik-llama-toolkit/
 │   ├── BENCHMARKING.md   how to measure and how to read the numbers
 │   ├── FAQ.md            platform, portability, hardware bottlenecks
 │   ├── TROUBLESHOOTING.md
-│   └── external/         what was sent upstream, and every crash record
+│   └── external/         what was sent upstream and every crash record;
+│       └── patches/      the local diffs against ik_llama.cpp, with apply order
 ├── compat/               generated <math.h> shim (CUDA 13 + new glibc)
 ├── logs/                 server logs, timestamped
-├── results/              benchmark reports (the 16 the docs cite are tracked)
+├── results/              benchmark reports (the ones the docs cite are tracked)
 └── ik_llama.cpp/         upstream source (git clone, not vendored here)
 ```
 
@@ -635,19 +484,22 @@ ik-llama-toolkit/
 
 ## Further reading
 
+- [docs/RESULTS.md](docs/RESULTS.md) — every measurement taken, in order: the
+  Step-3.7 sweeps (§1–§5), DeepSeek placement, batching and the NaN hunt
+  (§7–§49), Qwen (§51)
 - [docs/VS-DGX-SPARK.md](docs/VS-DGX-SPARK.md) — how this box compares to 2× DGX
   Spark on DeepSeek-V4-Flash and Qwen3.8-Flash-Next (the verdict flips between
   them), and why published numbers vary fifteen-fold on identical hardware
-- [docs/RESULTS.md](docs/RESULTS.md) — every measurement taken for Q4 and Q8:
-  the split sweeps, thread scaling, rtr/R4, PCIe, and the Q4-vs-Q8 comparison
-- [docs/FAQ.md](docs/FAQ.md) — platform & portability: other NVIDIA cards, AMD
-  /ROCm, multi-GPU, and why this box's setup was bumpy
 - [docs/TUNING.md](docs/TUNING.md) — the arithmetic behind the defaults, and
   what to change when the model or context changes
+- [docs/FAQ.md](docs/FAQ.md) — platform & portability: other NVIDIA cards, AMD
+  /ROCm, multi-GPU, and why this box's setup was bumpy
 - [docs/BENCHMARKING.md](docs/BENCHMARKING.md) — methodology, interpreting
   `pp`/`tg`, and locking in what you find
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — OOM, gibberish output,
   slow loads, `sm_120` errors
+- [docs/external/patches/README.md](docs/external/patches/README.md) — what is
+  patched in the clone and why, and what was sent upstream
 - [ik_llama.cpp parameter reference](ik_llama.cpp/docs/parameters.md) — upstream
   documentation for every flag
 
@@ -657,7 +509,6 @@ ik-llama-toolkit/
 
 This repository contains only its own scripts, profiles and documentation.
 `ik_llama.cpp/` is **not** vendored here — `build.sh` clones it, and it carries
-its own MIT licence from the ggml authors. The one piece of derived material is
-[`docs/external/ds4-blackwell-discrete-fixes.patch`](docs/external/ds4-blackwell-discrete-fixes.patch),
-a diff against [antirez/ds4](https://github.com/antirez/ds4), which is MIT as
-well. So everything here is MIT-compatible in both directions.
+its own MIT licence from the ggml authors. The patches under `docs/external/`
+are diffs against it and against [antirez/ds4](https://github.com/antirez/ds4),
+which is MIT as well. So everything here is MIT-compatible in both directions.

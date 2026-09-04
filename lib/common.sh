@@ -171,6 +171,34 @@ list_profiles() {
     ls "$TOOLKIT_ROOT/config/models/" 2>/dev/null | sed 's/\.env$//'
 }
 
+# A profile whose header carries a `# LEGACY: <why>` line is kept so that a
+# RESULTS section can be re-run rather than reconstructed, not because anyone
+# should serve from it. Prints the reason (empty, status 1, for a current one).
+profile_legacy_reason() {
+    sed -n 's/^# LEGACY: *//p' "$TOOLKIT_ROOT/config/models/$1.env" 2>/dev/null | grep .
+}
+
+# `serve.sh --list`: current profiles with the default marked, then the legacy
+# ones with their reasons, so the list itself says what not to pick.
+print_profiles() {
+    local p reason
+    echo "available profiles:"
+    for p in $(list_profiles); do
+        profile_legacy_reason "$p" >/dev/null && continue
+        if [[ $p == "${IK_PROFILE:-}" ]]; then
+            printf '  %-44s (default)\n' "$p"
+        else
+            printf '  %s\n' "$p"
+        fi
+    done
+    echo
+    echo "legacy -- kept so RESULTS can be re-run, not for serving:"
+    for p in $(list_profiles); do
+        reason=$(profile_legacy_reason "$p") || continue
+        printf '  %-44s %s\n' "$p" "$reason"
+    done
+}
+
 # ---------------------------------------------------------------------------
 # Model resolution
 # ---------------------------------------------------------------------------

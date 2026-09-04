@@ -2,13 +2,13 @@
 # =============================================================================
 # serve.sh -- start the ik_llama.cpp inference server
 # =============================================================================
-#   ./serve.sh                          default profile (Qwen3.8-Flash-Next Q8_0
+#   ./serve.sh                          default profile (DeepSeek-V4-Flash MXFP4
 #                                       at 131072 -- see config/default.env)
 #   ./serve.sh step-3.7-flash-q4        the original default, still available
-#   ./serve.sh --ctx 131072             override context length
+#   ./serve.sh --ctx 65536              override context length
 #   ./serve.sh --port 9000 --host 0.0.0.0
 #   ./serve.sh --dry-run                print the command without running it
-#   ./serve.sh --list                   show available profiles
+#   ./serve.sh --list                   show available profiles, legacy ones apart
 #
 # Serves an OpenAI-compatible API plus a web UI at http://HOST:PORT
 # -----------------------------------------------------------------------------
@@ -23,7 +23,7 @@ declare -a CLI_OVERRIDES=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --list)     source "$TOOLKIT_ROOT/config/default.env"
-                    echo "available profiles:"; list_profiles | sed 's/^/  /'
+                    print_profiles
                     echo; echo "default: $IK_PROFILE"; exit 0 ;;
         --dry-run)  DRY_RUN=1; shift ;;
         --ctx)      export IK_CTX="$2"; shift 2 ;;
