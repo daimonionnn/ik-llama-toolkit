@@ -4,8 +4,12 @@ Everything this project changes in the `ik_llama.cpp` clone, split into what is
 carried forward and what was diagnostic scaffolding for the NaN-logits hunt
 (RESULTS §19, §32–§49).
 
-Base after the 2026-08-31 update: upstream `15dddc60`
-(previously `8337e4cd`, where the whole investigation ran).
+Base after the 2026-09-05 update: upstream `fe215a8c`
+(previously `15dddc60`, and `8337e4cd` where the whole investigation ran). All
+seven `keep-*` patches re-applied to `fe215a8c` in table order without a
+conflict; `keep-server-context.patch` was regenerated first, because the copy
+committed on 2026-09-01 carried a hunk header claiming eleven added lines where
+two were present and did not apply even to its own base.
 
 ## Carried forward — ≈ 280 lines
 
@@ -28,7 +32,8 @@ tree without the NaN clamp — the version handed to ikawrakow in the #2344
 comment (applies to `15dddc60` with `git apply`).
 `mask-share-window-upstream.patch` is that plus `keep-window-cpu` (+119 −8,
 three files), generated 2026-09-04 by applying the two on a clean `15dddc60`
-worktree; it re-applies clean there and carries no clamp.
+worktree; it re-applies clean there, applies clean to `fe215a8c` as well
+(checked 2026-09-05), and carries no clamp.
 
 ## Archived — `diagnostics-full-8337e4cd.patch`, 1982 lines
 

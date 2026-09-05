@@ -9,7 +9,8 @@ reasoning). **Item 9, the NaN-logits abort, is resolved** — root cause in
 RESULTS §49.2, upstream #2344 (closed as completed 2026-09-03), soaked with
 3 046 843 tokens and 0 aborts — which also closes item 16, whose whole
 question was whether `-ub` caused it. Items 10–15 are as marked in their own
-headings. Item 17 is new, patched locally, and sent upstream as a comment on #2344.
+headings. Item 17 is patched locally and sent upstream as a comment on #2344.
+Item 18 (2026-09-05) is what the `fe215a8c` rebase brought and what it left.
 Nothing here blocks anything shipped.
 
 ---
@@ -70,8 +71,45 @@ Outputs byte-identical at temperature 0. `IK_MASK_SHARE=0` = the old graph.
 with the patch and the numbers; a PR was offered. The refinement it names —
 the window `ggml_cont` pinned to the CPU backend via the build callback — is
 now measured (§49.11): mechanism as described, 248 MiB / no throughput at
-131072, 3.8 GiB at 524288. Not worth a comment of its own; it goes into the PR
-if he asks for one, with the 512k buffer line as its justification.
+131072, 3.8 GiB at 524288. It went upstream with the 512k A/B and the soak in
+a second comment, 2026-09-04 12:49
+(`docs/external/comment-2344-followup-512k.md`,
+<https://github.com/ikawrakow/ik_llama.cpp/issues/2344#issuecomment-5539362428>),
+linking `patches/mask-share-window-upstream.patch` — both changes, no clamp,
+applies to `15dddc60`. The PR offer was repeated; no reply to either comment
+yet.
+
+---
+
+## 18. Qwen3.8-Flash-Next: what upstream still has on the table
+
+**Status 2026-09-05 (RESULTS §52).** The clone moved `15dddc60` → `fe215a8c`
+and the one big win is already in: #2404 makes generation nearly depth-flat
+(+13 % at 32k, +41 % at 96k, **+54 % at 129k**, prefill untouched). The rest is
+unclaimed:
+
+1. **MTP (NextN) self-speculative**, merged as #2369 — the local
+   `lmstudio-community` GGUF carries no NextN head, so it needs either a merged
+   file or a predictor-only companion via `-md` (Unsloth ships
+   `mtp-Qwen3.8-Flash-Next-shared-*`). Loading *that* shape is still open as
+   #2403. DeepSeek's MTP profile is worth remembering as the scale: 87–94 t/s
+   against 19 (§25).
+2. **#2375, Qwen-3.8-Next op fusions** — open, author measures +3–4 %
+   generation / +1–2 % prefill on his own box.
+3. **#2374, QSA optimization** — ikawrakow's own draft: the indexer cache is
+   expanded 4× by a `ggml_get_rows` before the top_k matmul; the PR folds it
+   away. He measured +3–4 % generation at 64k and left it unfinished. It is
+   orthogonal to #2404, which changes the *attention* side, not the indexer.
+4. **`--defer-ple`** (#2389, merged) — the model has `per_layer_token_embd`;
+   untried, and it is resident-memory relief rather than throughput.
+5. **The other three profiles** (`q4km-256k`, `q8-128k`, `q8-256k`) still carry
+   pre-#2404 numbers. The gate keys on `n_kv`, not on the quant, so all three
+   should move the same way. One sweep each, ~25 min, service down.
+
+And one for DeepSeek, from the same rebase: **#2387** fixed `v_offset` in the
+CUDA DSA path for quantized K/V, which means a `q8_0` KV was silently wrong
+before and is worth a try now — most interesting at 512k, where the f16 cache
+is 21.5 GiB of host RAM (§49.13).
 
 ---
 

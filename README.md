@@ -183,15 +183,22 @@ were measured correctly and read wrongly, are in
 A hybrid SSM/attention MoE — 176.9 B parameters, 512 experts with 10 used, and
 full attention on only every fourth of its 48 layers. The Q8_0 profile was the
 default for one day (2026-09-03, for Hermes); DeepSeek took the slot back with
-the mask patch. Measured with `llama-sweep-bench` (RESULTS §51), shallow figures,
-`-ctk/-ctv q8_0`:
+the mask patch. Measured with `llama-sweep-bench` (RESULTS §51, §52), shallow
+figures, `-ctk/-ctv q8_0`:
 
 | profile | prefill | generation | @32k | @~76–96k |
 |---|---:|---:|---|---|
-| **`qwen38-flash-next-q4km-128k`** *(fastest)* | **3486 tok/s** | **128.9 t/s** | — | 1440 / 62.2 |
+| **`qwen38-flash-next-q4km-128k`** *(fastest)* | **3607 tok/s** | **129.7 t/s** | 2716 / 103.8 | 1633 / **87.8** |
 | `qwen38-flash-next-q4km-256k` | 3342 | 128.6 | — | 1346 / 59.7 |
 | `qwen38-flash-next-q8-128k` | 2303 | 40.6 | 1854 / 35.3 | 1368 / 30.8 |
 | `qwen38-flash-next-q8-256k` | 2163 | 36.9 | 1757 / 32.4 | — |
+
+Only the first row is current. It was re-measured 2026-09-05 at a 500 W cap on
+ik_llama.cpp `fe215a8c`, which carries upstream **#2404** — generation is now
+nearly independent of depth (**+54 % at 128k**, +41 % at 96k, nothing below
+6 144 tokens where the gather does not engage), while prefill is untouched
+(RESULTS §52). The other three rows are from 2026-09-03 and predate that commit;
+it should help them the same way, but they have not been re-run.
 
 The first draft of the Q4 profile, with the settings carried over from DeepSeek
 (`-ncmoe 13 -ub 4096`), measured 2753 tok/s and 60.6 t/s; tuning was worth
@@ -227,7 +234,7 @@ flips by model**:
 | model + quant | this card | closest Spark reference | |
 |---|---:|---:|---|
 | DeepSeek-V4-Flash MXFP4 | 1850 pp / 19.9 tg | 2× Spark: ~1400–1900 pp / 40–53 tg | **they win tg 2–4×** |
-| Qwen3.8 Q4_K_M | **3486 pp / 128.9 tg** | 1× Spark, gpt-oss-120b: 1956 / 60.6 | **we win ~1.8× / ~2.1×** |
+| Qwen3.8 Q4_K_M | **3607 pp / 129.7 tg** | 1× Spark, gpt-oss-120b: 1956 / 60.6 | **we win ~1.8× / ~2.1×** |
 | Qwen3.8 Q8_0 | 2303 pp / **40.6 tg** | 2× Spark FP8: ~1000–1500 / ~36–44 *(est.)* | wash on tg, ours on pp |
 
 What decides it is expert geometry, not the machine: DeepSeek moves 6.49 B
@@ -326,7 +333,7 @@ the CPU and roughly halves your token rate.
 ```bash
 ./serve.sh                                      # the default: DeepSeek-V4-Flash MXFP4 at 131072, ~1850 pp / 19.9 tg
 ./serve.sh deepseek-v4-flash-gpu-experts-256k   # any profile by name; --list shows them all
-./serve.sh qwen38-flash-next-q4km-128k          # the fastest thing here: 3486 pp / 128.9 tg, 4-bit
+./serve.sh qwen38-flash-next-q4km-128k          # the fastest thing here: 3607 pp / 129.7 tg, 4-bit
 ./serve.sh step-3.7-flash-q4                    # the original default, ~25 tg
 ./serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh   # wrapper: frees the GPU, then the same as line 1
 ./serve.sh --list                       # what profiles exist, legacy ones grouped apart
@@ -450,8 +457,8 @@ ik-llama-toolkit/
 ├── serve-deepseek-v4-flash-mxfp4-gpu-cpu-128k.sh          -> deepseek-v4-flash (--fit)
 ├── serve-deepseek-v4-flash-mxfp4-gpu-experts-128k-ub1024.sh
 │
-│  Qwen3.8-Flash-Next (RESULTS §51) and Step-3.7-Flash
-├── serve-qwen38-flash-next-q4km-128k.sh   3486 pp / 128.9 tg, 4-bit -- the fastest of all
+│  Qwen3.8-Flash-Next (RESULTS §51, §52) and Step-3.7-Flash
+├── serve-qwen38-flash-next-q4km-128k.sh   3607 pp / 129.7 tg, 4-bit -- the fastest of all
 ├── serve-qwen38-flash-next-q4km-256k.sh   3342 / 128.6
 ├── serve-qwen38-flash-next-q8-128k.sh     2303 / 40.6, the quality reference
 ├── serve-qwen38-flash-next-q8-256k.sh     2163 / 36.9

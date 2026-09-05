@@ -136,14 +136,23 @@ discrepancy — see RESULTS §51.
 
 | depth | Q4_K_M @128k pp | tg | Q8_0 @128k pp | tg | Q8_0 @256k pp | tg |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 *(cold pp)* | 3083 | **128.9** | 2193 | **40.6** | 2082 | **36.9** |
-| 2 048 | **3486** | 118.9 | **2303** | 40.1 | **2163** | 35.6 |
-| 8 192 | — | — | 2168 | 38.2 | 2048 | 34.5 |
-| 16 384 | — | — | 2062 | 37.1 | 1936 | 33.4 |
-| 32 768 | — | — | 1854 | 35.3 | 1757 | 32.4 |
-| 49 152 | — | — | 1670 | 33.7 | 1580 | 30.7 |
-| 75 776 | — | — | 1368 | 30.8 | — | — |
-| ~96k | 1440 | 62.2 | — | — | — | — |
+| 0 *(cold pp)* | 3106 | **129.7** | 2193 | **40.6** | 2082 | **36.9** |
+| 2 048 | **3607** | 119.4 | **2303** | 40.1 | **2163** | 35.6 |
+| 8 192 | 3355 | 112.3 | 2168 | 38.2 | 2048 | 34.5 |
+| 16 384 | 3117 | 109.1 | 2062 | 37.1 | 1936 | 33.4 |
+| 32 768 | 2716 | 103.8 | 1854 | 35.3 | 1757 | 32.4 |
+| 49 152 | 2372 | 99.4 | 1670 | 33.7 | 1580 | 30.7 |
+| 75 776 | 1855 | 92.5 | 1368 | 30.8 | — | — |
+| ~96k | 1633 | 87.8 | — | — | — | — |
+| 129 024 | 1001 | 81.3 | — | — | — | — |
+
+The Q4_K_M column is a 2026-09-05 re-measurement at a 500 W cap on ik_llama.cpp
+`fe215a8c`, which carries upstream #2404 — attention during generation now runs
+over the cells the sparse indexer selected rather than the whole cache, so
+generation is nearly depth-flat. On the build these Q8_0 columns were taken with,
+the same Q4 profile fell to 62.2 t/s at 96k and 52.9 at 129k; the full
+before/after pair is RESULTS §52. The Q8_0 columns are from 2026-09-03 and
+predate the commit.
 
 Q4_K_M keeps 79.7 GiB on the card and spills 33.9; Q8_0 keeps 83.6 and spills
 95.9. That single difference is the whole 3.2× generation gap between the two
@@ -208,7 +217,7 @@ wrong, and this table is what kills it:
 |---|---:|---:|---:|---|
 | DeepSeek-V4-Flash MXFP4 | ~83 GiB | ~63 GiB | 19.3 | **they win 2–4×** (§4) |
 | Qwen3.8 Q8_0 | 83.6 GiB | **95.9 GiB** | 40.6 | wash |
-| Qwen3.8 Q4_K_M | 79.7 GiB | 33.9 GiB | **128.9** | **we win ~2×** |
+| Qwen3.8 Q4_K_M | 79.7 GiB | 33.9 GiB | **129.7** | **we win ~2×** |
 
 Qwen at Q8_0 spills half again as much as DeepSeek and still generates twice as
 fast. Spill cannot be the mechanism.

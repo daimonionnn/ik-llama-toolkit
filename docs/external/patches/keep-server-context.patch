@@ -1,36 +1,28 @@
 diff --git a/examples/server/server-context.cpp b/examples/server/server-context.cpp
-index b4fcbee7..280db8df 100644
+index d16efa06..03c1614b 100644
 --- a/examples/server/server-context.cpp
 +++ b/examples/server/server-context.cpp
-@@ -1,3 +1,14 @@
-+#include <sys/stat.h>
-+#include <cmath>
- #include "server-context.h"
- #include "server-chat.h"
- #include "server-common.h"
-@@ -4797,6 +4808,156 @@ void server_context::process_batch_tokens(int32_t & n_batch) {
+@@ -4812,6 +4812,42 @@ void server_context::process_batch_tokens(int32_t & n_batch) {
                      {"error", e.what()},
                  });
                  send_error(slot, std::string("sampling error: ") + e.what(), ERROR_TYPE_SERVER);
 +
-+                // LOCAL PATCH (ik-llama-toolkit): drop this slot's cached state.
-+                //
-+                // release() alone resets the slot but keeps cache_tokens, the KV
-+                // cells and the checkpoints. The state that just produced NaN
-+                // logits would therefore be REUSED by the next request carrying
-+                // the same prefix -- and a retry is exactly what an agent client
-+                // does with a 500. Either it aborts again and the agent spins, or
-+                // it does not and the answer is silently degraded. The second is
++                // LOCAL PATCH (ik-llama-toolkit), RESULTS 33. Drop this slot's
++                // cached state. release() alone keeps cache_tokens, the KV cells
++                // and the checkpoints, so the state that just produced NaN
++                // logits would be REUSED by the next request carrying the same
++                // prefix -- and a retry is exactly what an agent client does
++                // with a 500. Either it aborts again and the agent spins, or it
++                // does not and the answer is silently degraded; the second is
 +                // worse, because nothing reports it.
 +                //
-+                // We do not know whether the NaN originates in the KV or in the
-+                // arithmetic of that one batch (RESULTS 32 -- the cause is open),
-+                // so this is not a fix. It is refusing to build on a state that
-+                // has demonstrably gone wrong. Cost is one full prefill on the
-+                // retry; cheap against a quietly wrong answer.
-+                //
++                // Kept after the 49.2 root-cause fix as a belt-and-braces
++                // measure: the abort should no longer occur (3.4 M tokens clean
++                // against 13.8 expected), but if anything ever produces NaN
++                // logits again, refusing to build on that state is still right.
++                // Greppable: grep 'NaN logits' logs/server-*.log
++                const size_t n_tok_erased  = slot.cache_tokens.size();
 +                const size_t n_ckpt_erased = slot.server_cached_prompt.checkpoints.size();
-+
 +                llama_kv_cache_seq_rm(ctx, slot.id, -1, -1);
 +                slot.cache_tokens.keep_first(0);
 +                slot.server_cached_prompt.checkpoints.clear();
@@ -43,12 +35,6 @@ index b4fcbee7..280db8df 100644
 +                if (slot.ctx_sampling != nullptr) {
 +                    common_sampler_reset(slot.ctx_sampling);
 +                }
-+
-+                // Greppable, because the point of surviving is being able to tell
-+                // afterwards that it happened and that recovery was clean:
-+                //   grep 'NaN logits' logs/server-*.log
-+                // The next request for this slot will show cache_size = 0 and a
-+                // prefill from p0=0, which is the confirmation that it recovered.
 +                LOG_ERROR("NaN logits -- dropped this slot's cached state, the next request will prefill from scratch", {
 +                    {"id_slot",             slot.id},
 +                    {"id_task",             slot.id_task},

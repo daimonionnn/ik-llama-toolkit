@@ -5260,9 +5260,9 @@ the gated cut.
 **Verdict.** The refinement I offered ikawrakow in the #2344 comment is
 correct as a mechanism and worthless as a speed-up at 131072; it buys 248 MiB
 here and 3.8 GiB at 524288, where it is the difference of a layer. It ships
-here gated, because it is free that way; it is not worth a follow-up comment
-on its own — the numbers go into the PR if he asks for one, as the
-compute-buffer line of the 512k case. The unit runs the 04:35 binary
+here gated, because it is free that way; not worth a follow-up comment on its
+own, so it went upstream later the same day inside the 512k follow-up
+(§49.13's numbers, comment 5539362428), as `mask-share-window-upstream.patch`. The unit runs the 04:35 binary
 (`libllama.so` 04:35:27; `keep-window-cpu.patch` on top of
 `keep-mask-share.patch`), `CUDA0 compute buffer size = 4744.03 MiB` is its
 signature. Files: `results/depthbench-ub8192-20260904-04{0553,0650,1231,1657,2128,3555}.md`
@@ -5606,3 +5606,106 @@ page win measured for DeepSeek does not transfer, and whether raising
 spuriously (`cudaMalloc` OOM at 75 970 MiB with 96 GiB nominally free) because a
 previous sweep-bench had not exited; the numbers above were all re-taken on a
 verified-idle card.
+
+---
+
+## 52. Upstream #2404 makes Qwen3.8-Flash-Next generation almost depth-flat: +54 % at 128k, prefill untouched (2026-09-05)
+
+The clone had been sitting on `15dddc60` since 2026-08-31. Nine commits had
+landed upstream since, and one of them is the largest single win this box has
+measured on Qwen: `fe215a8c` (**#2404**, *qwen4exp: gather selected cells for
+depth-constant TG attention*).
+
+**What the commit does.** During generation the sparse indexer already picks a
+fixed number of cells (`top_k` 2048 on this model), but flash attention still
+ran over the whole cache. #2404 gathers the selected cells — K, V and the mask —
+into a compact `n_pad`-wide buffer and attends over that instead. It is gated:
+single-token graphs only, `-fa` required, a plain cache (`k_l`/`v_l` carrying no
+`extra`, i.e. not a split or replicated multi-GPU cache — a q8_0 cache like ours
+is fine, the gather reinterprets it by row bytes), and `3*n_pad <= n_kv`, i.e.
+it does nothing until the cache is a few times the selection width. With
+`top_k` 2048 that threshold is **6 144 tokens**, which the measurement
+reproduces exactly.
+
+**Method.** Same box, same profile (`qwen38-flash-next-q4km-128k`: `-ncmoe 0
+-ub 2048 -b 2048 -ctk/-ctv q8_0 -t 8 -tb 24 -thp`, `-c 131072`), same
+`llama-sweep-bench` invocation through `./bench.sh sweep`, card otherwise idle,
+service stopped, **power cap 500 W for both runs**. Two builds of the same tree:
+the old binary (`15dddc60` + the seven local patches) and the new one
+(`fe215a8c` + the same seven). 64 rows each, all the way to 129 024. Rows are
+`PP 2048 / TG 512`.
+
+| N_KV | pp before | pp after | Δ | tg before | tg after | Δ |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 3 105.0 | 3 105.9 | +0.0 % | 129.44 | 129.65 | +0.2 % |
+| 2 048 | 3 616.7 | 3 606.8 | −0.3 % | 119.30 | 119.41 | +0.1 % |
+| 4 096 | 3 514.6 | 3 475.9 | −1.1 % | 117.07 | 117.25 | +0.2 % |
+| 6 144 | 3 428.2 | 3 416.4 | −0.3 % | 110.99 | 111.17 | +0.2 % |
+| 8 192 | 3 374.9 | 3 354.6 | −0.6 % | 109.17 | **112.26** | **+2.8 %** |
+| 16 384 | 3 128.6 | 3 117.1 | −0.4 % | 102.00 | 109.07 | +6.9 % |
+| 32 768 | 2 724.9 | 2 716.4 | −0.3 % | 92.08 | 103.84 | +12.8 % |
+| 49 152 | 2 386.8 | 2 372.2 | −0.6 % | 83.31 | 99.35 | +19.3 % |
+| 65 536 | 2 044.3 | 2 037.3 | −0.3 % | 75.04 | 94.74 | +26.3 % |
+| 81 920 | 1 750.8 | 1 745.6 | −0.3 % | 67.33 | 91.16 | +35.4 % |
+| 96 256 | 1 638.3 | 1 633.3 | −0.3 % | 62.21 | **87.84** | **+41.2 %** |
+| 114 688 | 1 462.8 | 1 458.9 | −0.3 % | 56.42 | 84.05 | +49.0 % |
+| 129 024 | 1 007.8 | 1 001.4 | −0.6 % | 52.92 | **81.32** | **+53.7 %** |
+
+Three things in that table are worth stating explicitly.
+
+**The gate is visible in the data.** Rows 0 through 6 144 are identical to
+within 1 % — the gather is not taken there and the two binaries are the same
+binary. The first row that differs is 8 192, the first one past `3 × 2048`.
+
+**Prefill does not move.** Every prefill delta is within ±1.1 %, i.e. noise on
+this harness. That is the mechanism confirming itself: the change is in the
+single-token graph only, and prefill never enters it.
+
+**Generation stops being a function of depth.** Before, generation fell 129 →
+53 t/s across the context, a 59 % loss. After, it falls 129 → 81, and almost all
+of *that* is spent in the first 6 144 tokens, before the gather turns on: from
+8 192 to 129 024 the new build loses 27 %, against 52 % for the old one over the
+same span. What is left is the indexer itself, which still scores every cell,
+and the 36 SSM layers, which were never depth-dependent.
+
+**The baseline reproduces §51.** At 96 256 the old binary measured 62.21 t/s
+today against §51's 62.2 at ~96k — the same number two days later on a
+different power cap, which is one more confirmation that generation on this
+model is cap-insensitive. Prefill is not: 1 638 today against §51's 1 440, the
+difference between 500 W and the 400 W that was set on 09-03.
+
+### 52.1 What else came with the rebase, and what did not
+
+The nine commits, and what they are worth here:
+
+| commit | | for this box |
+|---|---|---|
+| `fe215a8c` | #2404 qwen4exp gather | the table above |
+| `563b798a` | #2369 qwen4exp MTP (NextN) | not usable yet — the local GGUF carries no NextN head; it needs a merged file or a predictor-only companion via `-md`, and loading *that* shape is still an open PR (#2403). It also carries a free fix: CUDA dispatch for `ABS`/`SGN`, without which the qwen4exp PLE gate split to the CPU scheduler twice per forward pass. In this build from the start, so it is inside the "after" column above |
+| `3c58ae37` | #2389 `--defer-ple` | applies — the model has `per_layer_token_embd` (the loader calls it a "tensor with strange name"). Resident-memory relief, untried |
+| `ab6d8168` | #2387 CUDA DSA `v_offset` for quantized K/V | DeepSeek-V4-Flash, correctness not speed: with `-ctk/-ctv q8_0` the sparse-attention path read V from the wrong columns. Our profiles are all f16, so nothing changes — but a q8_0 KV for DSV4 was broken before this and is worth a try now, especially at 512k where f16 KV is 21.5 GiB |
+| `6d6fe936`, `caf7eae5` | #2384, #2370 DFlash/DSpark | a different arch family, not ours |
+| `68bf92bf` | #2378 gemma4 `--swa-compress` | not ours |
+| `e5602837`, `c2206b80` | #2394, #2395 | quantize check, docs |
+
+**DeepSeek-V4-Flash gained nothing, and lost nothing.** `build_deepseek4.cpp`
+is untouched upstream since `15dddc60`, so the mask-sharing work of §49.9–§49.13
+is still ours alone and still unmerged. After the rebase the served profile
+loads with `CUDA0 compute buffer size = 4744.03 MiB`, the same figure as the
+04:35 build, and answers normally (`logs/server-20260905-101319.log`).
+
+**The patch stack survived the rebase.** All seven `keep-*.patch` files
+re-applied to `fe215a8c` in table order without a conflict, `git apply` clean —
+including `mask-share-window-upstream.patch`, the copy handed upstream. One
+defect turned up in the process and is fixed: `keep-server-context.patch` had a
+hunk header claiming eleven added lines where two were present, left over from
+the 2026-09-01 split of the diff into shipped and scaffolding, and did not apply
+even to its own base. It is regenerated from the clone.
+
+**Not re-measured:** the other three Qwen profiles (`q4km-256k`, `q8-128k`,
+`q8-256k`). #2404 should help all of them the same way — the gate keys on
+`n_kv`, not on the quant — but the numbers in §51 for those rows are still
+pre-#2404 and are marked as such in the README.
+
+Raw data: `results/qwen38-flash-next-q4km-128k-sweep-20260905-095334.{md,raw.log}`
+(before) and `-20260905-100545.{md,raw.log}` (after).
