@@ -5709,3 +5709,48 @@ pre-#2404 and are marked as such in the README.
 
 Raw data: `results/qwen38-flash-next-q4km-128k-sweep-20260905-095334.{md,raw.log}`
 (before) and `-20260905-100545.{md,raw.log}` (after).
+
+### 52.2 The same commit on Q8_0: +11 % at 76k, and the first clean run to 129k
+
+`qwen38-flash-next-q8-128k` became the served default on 2026-09-05 (Matt's
+call, for Hermes), so it was measured on the new build too — one run, no A/B,
+because §52 already proved on Q4 that #2404 leaves prefill alone and the gate
+keys on `n_kv` rather than on the quant. 600 W cap, card otherwise idle, service
+down, 17 minutes for 64 rows.
+
+| N_KV | pp §51 | pp today | tg §51 | tg today | Δ tg |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 2 193 | 2 201 | 40.6 | 40.58 | ±0 % |
+| 2 048 | 2 303 | 2 301 | 40.1 | 39.08 | −2.5 % |
+| 8 192 | 2 168 | 2 186 | 38.2 | 38.33 | +0.3 % |
+| 16 384 | 2 062 | 2 081 | 37.1 | 38.31 | +3.3 % |
+| 32 768 | 1 854 | 1 900 | 35.3 | 37.12 | +5.2 % |
+| 49 152 | 1 670 | 1 725 | 33.7 | 35.46 | +5.2 % |
+| 75 776 | 1 368 | 1 435 | 30.8 | **34.29** | **+11.3 %** |
+| 98 304 | — | 1 315 | — | 33.81 | — |
+| 114 688 | — | 1 215 | — | 32.40 | — |
+| 129 024 | — | 974 | — | 32.28 | — |
+
+**The gain is real but a quarter of Q4's, and that is the point.** At 76k the
+Q4 profile gained 32 % from the same commit; Q8_0 gains 11 %. Nothing about the
+attention changed between them — what changed is how much of a token's time
+attention was in the first place. Q8_0 streams ~96 GiB of routed experts across
+PCIe per token against Q4's ~34, so it was never the KV cache that dominated
+its decode; the same absolute saving is a smaller share of a much larger bill.
+The shape of the two curves says the same thing before the patch even enters:
+Q4 fell 59 % across the context and Q8_0 only 24 %.
+
+**It also reaches the top of its window for the first time.** §51's four runs
+were all cut short by wall clock, and this profile's deepest clean row was
+75 776 of 131 072 — explicitly flagged there as "proven to the ceiling they are
+not". This run went to **129 024** with no OOM and no error, so the ceiling is
+now measured rather than assumed. Decay across the whole window is 40.58 →
+32.28 t/s, −20 %.
+
+Prefill is 2–5 % above §51 at depth. That is the power cap, not the commit —
+§51 ran at the 400 W this box normally sits at and this run at 600 W, the same
+4–5 % spread §49.12 measured on DeepSeek. Compare generation across the two
+runs, not prefill.
+
+Raw data: `results/qwen38-flash-next-q8-128k-sweep-20260905-203820.{md,raw.log}`
+(175.3 GiB Q8_0 file, 83 620 MiB on the card and 95 874 in host RAM).

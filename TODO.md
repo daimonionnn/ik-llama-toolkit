@@ -102,9 +102,10 @@ unclaimed:
    orthogonal to #2404, which changes the *attention* side, not the indexer.
 4. **`--defer-ple`** (#2389, merged) — the model has `per_layer_token_embd`;
    untried, and it is resident-memory relief rather than throughput.
-5. **The other three profiles** (`q4km-256k`, `q8-128k`, `q8-256k`) still carry
-   pre-#2404 numbers. The gate keys on `n_kv`, not on the quant, so all three
-   should move the same way. One sweep each, ~25 min, service down.
+5. ~~**The other three profiles** carry pre-#2404 numbers~~ — **`q8-128k` done
+   2026-09-05** (§52.2: +5 % at 32k, **+11 % at 76k**, and the first clean run
+   to 129 024), because it became the served default that evening. `q4km-256k`
+   and `q8-256k` are still pre-#2404; one sweep each, ~20 min, service down.
 
 And one for DeepSeek, from the same rebase: **#2387** fixed `v_offset` in the
 CUDA DSA path for quantized K/V, which means a `q8_0` KV was silently wrong

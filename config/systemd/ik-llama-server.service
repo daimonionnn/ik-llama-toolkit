@@ -8,7 +8,10 @@ Description=ik-llama-toolkit: serves config/default.env's profile on port 8090
 # honours IK_PROFILE in config/default.env, so changing the default in the
 # repository changes what this unit serves without touching this file.
 #   2026-08-20 .. 09-03  deepseek-v4-flash-gpu-experts-128k
-#   2026-09-03 ..        qwen38-flash-next-q8-128k  (2303 pp / 40.6 tg, RESULTS 51)
+#   2026-09-03 .. 09-04  qwen38-flash-next-q8-128k
+#   2026-09-04 .. 09-05  deepseek-v4-flash-gpu-experts-128k (the mask-share build)
+#   2026-09-05 ..        qwen38-flash-next-q8-128k  (2303 pp / 40.6 tg, RESULTS 51,
+#                        and 52 for the depth behaviour upstream #2404 gave it)
 # To pin one regardless of the repository default, add:
 #   Environment=IK_PROFILE=qwen38-flash-next-q8-128k
 After=network-online.target

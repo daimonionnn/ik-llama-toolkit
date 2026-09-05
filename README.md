@@ -80,7 +80,11 @@ collide over port 8090 and over VRAM.
 
 ---
 
-## The default model: DeepSeek-V4-Flash
+## DeepSeek-V4-Flash — the previous default, one flag away
+
+Served the box from 2026-09-04 until 2026-09-05, when the default moved back to
+Qwen3.8-Flash-Next Q8_0 (below). Everything in this section still holds and the
+profile is one argument away: `./serve.sh deepseek-v4-flash-gpu-experts-128k`.
 
 **DeepSeek-V4-Flash-0731 in MXFP4** — lmstudio-community's repack of the QAT
 weights, so effectively lossless — served by the
@@ -94,8 +98,8 @@ weights, so effectively lossless — served by the
 (RESULTS §49.10–§49.11, 2026-09-04, `tools/depthbench.sh`, temperature 0, a
 salt per request so nothing is served from cache, the card at its 600 W
 maximum. At the 400 W cap this machine normally runs, prefill is 4–5 % lower
-— 1 777 / 1 627 — and generation the same, §49.12.) `./serve.sh` with no
-arguments starts it; the profile is `IK_PROFILE` in
+— 1 777 / 1 627 — and generation the same, §49.12.) `./serve.sh
+deepseek-v4-flash-gpu-experts-128k` starts it, or set `IK_PROFILE` back to it in
 [`config/default.env`](config/default.env).
 
 The model is ~146 GiB against 96 GiB of VRAM, so the routed experts of 19 of
@@ -124,7 +128,7 @@ patch has served since 2026-09-04 and real traffic is its soak.
 
 | profile | context | placement | measured pp / tg | when |
 |---|---:|---|---|---|
-| **`deepseek-v4-flash-gpu-experts-128k`** *(default)* | 131072 | `-nkvo -ncmoe 19 -ub 8192` | **1 850 / 19.9** at 20k, 1 720 / 19.1 at 122k | everything — the deepest request ever seen here was 139k |
+| **`deepseek-v4-flash-gpu-experts-128k`** *(default until 2026-09-05)* | 131072 | `-nkvo -ncmoe 19 -ub 8192` | **1 850 / 19.9** at 20k, 1 720 / 19.1 at 122k | everything — the deepest request ever seen here was 139k |
 | `deepseek-v4-flash-gpu-experts-256k` | 262144 | `--swa-compress -ncmoe 21 -ub 4096` | 1 223 / 16.1 at 52k, 1 107 / 15.8 at 122k (§49.4) | when the window is really needed; costs ~13 % of every turn |
 | `deepseek-v4-flash-512k` | 524288 | `-nkvo -ncmoe 21 -ub 8192`, checkpoints off | 1 965 / 18.4 at 32k, 1 741 / 17.6 at 128k, 1 359 / 16.8 at 256k (§49.13) | long single shots, not chat: checkpoints and prompt cache are off (54 GiB of RAM and 26 % of generation at this size, §9.3), so a re-sent conversation re-prefills |
 | `deepseek-v4-flash-mtp` | 65536 | antirez IQ2XXS, entirely in VRAM, + MTP draft | **~87 t/s** generation (§7) | when 2-bit quality is acceptable; the fastest coherent DeepSeek here |
@@ -178,27 +182,33 @@ were measured correctly and read wrongly, are in
 
 ## The other models
 
-### Qwen3.8-Flash-Next
+### Qwen3.8-Flash-Next — the current default
 
 A hybrid SSM/attention MoE — 176.9 B parameters, 512 experts with 10 used, and
-full attention on only every fourth of its 48 layers. The Q8_0 profile was the
-default for one day (2026-09-03, for Hermes); DeepSeek took the slot back with
-the mask patch. Measured with `llama-sweep-bench` (RESULTS §51, §52), shallow
-figures, `-ctk/-ctv q8_0`:
+full attention on only every fourth of its 48 layers. The Q8_0 profile
+(`qwen38-flash-next-q8-128k`) is what `./serve.sh` and the systemd unit serve
+since **2026-09-05**; it also held the slot for one day on 2026-09-03 before
+DeepSeek took it back with the mask patch. What changed in between is upstream
+#2404 (§52), which makes generation on this architecture nearly independent of
+depth. Measured with `llama-sweep-bench` (RESULTS §51, §52), shallow figures,
+`-ctk/-ctv q8_0`:
 
 | profile | prefill | generation | @32k | @~76–96k |
 |---|---:|---:|---|---|
 | **`qwen38-flash-next-q4km-128k`** *(fastest)* | **3607 tok/s** | **129.7 t/s** | 2716 / 103.8 | 1633 / **87.8** |
 | `qwen38-flash-next-q4km-256k` | 3342 | 128.6 | — | 1346 / 59.7 |
-| `qwen38-flash-next-q8-128k` | 2303 | 40.6 | 1854 / 35.3 | 1368 / 30.8 |
+| **`qwen38-flash-next-q8-128k`** *(default)* | 2301 | 40.6 | 1900 / 37.1 | 1435 / **34.3** |
 | `qwen38-flash-next-q8-256k` | 2163 | 36.9 | 1757 / 32.4 | — |
 
-Only the first row is current. It was re-measured 2026-09-05 at a 500 W cap on
-ik_llama.cpp `fe215a8c`, which carries upstream **#2404** — generation is now
-nearly independent of depth (**+54 % at 128k**, +41 % at 96k, nothing below
-6 144 tokens where the gather does not engage), while prefill is untouched
-(RESULTS §52). The other three rows are from 2026-09-03 and predate that commit;
-it should help them the same way, but they have not been re-run.
+The two 128k rows are current, both re-measured 2026-09-05 on ik_llama.cpp
+`fe215a8c`, which carries upstream **#2404**: generation now barely depends on
+depth, while prefill is untouched. On Q4 (500 W cap) that is **+54 % at 128k**
+and +41 % at 96k, with nothing below 6 144 tokens where the gather does not
+engage; on Q8_0 (600 W) it is +11 % at 76k, a quarter of the Q4 gain, because
+Q8_0's decode was never bound by the KV cache but by ~96 GiB of experts crossing
+PCIe every token (RESULTS §52, §52.2). That Q8_0 run is also the first to reach
+**129 024** of its 131 072 window without an error; §51's runs all stopped at
+75 776. The two 256k rows are from 2026-09-03 and predate the commit.
 
 The first draft of the Q4 profile, with the settings carried over from DeepSeek
 (`-ncmoe 13 -ub 4096`), measured 2753 tok/s and 60.6 t/s; tuning was worth
@@ -331,8 +341,8 @@ the CPU and roughly halves your token rate.
 ## Usage
 
 ```bash
-./serve.sh                                      # the default: DeepSeek-V4-Flash MXFP4 at 131072, ~1850 pp / 19.9 tg
-./serve.sh deepseek-v4-flash-gpu-experts-256k   # any profile by name; --list shows them all
+./serve.sh                                      # the default: Qwen3.8-Flash-Next Q8_0 at 131072, ~2303 pp / 40.6 tg
+./serve.sh deepseek-v4-flash-gpu-experts-128k   # any profile by name; --list shows them all
 ./serve.sh qwen38-flash-next-q4km-128k          # the fastest thing here: 3607 pp / 129.7 tg, 4-bit
 ./serve.sh step-3.7-flash-q4                    # the original default, ~25 tg
 ./serve-deepseek-v4-flash-mxfp4-gpu-experts-128k.sh   # wrapper: frees the GPU, then the same as line 1
@@ -362,7 +372,7 @@ Query it like any OpenAI endpoint:
 ```bash
 curl http://127.0.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-v4-flash-gpu-experts-128k","messages":[{"role":"user","content":"Hi"}]}'
+  -d '{"model":"qwen38-flash-next-q8-128k","messages":[{"role":"user","content":"Hi"}]}'
 ```
 
 ### Benchmarks
