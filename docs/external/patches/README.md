@@ -4,12 +4,13 @@ Everything this project changes in the `ik_llama.cpp` clone, split into what is
 carried forward and what was diagnostic scaffolding for the NaN-logits hunt
 (RESULTS §19, §32–§49).
 
-Base after the 2026-09-05 update: upstream `fe215a8c`
-(previously `15dddc60`, and `8337e4cd` where the whole investigation ran). All
-seven `keep-*` patches re-applied to `fe215a8c` in table order without a
-conflict; `keep-server-context.patch` was regenerated first, because the copy
-committed on 2026-09-01 carried a hunk header claiming eleven added lines where
-two were present and did not apply even to its own base.
+Base after the 2026-09-14 update: upstream `7b4b3dd1` (previously `fe215a8c`,
+before that `15dddc60`, and `8337e4cd` where the whole investigation ran). All
+seven `keep-*` patches re-applied to `7b4b3dd1` in table order without a
+conflict, as they had to `fe215a8c` on 2026-09-05. For that earlier move
+`keep-server-context.patch` was regenerated first, because the copy committed on
+2026-09-01 carried a hunk header claiming eleven added lines where two were
+present and did not apply even to its own base.
 
 ## Carried forward — ≈ 280 lines
 

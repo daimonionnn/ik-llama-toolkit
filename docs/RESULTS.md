@@ -5754,3 +5754,88 @@ runs, not prefill.
 
 Raw data: `results/qwen38-flash-next-q8-128k-sweep-20260905-203820.{md,raw.log}`
 (175.3 GiB Q8_0 file, 83 620 MiB on the card and 95 874 in host RAM).
+
+---
+
+## 53. Upstream #2375 on the served Q8_0: +1 % generation, real but small — and a new CUDA toolkit that silently built a CPU-only binary (2026-09-14)
+
+The clone moved `fe215a8c` → `7b4b3dd1`, twelve upstream commits. One targets
+this model directly: **#2375**, *Qwen-3.8-Next op fusions*, by ikawrakow. It
+fuses two steps of the hyper-connection mix that every qwen4exp layer runs —
+`sigmoid(up) * xn` becomes one `fused_mul_unary`, and a `scale` followed by
+`silu`/`sigmoid` becomes one CUDA kernel. Its author measured +3–4 % generation
+and +1–2 % prefill on 2× 3090 at `-ncmoe 20`.
+
+**Method.** Same-session A/B on the served default, `qwen38-flash-next-q8-128k`
+(`-ncmoe 17 -ub 2048 -ctk/-ctv q8_0`): the old binary (`fe215a8c` + the seven
+local patches, backed up before the build) swept first, then the new one
+(`7b4b3dd1` + the same seven), both at **500 W**, service down, card otherwise
+idle, 64 rows each to 129 024, both built against CUDA 13.3.
+
+| N_KV | pp before | pp after | Δ | tg before | tg after | Δ |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 2 217.6 | 2 216.3 | −0.1 % | 40.16 | 40.41 | +0.6 % |
+| 2 048 | 2 312.9 | 2 311.9 | −0.0 % | 39.43 | 39.49 | +0.2 % |
+| 16 384 | 2 073.5 | 2 083.2 | +0.5 % | 37.19 | 38.36 | +3.1 % |
+| 32 768 | 1 900.1 | 1 900.5 | +0.0 % | 36.67 | 37.38 | +1.9 % |
+| 65 536 | 1 561.2 | 1 564.1 | +0.2 % | 35.03 | 35.30 | +0.8 % |
+| 98 304 | 1 312.2 | 1 315.5 | +0.3 % | 33.26 | 33.66 | +1.2 % |
+| 129 024 | 931.9 | 900.3 | −3.4 % | 32.42 | 32.67 | +0.8 % |
+
+Across all 64 rows: **generation +0.99 % mean (+0.82 % median)**, prefill
++0.05 %. The single-row spread is ±3 % (row-to-row stdev within one run is
+1.4 %), so no individual row proves anything — but **55 of 64 rows are faster**,
+which a coin does not do, and the gain is the same shallow (+0.8 %) and deep
+(+1.0 %). A real ~1 % on generation, nothing on prefill (the −3.4 % at 129 024 is
+the last row, which reads low in every run here).
+
+**A quarter to a third of the author's number, for the reason §52.2 already
+gave.** Fusions save GPU compute. This profile's decode is bound by ~96 GiB of
+routed experts crossing PCIe every token, so the GPU-side saving is a small
+share of the token. Why the author saw three to four times as much on his own
+box is not established here — his quant, split and GPUs all differ. The Q4
+profile, which keeps nearly everything on the card, is the one where fusions
+should matter most here; not measured.
+
+The other upstream commits in the jump are correctness, not speed: #2441 fixes
+`n_past_prompt` in checkpoint restore (the path multi-turn prompt reuse takes on
+this hybrid model), #2420 answers an over-long prompt with a 400
+`exceed_context_size_error` instead of failing later, #2436 turns a graph build
+failure into an error instead of a segfault. #2405 (checkpoints under
+`--swa-compress`) is DeepSeek's and #2423 (AVX-512 VNNI) does not apply to this
+CPU. All seven `keep-*` patches reapplied to `7b4b3dd1` without a conflict.
+
+### 53.1 The build trap: CUDA 13.4 appeared, and `build.sh` produced a CPU-only binary without an error
+
+CUDA 13.4 was installed on the box on 2026-09-12. `build.sh` picks the newest
+toolkit that can target `sm_120`, so the rebuild chose 13.4 — against a build
+directory whose CMake cache named 13.3's `nvcc`. Changing `CMAKE_CUDA_COMPILER`
+on an existing cache makes CMake print *"You have changed variables that require
+your cache to be deleted"*, delete it and configure again — **without the `-D`
+options it was invoked with**. `GGML_CUDA` fell back to its default `OFF`, zero
+CUDA objects were compiled, and the build finished with exit code 0 in about a
+minute. The only tells were `GGML_CUDA:BOOL=OFF` in `CMakeCache.txt` and no
+`libcudart` in `ldd llama-server`. Serving from that binary would have loaded a
+175 GiB model onto the CPU.
+
+Fixed for this build by `CUDA_HOME=/usr/local/cuda-13.3 ./build.sh --clean`,
+which keeps the toolkit the baseline was built with (so the A/B compares code,
+not compilers) and starts from an empty build directory.
+
+**`build.sh` guards against it since the same day**, three ways. Before
+configuring, it compares the cached `CMAKE_CUDA_COMPILER`, `CMAKE_C_COMPILER`
+and `CMAKE_CXX_COMPILER` with the ones it picked and stops on a difference,
+naming both commands — `./build.sh --clean` to switch, `CUDA_HOME=<old>
+./build.sh` to keep — rather than wiping a directory that still holds a working
+binary. After configuring, it stops unless `GGML_CUDA` is `ON`. After building,
+it stops if `llama-server` links no `libcudart`, and warns if the one it links
+lives outside the toolkit it built with (the `mmq_x_best=0` ABI trap of the
+troubleshooting guide). Tested against a reproduction of the exact failure in a
+scratch build directory, with `cmake --build` stubbed out so only configure ran:
+unguarded, the 13.3 → 13.4 switch exited 0 with `GGML_CUDA:BOOL=OFF`; guarded,
+it exits 1 and the cache is left as it was. The keep path, the `--clean` path, a
+forced `GGML_CUDA=OFF` after configure, a binary without CUDA and a binary
+linked against the other toolkit each took the branch they should.
+
+Raw data: `results/qwen38-flash-next-q8-128k-sweep-20260914-102441.{md,raw.log}`
+(before, `fe215a8c`) and `-20260914-105042.{md,raw.log}` (after, `7b4b3dd1`).

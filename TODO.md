@@ -83,7 +83,8 @@ yet.
 
 ## 18. Qwen3.8-Flash-Next: what upstream still has on the table
 
-**Status 2026-09-05 (RESULTS §52).** The clone moved `15dddc60` → `fe215a8c`
+**Status 2026-09-14 (RESULTS §52, §53).** The clone is on `7b4b3dd1` since
+2026-09-14. On 2026-09-05 it moved `15dddc60` → `fe215a8c`
 and the one big win is already in: #2404 makes generation nearly depth-flat
 (+13 % at 32k, +41 % at 96k, **+54 % at 129k**, prefill untouched). The rest is
 unclaimed:
@@ -94,8 +95,10 @@ unclaimed:
    `mtp-Qwen3.8-Flash-Next-shared-*`). Loading *that* shape is still open as
    #2403. DeepSeek's MTP profile is worth remembering as the scale: 87–94 t/s
    against 19 (§25).
-2. **#2375, Qwen-3.8-Next op fusions** — open, author measures +3–4 %
-   generation / +1–2 % prefill on his own box.
+2. ~~**#2375, Qwen-3.8-Next op fusions**~~ — **merged 2026-09-14 and measured
+   on the served Q8_0** (§53): +1 % generation (55 of 64 rows faster), prefill
+   unchanged — a quarter to a third of the author's +3–4 %. The Q4 profile is
+   where it should show more; not measured.
 3. **#2374, QSA optimization** — ikawrakow's own draft: the indexer cache is
    expanded 4× by a `ggml_get_rows` before the top_k matmul; the PR folds it
    away. He measured +3–4 % generation at 64k and left it unfinished. It is
