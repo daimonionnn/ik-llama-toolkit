@@ -83,18 +83,27 @@ yet.
 
 ## 18. Qwen3.8-Flash-Next: what upstream still has on the table
 
-**Status 2026-09-14 (RESULTS §52, §53).** The clone is on `7b4b3dd1` since
-2026-09-14. On 2026-09-05 it moved `15dddc60` → `fe215a8c`
+**Status 2026-09-14 (RESULTS §52–§54).** The clone is on `d5f53d9f` since
+2026-09-14 (via `7b4b3dd1` the same morning). On 2026-09-05 it moved
+`15dddc60` → `fe215a8c`
 and the one big win is already in: #2404 makes generation nearly depth-flat
 (+13 % at 32k, +41 % at 96k, **+54 % at 129k**, prefill untouched). The rest is
 unclaimed:
 
-1. **MTP (NextN) self-speculative**, merged as #2369 — the local
-   `lmstudio-community` GGUF carries no NextN head, so it needs either a merged
-   file or a predictor-only companion via `-md` (Unsloth ships
-   `mtp-Qwen3.8-Flash-Next-shared-*`). Loading *that* shape is still open as
-   #2403. DeepSeek's MTP profile is worth remembering as the scale: 87–94 t/s
-   against 19 (§25).
+1. ~~**MTP (NextN) self-speculative**~~ — **running 2026-09-14** (§54) as the
+   profile `qwen38-flash-next-q8-128k-mtp`, with dzannotti's predictor-only
+   head via `-md` (the shape #2369 accepts; Unsloth's `-shared-*` files, which
+   lack `token_embd`, still wait on #2403) and #2412's per-step checkpoints.
+   Short contexts: +62–71 % on code and JSON, +12 % on prose. Prefill −12–15 %.
+   Not the default. Open follow-ups:
+   * **the gain fades with depth** (code +48 % at 32k, +15 % at 124k; prose
+     −14 % at 124k) because draft verification is a 4-token batch and #2404's
+     gather only engages at `n_tokens == 1`. Worth raising upstream: a gather
+     for small batches would let the two compose.
+   * whether it pays for **Hermes's** actual traffic — depth and the share of
+     reasoning prose decide it; a day on real traffic would say.
+   * not tried: a Q8_0 or BF16 head against the Q8_0 target, `n_max` 2 or 4,
+     and separating the prefill cost of `-ncmoe 18` from the head's own KV fill.
 2. ~~**#2375, Qwen-3.8-Next op fusions**~~ — **merged 2026-09-14 and measured
    on the served Q8_0** (§53): +1 % generation (55 of 64 rows faster), prefill
    unchanged — a quarter to a third of the author's +3–4 %. The Q4 profile is

@@ -1,0 +1,36 @@
+== base-n17  ncmoe=17  extra=''  vram=93838 MiB
+-- temp 0
+code     tokens= 387 tg= 39.45 t/s  draft_n=- accepted=-  wall= 10.2s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Tuple\n\n\n'
+prose    tokens= 400 tg= 39.22 t/s  draft_n=- accepted=-  wall= 10.6s | 'Elias had spent forty years listening to the sea. His world was define'
+extract  tokens= 113 tg= 39.77 t/s  draft_n=- accepted=-  wall=  3.4s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+-- temp 0.7
+code     tokens= 400 tg= 40.08 t/s  draft_n=- accepted=-  wall= 10.4s | '```python\nimport csv\nfrom typing import Dict, List, Union, Optional\nim'
+prose    tokens= 400 tg= 39.83 t/s  draft_n=- accepted=-  wall= 10.4s | 'Elias had spent forty years listening to the sea. His hands, calloused'
+extract  tokens= 160 tg= 39.74 t/s  draft_n=- accepted=-  wall=  4.6s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+== base-n18  ncmoe=18  extra=''  vram=90782 MiB
+-- temp 0
+code     tokens= 375 tg= 37.99 t/s  draft_n=- accepted=-  wall= 10.2s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Union\n\n\n'
+prose    tokens= 400 tg= 38.13 t/s  draft_n=- accepted=-  wall= 10.9s | 'Elias had spent forty years listening to the ocean’s breath. His light'
+extract  tokens= 113 tg= 38.29 t/s  draft_n=- accepted=-  wall=  3.5s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+-- temp 0.7
+code     tokens= 400 tg= 38.40 t/s  draft_n=- accepted=-  wall= 10.9s | '```python\nimport csv\nimport math\nfrom typing import Dict, List, Option'
+prose    tokens= 400 tg= 38.58 t/s  draft_n=- accepted=-  wall= 10.8s | 'Elias had tended the salt-bitten cliffs of Oakhaven for forty years. H'
+extract  tokens= 173 tg= 39.03 t/s  draft_n=- accepted=-  wall=  5.0s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+== mtp-n18-p075  ncmoe=18  extra='-md /home/matt/.lmstudio/models/dzannotti/Qwen3.8-Flash-Next-MTP-GGUF/Qwen3.8-Flash-Next-MTP-Q4_K_M.gguf -ngld 99 -cd 131072 -ctkd q8_0 -ctvd q8_0 --spec-type mtp:n_max=3,p_min=0.75'  vram=95312 MiB
+-- temp 0
+code     tokens= 400 tg= 57.43 t/s  draft_n=306 accepted=279  wall=  7.4s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Union\n\n\n'
+prose    tokens= 400 tg= 33.70 t/s  draft_n=298 accepted=189  wall= 12.3s | 'Elias had spent forty years listening to the sea. His world was define'
+extract  tokens= 113 tg= 61.19 t/s  draft_n=86 accepted=83  wall=  2.4s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+-- temp 0.7
+code     tokens= 376 tg= 58.65 t/s  draft_n=296 accepted=265  wall=  6.8s | '```python\nimport csv\nfrom typing import Dict, List, Tuple, Optional\n\n\n'
+prose    tokens= 400 tg= 33.75 t/s  draft_n=297 accepted=191  wall= 12.2s | 'The wind howled like a wounded beast against the stone walls of Blackw'
+extract  tokens= 118 tg= 62.70 t/s  draft_n=91 accepted=88  wall=  2.4s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+== mtp-n18-p0  ncmoe=18  extra='-md /home/matt/.lmstudio/models/dzannotti/Qwen3.8-Flash-Next-MTP-GGUF/Qwen3.8-Flash-Next-MTP-Q4_K_M.gguf -ngld 99 -cd 131072 -ctkd q8_0 -ctvd q8_0 --spec-type mtp:n_max=3,p_min=0.0'  vram=95310 MiB
+-- temp 0
+code     tokens= 400 tg= 55.37 t/s  draft_n=339 accepted=286  wall=  7.7s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Union\n\n\n'
+prose    tokens= 400 tg= 26.97 t/s  draft_n=535 accepted=219  wall= 15.2s | 'Elias had spent forty years listening to the sea. It was a rhythmic, i'
+extract  tokens= 113 tg= 59.38 t/s  draft_n=90 accepted=85  wall=  2.6s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+-- temp 0.7
+code     tokens= 400 tg= 52.73 t/s  draft_n=346 accepted=283  wall=  8.0s | '```python\nimport csv\nfrom typing import Dict, List, Union, Optional\n\nd'
+prose    tokens= 400 tg= 26.42 t/s  draft_n=552 accepted=214  wall= 15.5s | 'Elias had spent forty years listening to the sea. He knew its moods be'
+extract  tokens= 118 tg= 61.33 t/s  draft_n=93 accepted=86  wall=  2.5s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'

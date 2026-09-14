@@ -5839,3 +5839,119 @@ linked against the other toolkit each took the branch they should.
 
 Raw data: `results/qwen38-flash-next-q8-128k-sweep-20260914-102441.{md,raw.log}`
 (before, `fe215a8c`) and `-20260914-105042.{md,raw.log}` (after, `7b4b3dd1`).
+
+---
+
+## 54. MTP on the served Q8_0: +62–71 % on code and JSON, +12 % on prose, and a gain that fades with depth (2026-09-14)
+
+Qwen3.8-Flash-Next ships a multi-token-prediction head; the lmstudio-community
+GGUF this box serves drops it. Upstream #2369 (merged 2026-09-07) wires qwen4exp
+into ik_llama.cpp's MTP framework and accepts a **predictor-only companion via
+`-md`** in the layout `dzannotti/Qwen3.8-Flash-Next-MTP-GGUF` uses — one full
+qwen4exp block (attention + 512-expert MoE + hyper-connections, 4 B params) with
+its own token embeddings and LM head, so it needs nothing from the still-open
+#2403. The head used here is that repo's `Qwen3.8-Flash-Next-MTP-Q4_K_M.gguf`
+(2 622 313 344 bytes, sha256 `1f2a6991…c475f4c02`, checked).
+
+**The build.** `d5f53d9f` + the seven `keep-*` patches (all applied clean), CUDA
+13.3 — the new `build.sh` guard stopped a plain `./build.sh` from taking 13.4
+against the 13.3 cache, as designed. The one upstream commit that matters here
+landed the same morning: **#2412** (`1b542a42`), per-step recurrent checkpoints
+for qwen4exp. Before it, #2369 declined per-step checkpoints (the PLE n-gram
+convolution tail was not covered) and fell back to `gpu-fallback`, which rolls
+back the whole slot on a rejected draft.
+
+**Placement.** The head (2 149 MiB), its KV (136 MiB at q8_0, 131072), its
+compute buffer (2 120 MiB) and the per-step buffers do not fit beside
+`-ncmoe 17`; `-ncmoe 18` holds them. On its own, that one layer costs ~3 % of
+plain generation (39.7 → 38.4 t/s averaged over the shallow set, on `7b4b3dd1`).
+
+**Method.** Test server on port 8091, service down, 500 W. Two sets:
+
+* *shallow* — three short prompts (a Python CSV function, a 300-word story, a
+  JSON extraction) of **37–86 tokens**, 400 tokens generated, thinking off, at
+  temperature 0 and 0.7 — so the whole context never exceeds ~490 tokens;
+* *depth* — real text instead of `depthbench.sh`'s synthetic corpus (a repeated
+  record line would inflate draft acceptance): this repository's docs, then
+  `lib/common.sh`, `tools/depthbench.sh`, `build_qwen4exp.cpp`,
+  `speculative.cpp` and `server-context.cpp`, cut to 32k / 96k / 124k tokens
+  with a unique salt, followed by a code task and then a prose task on the same
+  prefix (the second request reuses it from the prompt cache, so only the first
+  one's prefill is a prefill). Temperature 0.7, 400 tokens.
+
+### 54.1 Shallow (under 500 tokens of context): #2412 turns prose from a loss into a gain
+
+t/s at temperature 0 / 0.7; accepted drafts at temperature 0 in parentheses.
+
+| | code | JSON extraction | prose |
+|---|---:|---:|---:|
+| no MTP (`-ncmoe 17`, the served profile) | 39.2 / 39.7 | 39.5 / 39.7 | 39.8 / 40.1 |
+| MTP, `gpu-fallback` checkpoints | 57.5 / 59.4 (91 %) | 62.6 / 64.5 (97 %) | 33.6 / 35.5 (64 %) |
+| **MTP, per-step checkpoints (#2412)** | **63.4 / 64.4** (91 %) | **65.9 / 67.8** (94 %) | **45.6 / 44.5** (67 %) |
+
+`n_max=3, p_min=0.75` throughout. On the build before #2412 the same comparison
+also ran at `p_min=0`, which drafts even when the head is unsure: prose fell to
+27.0 / 26.4 t/s against 33.7 at 0.75, code and JSON were no better. 0.75 is what
+the head's author recommends and what the profile ships.
+
+Acceptance barely depends on the checkpoint mode — it is the same head making
+the same guesses (64 % vs 67 % on prose). What #2412 changes is the **price of a
+wrong guess**: with the whole slot rolled back, a two-thirds-accepted prose
+stream is slower than no speculation at all; with a per-step rollback it is 12 % faster. On code and JSON,
+where nine drafts in ten land, it is worth another 5–10 %.
+
+Temperature 0.7 costs little, which matters for Hermes: on prose acceptance drops
+from 67 to 58 % and generation from 45.6 to 44.5 t/s; code and JSON do not move.
+
+### 54.2 Depth: prefill pays everywhere, generation gains fade
+
+| depth | prefill, no MTP → MTP | code tg | prose tg | code / prose acceptance |
+|---|---:|---:|---:|---:|
+| 32k | 1 452 → 1 230 (−15 %) | 35.8 → **52.9** (+48 %) | 36.1 → 39.2 (+8 %) | 85 % / 65 % |
+| 96k | 1 275 → 1 112 (−13 %) | 32.9 → 38.1 (+16 %) | 32.7 → 31.0 (−5 %) | 80 % / 67 % |
+| 124k | 1 194 → 1 046 (−12 %) | 32.0 → 36.8 (+15 %) | 32.1 → 27.7 (−14 %) | 85 % / 64 % |
+
+**Prefill costs 12–15 % at every depth.** One expert layer fewer on the card and
+the head filling its own KV as the prompt goes in both contribute; this run does
+not separate them.
+
+**Acceptance holds with depth; the gain does not.** 80–85 % on code at every
+depth, 64–67 % on prose — the head predicts as well at 124k as at 32k. What
+changes is the cost of verifying. The target checks a draft as a 4-token batch,
+and #2404's gather (§52), which attends over only the cells the sparse indexer
+picked, is gated on `n_tokens == 1`. Plain decode takes it; verification does
+not, so every verify step attends over the whole cache in all twelve attention
+layers — the depth cost #2404 removed comes back through the side door. Plain
+generation lost 11 % from 32k to 124k; MTP code generation lost 30 %.
+
+That makes the interaction worth reporting upstream: extending the gather to
+small batches — the selection is already per query row — would let the two
+compose.
+
+**VRAM peaked at 96 844 MiB of 97 887 at 124k** with MTP (94 456 without). It
+held, with about 1 GiB to spare; the last ~6 000 tokens of the window are
+unmeasured.
+
+**Correctness.** Output is coherent throughout and, at temperature 0, not
+bit-identical to the non-MTP profile: the verify batch runs other kernels than
+single-token decode, so near-ties resolve differently. `gpu-fallback` and
+per-step produced different greedy prose from the same head for the same reason.
+Normal for speculative decoding here; nothing suggests a fault.
+
+### 54.3 Verdict
+
+For short-context work that is mostly code, tool calls and JSON, MTP is the
+largest generation win this model has had after #2404: +62–71 %. Prose gains a
+little. Past ~96k the balance turns — code still +15 %, prose −5 to −14 % — and
+every new prompt prefills 12–15 % slower. Whether that nets out positive for
+Hermes depends on how deep its contexts run and how much of its output is
+reasoning prose rather than tool calls. Shipped as a **separate profile**,
+`qwen38-flash-next-q8-128k-mtp` (wrapper `serve-qwen38-flash-next-q8-128k-mtp.sh`),
+alias of its own; the default stays `qwen38-flash-next-q8-128k`. Not soaked.
+
+Raw data: `results/qwen38-q8-mtp-series-20260914.log` (the §54.1 per-step and
+fallback rows and all of §54.2, on `d5f53d9f`),
+`results/qwen38-q8-mtp-first-look-20260914.log` (`p_min` 0 vs 0.75 and the
+`-ncmoe 17/18` baselines, on `7b4b3dd1`, gpu-fallback only), and the two request
+scripts `results/qwen38-q8-mtp-{prompts,depth}-20260914.py`; the depth corpus is
+the file list above, concatenated in that order.

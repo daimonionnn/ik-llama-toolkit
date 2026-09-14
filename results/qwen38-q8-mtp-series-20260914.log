@@ -1,0 +1,48 @@
+power: 500.00 W  clone: d5f53d9f Fix compiler warnings
+== s-base-n17 ncmoe=17 mode=shallow ckpt='' extra=''
+-- temp 0
+code     tokens= 387 tg= 39.15 t/s  draft_n=- accepted=-  wall= 10.2s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Tuple\n\n\n'
+prose    tokens= 400 tg= 39.82 t/s  draft_n=- accepted=-  wall= 10.4s | 'Elias had spent forty years listening to the sea. His world was define'
+extract  tokens= 113 tg= 39.47 t/s  draft_n=- accepted=-  wall=  3.4s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+-- temp 0.7
+code     tokens= 400 tg= 39.66 t/s  draft_n=- accepted=-  wall= 10.5s | '```python\nimport csv\nfrom typing import Dict, List, Union, Optional\n\n\n'
+prose    tokens= 400 tg= 40.14 t/s  draft_n=- accepted=-  wall= 10.3s | 'The wind howled against the glass panes of the Blackwood Lighthouse, a'
+extract  tokens= 118 tg= 39.66 t/s  draft_n=- accepted=-  wall=  3.5s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+   vram peak: 94024 MiB
+== s-mtp-perstep ncmoe=18 mode=shallow ckpt='fixed recurrent checkpoint mode = per-step' extra='-md /home/matt/.lmstudio/models/dzannotti/Qwen3.8-Flash-Next-MTP-GGUF/Qwen3.8-Flash-Next-MTP-Q4_K_M.gguf -ngld 99 -cd 131072 -ctkd q8_0 -ctvd q8_0 --spec-type mtp:n_max=3,p_min=0.75'
+-- temp 0
+code     tokens= 400 tg= 63.35 t/s  draft_n=303 accepted=277  wall=  6.8s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Union\n\n\n'
+prose    tokens= 400 tg= 45.59 t/s  draft_n=286 accepted=191  wall=  9.2s | 'Elias had spent forty years listening to the sea. It was a rhythmic, i'
+extract  tokens= 113 tg= 65.86 t/s  draft_n=89 accepted=84  wall=  2.3s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+-- temp 0.7
+code     tokens= 385 tg= 64.35 t/s  draft_n=301 accepted=266  wall=  6.4s | '```python\nimport csv\nfrom typing import Dict, List, Any, Optional\n\ndef'
+prose    tokens= 400 tg= 44.47 t/s  draft_n=314 accepted=183  wall=  9.4s | 'Elias had spent forty years listening to the ocean’s breath. His world'
+extract  tokens= 113 tg= 67.83 t/s  draft_n=89 accepted=84  wall=  2.2s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+   vram peak: 95996 MiB
+== s-mtp-fallback ncmoe=18 mode=shallow ckpt='fixed recurrent checkpoint mode = gpu-fallback' extra='-md /home/matt/.lmstudio/models/dzannotti/Qwen3.8-Flash-Next-MTP-GGUF/Qwen3.8-Flash-Next-MTP-Q4_K_M.gguf -ngld 99 -cd 131072 -ctkd q8_0 -ctvd q8_0 --spec-type mtp:n_max=3,p_min=0.75 --spec-ckpt-mode gpu-fallback'
+-- temp 0
+code     tokens= 400 tg= 57.49 t/s  draft_n=306 accepted=279  wall=  7.4s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Union\n\n\n'
+prose    tokens= 400 tg= 33.58 t/s  draft_n=298 accepted=189  wall= 12.3s | 'Elias had spent forty years listening to the sea. His world was define'
+extract  tokens= 113 tg= 62.63 t/s  draft_n=86 accepted=83  wall=  2.4s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+-- temp 0.7
+code     tokens= 382 tg= 59.35 t/s  draft_n=291 accepted=268  wall=  6.9s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Union\n\n\n'
+prose    tokens= 400 tg= 35.46 t/s  draft_n=293 accepted=194  wall= 11.7s | 'The storm had battered the cliffs of Blackwood Point for three days st'
+extract  tokens= 118 tg= 64.51 t/s  draft_n=91 accepted=88  wall=  2.4s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+   vram peak: 95754 MiB
+== d-base-n17 ncmoe=17 mode=depth ckpt='' extra=''
+{"label": "d-base-n17", "depth": 32000, "task": "code", "prompt_n": 31725, "pp": 1452.0, "gen_n": 400, "tg": 35.78, "draft_n": null, "accepted": null, "wall": 33.1}
+{"label": "d-base-n17", "depth": 32000, "task": "prose", "prompt_n": 981, "pp": 746.7, "gen_n": 400, "tg": 36.11, "draft_n": null, "accepted": null, "wall": 12.4}
+{"label": "d-base-n17", "depth": 96000, "task": "code", "prompt_n": 95388, "pp": 1274.7, "gen_n": 400, "tg": 32.92, "draft_n": null, "accepted": null, "wall": 87.9}
+{"label": "d-base-n17", "depth": 96000, "task": "prose", "prompt_n": 3204, "pp": 876.5, "gen_n": 380, "tg": 32.72, "draft_n": null, "accepted": null, "wall": 15.4}
+{"label": "d-base-n17", "depth": 124000, "task": "code", "prompt_n": 124768, "pp": 1194.0, "gen_n": 400, "tg": 31.99, "draft_n": null, "accepted": null, "wall": 118.8}
+{"label": "d-base-n17", "depth": 124000, "task": "prose", "prompt_n": 3912, "pp": 905.7, "gen_n": 381, "tg": 32.05, "draft_n": null, "accepted": null, "wall": 16.3}
+   vram peak: 94456 MiB
+== d-mtp-perstep ncmoe=18 mode=depth ckpt='fixed recurrent checkpoint mode = per-step' extra='-md /home/matt/.lmstudio/models/dzannotti/Qwen3.8-Flash-Next-MTP-GGUF/Qwen3.8-Flash-Next-MTP-Q4_K_M.gguf -ngld 99 -cd 131072 -ctkd q8_0 -ctvd q8_0 --spec-type mtp:n_max=3,p_min=0.75'
+{"label": "d-mtp-perstep", "depth": 32000, "task": "code", "prompt_n": 31725, "pp": 1229.9, "gen_n": 400, "tg": 52.87, "draft_n": 309, "accepted": 263, "wall": 33.4}
+{"label": "d-mtp-perstep", "depth": 32000, "task": "prose", "prompt_n": 981, "pp": 647.6, "gen_n": 400, "tg": 39.15, "draft_n": 304, "accepted": 199, "wall": 11.8}
+{"label": "d-mtp-perstep", "depth": 96000, "task": "code", "prompt_n": 95388, "pp": 1111.5, "gen_n": 400, "tg": 38.11, "draft_n": 306, "accepted": 245, "wall": 97.2}
+{"label": "d-mtp-perstep", "depth": 96000, "task": "prose", "prompt_n": 3204, "pp": 767.6, "gen_n": 380, "tg": 31.04, "draft_n": 288, "accepted": 192, "wall": 16.5}
+{"label": "d-mtp-perstep", "depth": 124000, "task": "code", "prompt_n": 124768, "pp": 1045.7, "gen_n": 400, "tg": 36.82, "draft_n": 302, "accepted": 258, "wall": 131.9}
+{"label": "d-mtp-perstep", "depth": 124000, "task": "prose", "prompt_n": 3912, "pp": 805.6, "gen_n": 400, "tg": 27.68, "draft_n": 310, "accepted": 197, "wall": 19.4}
+   vram peak: 96844 MiB
+== series done 13:48:05

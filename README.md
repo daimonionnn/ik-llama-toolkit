@@ -198,6 +198,7 @@ depth. Measured with `llama-sweep-bench` (RESULTS §51, §52), shallow figures,
 | **`qwen38-flash-next-q4km-128k`** *(fastest)* | **3607 tok/s** | **129.7 t/s** | 2716 / 103.8 | 1633 / **87.8** |
 | `qwen38-flash-next-q4km-256k` | 3342 | 128.6 | — | 1346 / 59.7 |
 | **`qwen38-flash-next-q8-128k`** *(default)* | 2301 | 40.6 | 1900 / 37.1 | 1435 / **34.3** |
+| `qwen38-flash-next-q8-128k-mtp` | −12–15 % | **63–66** code/JSON, 45 prose (<500 tok) | 52.9 code, 39.2 prose | 38.1 code, 31.0 prose (96k) |
 | `qwen38-flash-next-q8-256k` | 2163 | 36.9 | 1757 / 32.4 | — |
 
 The two 128k rows are current, both re-measured 2026-09-05 on ik_llama.cpp
@@ -209,6 +210,17 @@ Q8_0's decode was never bound by the KV cache but by ~96 GiB of experts crossing
 PCIe every token (RESULTS §52, §52.2). That Q8_0 run is also the first to reach
 **129 024** of its 131 072 window without an error; §51's runs all stopped at
 75 776. The two 256k rows are from 2026-09-03 and predate the commit.
+
+**The `-mtp` row is the same Q8_0 profile with the model's own
+multi-token-prediction head drafting three tokens ahead** (RESULTS §54, measured
+2026-09-14, a separate 2.4 GiB head file — download line in the profile). Its
+depth columns are real-text runs, not sweep-bench. Generation roughly +60–70 % on
+code and JSON in short contexts, +12 % on prose; the gain fades with depth, and
+past ~96k prose is slower than without it, because verifying a draft is a
+multi-token batch and upstream #2404's depth fix only engages for single tokens.
+Prefill is 12–15 % slower everywhere. Needs ik_llama.cpp with #2412 (per-step
+checkpoints), and one expert layer more on the host (`-ncmoe 18`). Not the
+default, not soaked.
 
 The first draft of the Q4 profile, with the settings carried over from DeepSeek
 (`-ncmoe 13 -ub 4096`), measured 2753 tok/s and 60.6 t/s; tuning was worth
@@ -471,6 +483,7 @@ ik-llama-toolkit/
 ├── serve-qwen38-flash-next-q4km-128k.sh   3607 pp / 129.7 tg, 4-bit -- the fastest of all
 ├── serve-qwen38-flash-next-q4km-256k.sh   3342 / 128.6
 ├── serve-qwen38-flash-next-q8-128k.sh     2303 / 40.6, the quality reference
+├── serve-qwen38-flash-next-q8-128k-mtp.sh + MTP head: ~64 tg on code/JSON, 45 on prose
 ├── serve-qwen38-flash-next-q8-256k.sh     2163 / 36.9
 ├── serve-step-3.7-flash-q8.sh             Step-3.7-Flash Q8_K_XL, ~13 tg
 │
