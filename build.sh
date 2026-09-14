@@ -225,6 +225,43 @@ if [[ $CLEAN == 1 && -d $IK_BUILD ]]; then
     rm -rf "$IK_BUILD"
 fi
 
+# --- A changed toolchain on an existing cache silently drops CUDA ------------
+# CMake cannot switch compilers inside a cache. When CMAKE_CUDA_COMPILER (or the
+# C/C++ compiler) differs from what the cache recorded, it prints "You have
+# changed variables that require your cache to be deleted", deletes the cache
+# and configures again WITHOUT the -D options it was invoked with. GGML_CUDA then
+# falls back to OFF, no CUDA object is compiled, and the build exits 0 with a
+# CPU-only binary. That happened on 2026-09-14, when CUDA 13.4 was installed
+# next to the 13.3 this directory had been configured with -- the toolkit search
+# above prefers the newest (RESULTS 53.1).
+#
+# Stop rather than wipe: the directory still holds a working binary, and which
+# toolkit to build with is a decision, not something to switch unannounced.
+cache_value() {
+    sed -n "s/^$1:[A-Z]*=//p" "$IK_BUILD/CMakeCache.txt" 2>/dev/null | head -1
+}
+
+if [[ -f $IK_BUILD/CMakeCache.txt ]]; then
+    changed=()
+    for pair in "CMAKE_CUDA_COMPILER=$NVCC" "CMAKE_C_COMPILER=$HOST_CC" "CMAKE_CXX_COMPILER=$HOST_CXX"; do
+        key="${pair%%=*}"; want="${pair#*=}"
+        have="$(cache_value "$key")"
+        [[ -n $have ]] || continue
+        [[ "$(readlink -f "$have")" == "$(readlink -f "$want")" ]] || changed+=( "$key  $have -> $want" )
+    done
+    if (( ${#changed[@]} )); then
+        cached_nvcc="$(cache_value CMAKE_CUDA_COMPILER)"
+        msg="$IK_BUILD was configured with a different toolchain:"
+        for c in "${changed[@]}"; do msg+=$'\n'"  $c"; done
+        msg+=$'\n\n'"Reconfiguring in place would make CMake drop -DGGML_CUDA=ON and build a"
+        msg+=$'\n'"CPU-only binary without an error. Choose one:"
+        msg+=$'\n'"$(printf '  %-44s # %s' './build.sh --clean' 'switch (15-30 min cold)')"
+        [[ -n $cached_nvcc ]] && \
+            msg+=$'\n'"$(printf '  %-44s # %s' "CUDA_HOME=${cached_nvcc%/bin/nvcc} ./build.sh" 'keep the old toolkit')"
+        die "$msg"
+    fi
+fi
+
 JOBS="${IK_BUILD_JOBS:-$(nproc)}"
 
 # RelWithDebInfo is Release plus -g: same optimisation, same speed, but the
@@ -304,6 +341,12 @@ log "configuring"
 show_cmd cmake "${CMAKE_ARGS[@]}"
 cmake "${CMAKE_ARGS[@]}" || die "cmake configure failed"
 
+# Whatever the reason, a configure that ends with CUDA off must not go on to
+# build: the result would load and serve, on the CPU.
+[[ "$(cache_value GGML_CUDA)" == ON ]] || die "configure finished with GGML_CUDA=$(cache_value GGML_CUDA)
+This would build a CPU-only binary. Rebuild from an empty directory:
+  ./build.sh --clean"
+
 log "building with $JOBS jobs (CUDA kernels take a while -- 15-30 min cold)"
 cmake --build "$IK_BUILD" --config Release -j "$JOBS" \
       --target llama-server llama-bench llama-sweep-bench llama-cli \
@@ -319,6 +362,19 @@ for b in llama-server llama-bench llama-sweep-bench llama-cli llama-quantize lla
         warn "  missing: $b"
     fi
 done
+
+# The last word on whether this binary can use the GPU is what it links.
+if [[ -x "$IK_BIN/llama-server" ]]; then
+    cudart="$(ldd "$IK_BIN/llama-server" 2>/dev/null | awk '/libcudart/ {print $3; exit}')"
+    [[ -n $cudart ]] || die "llama-server links no libcudart -- it has no CUDA backend.
+Rebuild from an empty directory: ./build.sh --clean"
+    if [[ -n $CUDA_LIBDIR && "$(dirname "$(readlink -f "$cudart")")" != "$(readlink -f "$CUDA_LIBDIR")" ]]; then
+        warn "libcudart resolves to $cudart, not under $CUDA_LIBDIR"
+        warn "a runtime from another toolkit -- see TROUBLESHOOTING, 'mmq_x_best=0'"
+    else
+        ok "CUDA runtime: $cudart"
+    fi
+fi
 
 echo >&2
 log "next: ./serve.sh        (start the server)"

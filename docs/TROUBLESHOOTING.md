@@ -45,6 +45,41 @@ active toolkit actually needs it, via `-I compat` on CUDA sources only. If you
 ever build ik_llama.cpp by hand on this box, add `-Icompat` to `CMAKE_CUDA_FLAGS`
 or expect this error.
 
+### The build succeeds, but the server runs on the CPU
+
+**`build.sh` now refuses this** (since 2026-09-14) — the entry stays because the
+mechanism applies to any hand-run `cmake` too.
+
+Seen 2026-09-14, after a newer CUDA toolkit (13.4) was installed next to the
+one the build directory was configured with (13.3). `build.sh` picks the newest
+toolkit that targets your GPU, and when `CMAKE_CUDA_COMPILER` changes on an
+existing cache, CMake deletes the cache and configures again **without the `-D`
+options it was given** — so `GGML_CUDA` falls back to `OFF`. Nothing failed: the
+build exited 0, just very quickly, and the binary had no CUDA backend.
+
+`build.sh` now has three guards against it: it stops before configuring when the
+cached C, C++ or CUDA compiler differs from the one it picked, and tells you to
+choose between `--clean` and `CUDA_HOME=<old toolkit>`; it stops after
+configuring if `GGML_CUDA` is not `ON`; and it stops after building if
+`llama-server` links no `libcudart` (and warns if it links one from a different
+toolkit than the one it built with).
+
+To check by hand:
+
+```bash
+grep GGML_CUDA ik_llama.cpp/build/CMakeCache.txt     # must say ON
+ldd ik_llama.cpp/build/bin/llama-server | grep -i cudart
+```
+
+To fix, rebuild from an empty directory with the toolkit you mean:
+
+```bash
+CUDA_HOME=/usr/local/cuda-13.3 ./build.sh --clean     # keep the old toolkit
+./build.sh --clean                                   # or move to the newest
+```
+
+`CUDA_HOME` puts that toolkit first in `build.sh`'s search. RESULTS §53.1.
+
 ### Inference aborts immediately with `mmq_x_best=0`
 
 The nastiest failure on this machine, because it builds and loads perfectly and
