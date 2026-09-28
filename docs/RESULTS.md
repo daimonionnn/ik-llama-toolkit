@@ -5955,3 +5955,152 @@ fallback rows and all of §54.2, on `d5f53d9f`),
 `-ncmoe 17/18` baselines, on `7b4b3dd1`, gpu-fallback only), and the two request
 scripts `results/qwen38-q8-mtp-{prompts,depth}-20260914.py`; the depth corpus is
 the file list above, concatenated in that order.
+
+---
+
+## 55. The 09-27 rebase is worth +5 % generation on the served Q8_0 — after a power profile cost 17 % and looked exactly like an upstream regression (2026-09-27)
+
+71 upstream commits since `d5f53d9f`, rebased to `ed27bf7e`; all seven `keep-*`
+patches applied clean. The one aimed at this model is **#2374** (`b3c8a749`),
+ikawrakow's QSA optimization — a draft since August, now finished with a CPU
+implementation and, notably, *"CUDA: handle GQA = 12 for head size = 256 via new
+MMA"*, which is exactly this model's attention geometry. It stops expanding the
+4:1-compressed indexer cache with a `ggml_get_rows` before the top-k matmul.
+
+`llama-sweep-bench` through `./bench.sh sweep`, `qwen38-flash-next-q8-128k`,
+500 W, 64 rows to 129 024, against the 09-14 run of §53:
+
+| N_KV | pp 09-14 | pp 09-27 | Δ | tg 09-14 | tg 09-27 | Δ |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 2 216 | 2 219 | +0.1 % | 40.41 | 41.40 | +2.4 % |
+| 2 048 | 2 312 | 2 314 | +0.1 % | 39.49 | 40.34 | +2.2 % |
+| 16 384 | 2 083 | 2 090 | +0.3 % | 38.36 | 38.86 | +1.3 % |
+| 32 768 | 1 900 | 1 912 | +0.6 % | 37.38 | 37.96 | +1.6 % |
+| 65 536 | 1 564 | 1 572 | +0.5 % | 35.30 | 36.73 | +4.1 % |
+| 98 304 | 1 315 | 1 333 | +1.4 % | 33.66 | 36.18 | **+7.5 %** |
+| 114 688 | 1 216 | 1 235 | +1.5 % | 33.04 | 36.05 | **+9.1 %** |
+| 129 024 | 900 | 981 | +9.0 % | 32.67 | 35.26 | +7.9 % |
+
+**Generation +5.35 % mean (+5.60 % median), 62 of 64 rows faster; prefill
++1.04 %.** The gain grows with depth — +2.4 % at zero, +8–9 % past 100k — which
+is what an indexer-side saving should look like: the expansion it removes was
+sized by the cache, not by the prompt. Five times what #2375's fusions gave
+(§53), and unlike them it is not uniform.
+
+Other commits in the jump, for the record: **#2403** merged, so Unsloth-style
+shared MTP companions (no `token_embd`) now load as well as the dzannotti head
+§54 uses; **#2460** reindexes the qwen4exp PLE token history by position, which
+is the path a rewound or branched cache takes; **#2452**, **#2491** and **#2446**
+are prompt-reuse and checkpoint work for hybrid models (checkpoint spill to NVMe
+is opt-in via `--ctx-ckpt-spill-dir`); **#2508** finally adds `-no-fidx`, the
+off-switch the profile comments said did not exist. DeepSeek-V4.1 arrived as its
+own arch (`deepseek41`, #2455 + #2512), which is why `build_deepseek4.cpp` moved
+without breaking our patches. Nothing here touches the gather-vs-verify
+interaction §54.2 found.
+
+### 55.1 The 17 % that was not upstream: GNOME's power-saver profile
+
+The first sweep on the new build came in **17 % below** the 09-14 run on
+generation (34.24 against 40.41 t/s at N_KV 0) and 2.7 % below on prefill, with
+**0 of 64 rows faster**. That reads like a regression in 71 commits of upstream.
+It was not. What the search cost, and what ruled each suspect out:
+
+* **the upstream code** — the old commit `d5f53d9f` was rebuilt into a separate
+  build directory (its own `libggml.so`, so the binaries do not mix) and run
+  A/B/A against the new one on the same prompts: **30.4 / 30.4 / 30.5 t/s**. The
+  code was not the difference; the machine was slower than it had been on 09-14.
+* **the fused indexer** — `-no-fidx`, new in this jump: 30.7 vs 30.6 t/s. No.
+* **PCIe** — `tools/h2d-bandwidth` gave 49.7 GB/s pinned against §49.10's 50.0,
+  and the link sampled Gen5 x16 under load. (`pcie.link.gen.current` reads 1 at
+  idle, which is the link downtraining, not a fault.)
+* **the GPU** — no throttle reason active, no thermal slowdown, SM 2790–2820 MHz
+  under load against a 3090 max, 44–49 °C. LACT's `mem_clock_offsets: 0: 4006`
+  predates this and was not touched; the only LACT change was 450 → 500 W.
+* **`pcie_aspm.policy=powersupersave`**, which had been tried while chasing the
+  card's ~40 W idle draw — never reached the kernel: `/etc/default/grub` carries
+  only the amdgpu options and `/proc/cmdline` matches, so ASPM stayed `[default]`.
+* **CPU power limits** — RAPL long and short term both report 4095 W, i.e.
+  unlimited; turbo on, `max_perf_pct` 100.
+* **host memory** — a threaded memcpy probe gave ~78 GB/s of traffic, in the
+  expected range for 4×64 GB DDR5-6400 (102.4 GB/s theoretical, §26.1).
+
+**The Q4_K_M profile was the split that mattered.** It keeps everything on the
+card, and its sweep on the same day measured 133.06 t/s at N_KV 0 against
+§52's 129.65 — *faster*, not slower. So whatever had changed touched only the
+path through the host, and on this Q8_0 profile that is the ~96 GiB of routed
+experts computed on the CPU.
+
+The cause was GNOME's **power-saver** power profile: governor `powersave` with
+`energy_performance_preference = power`. Sampling the busiest cores during
+generation, with the profile and after switching it:
+
+| | busiest cores | Q8_0 generation |
+|---|---|---:|
+| power-saver | 2 700 MHz (of 5 500 max) | 31.1 t/s |
+| performance | 5 400–5 490 MHz | **40.0 t/s** |
+
+Generation here is a per-token alternation of short CPU bursts and waiting on
+the GPU, so few cores ever look busy — exactly the shape `EPP=power` refuses to
+raise clocks for. Prefill is one long saturating batch, so it kept its clocks
+and lost only 2.7 %. That asymmetry, plus Q4 being untouched, is the signature.
+
+Two things to take from it. The power profile belongs in the preflight of any
+measurement here, next to the power cap (`powerprofilesctl get`). And a
+regression that hits generation far harder than prefill, on the profile with
+experts on the host but not on the profile without them, is a host-side story —
+check the CPU before reading 71 commits.
+
+Raw data: `results/qwen38-flash-next-q8-128k-sweep-20260927-234125.{md,raw.log}`
+(the clean run above), `-20260927-220908.{md,raw.log}` (the same build under
+power-saver, kept as the record of the false alarm),
+`results/qwen38-flash-next-q4km-128k-sweep-20260927-230522.{md,raw.log}` (Q4
+under power-saver, unaffected), `results/qwen38-q8-oldnew-probe-20260927.log`
+(the A/B/A) and `results/qwen38-q8-fidx-probe-20260927.log`.
+
+### 55.2 Where a Q8_0 token actually goes: the CPU computes the host experts, and the two sides take turns
+
+§55.1 left an obvious question — if a CPU power profile costs a quarter of
+generation, what is the CPU doing? Measured on `ed27bf7e`, `performance`, 500 W,
+one 700-token generation per row, `nvidia-smi dmon` sampling alongside:
+
+| `-t` | generation | GPU SM util | PCIe rx |
+|---:|---:|---:|---:|
+| 2 | 28.70 t/s | 24 % | 0.1 GB/s |
+| 8 *(shipped)* | 39.70 t/s | 32 % | 0.1 GB/s |
+| 24 | 40.29 t/s | 34 % | 0.1 GB/s |
+
+**The expert weights do not cross PCIe during decode.** 0.1 GB/s is activations
+and bookkeeping, nothing like the ~0.9 GB a token would need if the 17
+host-resident layers were streamed: 17 layers × 10 of 512 experts × 3 matrices
+of 640 × 2 560 at Q8_0 ≈ 5.2 MB per expert ≈ **886 MB per token**, which at
+39.7 t/s would be 35 GB/s on the bus. So during generation the CPU reads those
+weights from its own DRAM and computes the expert GEMVs itself; the pinned
+`CUDA_Host` placement serves prefill, where a 2048-token u-batch does amortise
+shipping them to the GPU (§21, §22.4). That asymmetry — CPU for one token, GPU
+for a batch — is the whole reason §55.1's power profile hit generation and left
+prefill alone.
+
+**Neither side is saturated, because they alternate.** The GPU sits at ~32 %
+while the CPU is not bandwidth-bound either: 35 GB/s of DRAM reads against a
+platform that measures ~78 GB/s of memcpy traffic and 102.4 GB/s theoretical
+(4 × 64 GB DDR5-6400, §26.1). Per layer the GPU does attention and the resident
+experts, then waits for the CPU's host experts, then continues; a token is the
+*sum* of the two phases, not the larger of them.
+
+**Which is why clock speed mattered and cores do not.** 2 → 8 threads is +38 %,
+8 → 24 is **+1.5 %** — eight threads already exhaust what this phase can use —
+while 2 700 → 5 400 MHz was +29 % (§55.1). The CPU phase is limited by per-core
+throughput and memory latency, not by how many cores are available.
+
+**So would a much faster CPU help?** Some, and less than it looks. §26.1
+measured this box's own bandwidth ladder: **+18 % of memory bandwidth bought
++5.5 % of generation**, strongly sub-linear. A platform with twice the bandwidth
+and more channels would plausibly be worth some tens of per cent, not a
+multiple, and this CPU's clocks are already at their ceiling. The structural fix
+is to stop asking the CPU at all: the Q4_K_M profile, wholly resident on the
+card, runs **133 t/s against this profile's 40**, MTP buys 60 % on code and JSON
+(§54), and every expert layer moved back onto the GPU is worth ~3 % (§51.2).
+Money spent on VRAM or a smaller quant buys multiples; money spent on the CPU
+buys per cent.
+
+Raw data: `results/qwen38-q8-cpu-phase-20260928.log`.

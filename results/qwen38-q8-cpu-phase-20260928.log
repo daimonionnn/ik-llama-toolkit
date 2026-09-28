@@ -1,0 +1,9 @@
+threads= 8  tg= 39.70 t/s  (700 tokens)
+          sm util 27%   PCIe rx 0.1 GB/s   tx 0.05 GB/s   (20 samples)
+          while busy: sm 32%, PCIe rx 0.1 GB/s over 17 samples
+threads= 2  tg= 28.70 t/s  (700 tokens)
+          sm util 23%   PCIe rx 0.1 GB/s   tx 0.04 GB/s   (20 samples)
+          while busy: sm 24%, PCIe rx 0.1 GB/s over 19 samples
+threads=24  tg= 40.29 t/s  (700 tokens)
+          sm util 29%   PCIe rx 0.1 GB/s   tx 0.05 GB/s   (20 samples)
+          while busy: sm 34%, PCIe rx 0.1 GB/s over 17 samples

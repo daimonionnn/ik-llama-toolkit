@@ -1,0 +1,14 @@
+== fidx-on extra=''
+2610 MHz, 39, 88.25 W
+code     tokens= 387 tg= 30.66 t/s  draft_n=- accepted=-  wall= 13.2s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Tuple\n\n\n'
+prose    tokens= 400 tg= 30.21 t/s  draft_n=- accepted=-  wall= 13.8s | 'Elias had spent forty years listening to the sea. His world was define'
+extract  tokens= 113 tg= 30.33 t/s  draft_n=- accepted=-  wall=  4.5s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+2790 MHz, 44, 161.21 W
+Package id 0:  +45.0°C  (high = +85.0°C, crit = +105.0°C)
+== fidx-off extra='-no-fidx'
+2610 MHz, 39, 87.61 W
+code     tokens= 387 tg= 30.56 t/s  draft_n=- accepted=-  wall= 13.4s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Tuple\n\n\n'
+prose    tokens= 400 tg= 30.47 t/s  draft_n=- accepted=-  wall= 13.6s | 'Elias had spent forty years listening to the sea. His world was define'
+extract  tokens= 113 tg= 31.20 t/s  draft_n=- accepted=-  wall=  4.5s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+2790 MHz, 45, 161.65 W
+Package id 0:  +46.0°C  (high = +85.0°C, crit = +105.0°C)

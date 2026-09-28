@@ -83,8 +83,8 @@ yet.
 
 ## 18. Qwen3.8-Flash-Next: what upstream still has on the table
 
-**Status 2026-09-14 (RESULTS §52–§54).** The clone is on `d5f53d9f` since
-2026-09-14 (via `7b4b3dd1` the same morning). On 2026-09-05 it moved
+**Status 2026-09-27 (RESULTS §52–§55).** The clone is on `ed27bf7e` since
+2026-09-27 (before that `d5f53d9f` and `7b4b3dd1`, both 2026-09-14). On 2026-09-05 it moved
 `15dddc60` → `fe215a8c`
 and the one big win is already in: #2404 makes generation nearly depth-flat
 (+13 % at 32k, +41 % at 96k, **+54 % at 129k**, prefill untouched). The rest is
@@ -108,10 +108,10 @@ unclaimed:
    on the served Q8_0** (§53): +1 % generation (55 of 64 rows faster), prefill
    unchanged — a quarter to a third of the author's +3–4 %. The Q4 profile is
    where it should show more; not measured.
-3. **#2374, QSA optimization** — ikawrakow's own draft: the indexer cache is
-   expanded 4× by a `ggml_get_rows` before the top_k matmul; the PR folds it
-   away. He measured +3–4 % generation at 64k and left it unfinished. It is
-   orthogonal to #2404, which changes the *attention* side, not the indexer.
+3. ~~**#2374, QSA optimization**~~ — **merged 2026-09-26 and measured**
+   (§55): +5.4 % generation on the served Q8_0, growing with depth (+2.4 % at
+   zero, **+9 % at 115k**), prefill +1 %. It shipped finished, with a CPU path
+   and a new CUDA MMA for GQA 12 / head size 256, this model's geometry.
 4. **`--defer-ple`** (#2389, merged) — the model has `per_layer_token_embd`;
    untried, and it is resident-memory relief rather than throughput.
 5. ~~**The other three profiles** carry pre-#2404 numbers~~ — **`q8-128k` done

@@ -1,0 +1,12 @@
+== old-d5f53d9f  version: 158 (d5f53d9f)
+code     tokens= 387 tg= 30.36 t/s  draft_n=- accepted=-  wall= 13.4s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Tuple\n\n\n'
+prose    tokens= 400 tg= 30.32 t/s  draft_n=- accepted=-  wall= 13.8s | 'Elias had spent forty years listening to the sea. His world was define'
+extract  tokens= 113 tg= 30.16 t/s  draft_n=- accepted=-  wall=  4.5s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+== new-ed27bf7e  version: 229 (ed27bf7e)
+code     tokens= 387 tg= 30.44 t/s  draft_n=- accepted=-  wall= 13.4s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Tuple\n\n\n'
+prose    tokens= 400 tg= 29.85 t/s  draft_n=- accepted=-  wall= 13.9s | 'Elias had spent forty years listening to the sea. His world was define'
+extract  tokens= 113 tg= 27.87 t/s  draft_n=- accepted=-  wall=  4.9s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+== old-again  version: 158 (d5f53d9f)
+code     tokens= 387 tg= 30.49 t/s  draft_n=- accepted=-  wall= 13.3s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Tuple\n\n\n'
+prose    tokens= 400 tg= 29.94 t/s  draft_n=- accepted=-  wall= 13.9s | 'Elias had spent forty years listening to the sea. His world was define'
+extract  tokens= 113 tg= 31.87 t/s  draft_n=- accepted=-  wall=  4.6s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'

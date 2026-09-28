@@ -45,6 +45,29 @@ active toolkit actually needs it, via `-I compat` on CUDA sources only. If you
 ever build ik_llama.cpp by hand on this box, add `-Icompat` to `CMAKE_CUDA_FLAGS`
 or expect this error.
 
+### Generation is 15-25 % slow, prefill is fine
+
+Check the power profile before anything else:
+
+```bash
+powerprofilesctl get                                                   # want performance
+cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference  # want performance
+nvidia-smi --query-gpu=power.limit --format=csv,noheader                # and the cap
+```
+
+Under GNOME's **power-saver** profile (`EPP=power`) the busiest cores stay at
+2 700 MHz of 5 500 on this box. Generation alternates short CPU bursts with
+waiting on the GPU, so no core looks busy enough for that governor to raise
+clocks, and any profile with experts in host RAM loses 15-25 % of generation --
+while prefill, one long saturating batch, loses 2-3 % and a fully GPU-resident
+profile (Qwen Q4_K_M at `-ncmoe 0`) loses nothing. That asymmetry is the
+signature; RESULTS §55.1 walks the whole false alarm, which first looked like an
+upstream regression.
+
+`powerprofilesctl set performance` needs a logged-in session -- from a plain
+shell polkit answers `AccessDenied ... switch-profile`. Use `pkexec
+powerprofilesctl set performance`, or the desktop's own power panel.
+
 ### The build succeeds, but the server runs on the CPU
 
 **`build.sh` now refuses this** (since 2026-09-14) — the entry stays because the

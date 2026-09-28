@@ -136,17 +136,18 @@ discrepancy — see RESULTS §51.
 
 | depth | Q4_K_M @128k pp | tg | Q8_0 @128k pp | tg | Q8_0 @256k pp | tg |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 *(cold pp)* | 3106 | **129.7** | 2201 | **40.6** | 2082 | **36.9** |
-| 2 048 | **3607** | 119.4 | **2301** | 39.1 | **2163** | 35.6 |
+| 0 *(cold pp)* | 3106 | **129.7** | 2219 | **41.4** | 2082 | **36.9** |
+| 2 048 | **3607** | 119.4 | **2314** | 40.3 | **2163** | 35.6 |
 | 8 192 | 3355 | 112.3 | 2186 | 38.3 | 2048 | 34.5 |
 | 16 384 | 3117 | 109.1 | 2081 | 38.3 | 1936 | 33.4 |
-| 32 768 | 2716 | 103.8 | 1900 | 37.1 | 1757 | 32.4 |
+| 32 768 | 2716 | 103.8 | 1912 | 38.0 | 1757 | 32.4 |
 | 49 152 | 2372 | 99.4 | 1725 | 35.5 | 1580 | 30.7 |
-| 75 776 | 1855 | 92.5 | 1435 | 34.3 | — | — |
-| ~96k | 1633 | 87.8 | 1315 | 33.8 | — | — |
-| 129 024 | 1001 | 81.3 | 974 | 32.3 | — | — |
+| 75 776 | 1855 | 92.5 | 1451 | 36.8 | — | — |
+| ~96k | 1633 | 87.8 | 1353 | 36.7 | — | — |
+| 129 024 | 1001 | 81.3 | 981 | 35.3 | — | — |
 
-Both @128k columns are 2026-09-05 re-measurements on ik_llama.cpp `fe215a8c`,
+The Q4 @128k column is a 2026-09-05 measurement on `fe215a8c` and the Q8_0
+@128k column a 2026-09-27 one on `ed27bf7e` (which adds #2374, §55),
 which carries upstream #2404 — attention during generation now runs over the
 cells the sparse indexer selected rather than the whole cache, so generation is
 nearly depth-flat. On the previous build the Q4 profile fell to 62.2 t/s at 96k
@@ -218,7 +219,7 @@ wrong, and this table is what kills it:
 | model + quant | on card | spilled | our tg | verdict vs 2× Spark |
 |---|---:|---:|---:|---|
 | DeepSeek-V4-Flash MXFP4 | ~83 GiB | ~63 GiB | 19.3 | **they win 2–4×** (§4) |
-| Qwen3.8 Q8_0 | 83.6 GiB | **95.9 GiB** | 40.6 | wash |
+| Qwen3.8 Q8_0 | 83.6 GiB | **95.9 GiB** | 41.4 | wash |
 | Qwen3.8 Q4_K_M | 79.7 GiB | 33.9 GiB | **129.7** | **we win ~2×** |
 
 Qwen at Q8_0 spills half again as much as DeepSeek and still generates twice as

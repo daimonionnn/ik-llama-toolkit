@@ -197,19 +197,22 @@ depth. Measured with `llama-sweep-bench` (RESULTS §51, §52), shallow figures,
 |---|---:|---:|---|---|
 | **`qwen38-flash-next-q4km-128k`** *(fastest)* | **3607 tok/s** | **129.7 t/s** | 2716 / 103.8 | 1633 / **87.8** |
 | `qwen38-flash-next-q4km-256k` | 3342 | 128.6 | — | 1346 / 59.7 |
-| **`qwen38-flash-next-q8-128k`** *(default)* | 2301 | 40.6 | 1900 / 37.1 | 1435 / **34.3** |
+| **`qwen38-flash-next-q8-128k`** *(default)* | 2314 | 41.4 | 1912 / 38.0 | 1451 / **36.8** |
 | `qwen38-flash-next-q8-128k-mtp` | −12–15 % | **63–66** code/JSON, 45 prose (<500 tok) | 52.9 code, 39.2 prose | 38.1 code, 31.0 prose (96k) |
 | `qwen38-flash-next-q8-256k` | 2163 | 36.9 | 1757 / 32.4 | — |
 
-The two 128k rows are current, both re-measured 2026-09-05 on ik_llama.cpp
-`fe215a8c`, which carries upstream **#2404**: generation now barely depends on
+The two 128k rows are current: Q8_0 re-measured 2026-09-27 on `ed27bf7e` and Q4
+on 2026-09-05 on `fe215a8c`. Both carry upstream **#2404**: generation now barely depends on
 depth, while prefill is untouched. On Q4 (500 W cap) that is **+54 % at 128k**
 and +41 % at 96k, with nothing below 6 144 tokens where the gather does not
 engage; on Q8_0 (600 W) it is +11 % at 76k, a quarter of the Q4 gain, because
 Q8_0's decode was never bound by the KV cache but by ~96 GiB of experts crossing
 PCIe every token (RESULTS §52, §52.2). That Q8_0 run is also the first to reach
 **129 024** of its 131 072 window without an error; §51's runs all stopped at
-75 776. The two 256k rows are from 2026-09-03 and predate the commit.
+75 776. The two 256k rows are from 2026-09-03 and predate the commit. The Q8_0
+row also carries **#2374**, which added +5 % generation and +9 % at 115k depth
+(§55) — and a warning from the same session: under GNOME's power-saver profile
+this profile loses 15–25 % of generation and the Q4 one loses nothing (§55.1).
 
 **The `-mtp` row is the same Q8_0 profile with the model's own
 multi-token-prediction head drafting three tokens ahead** (RESULTS §54, measured
@@ -257,7 +260,7 @@ flips by model**:
 |---|---:|---:|---|
 | DeepSeek-V4-Flash MXFP4 | 1850 pp / 19.9 tg | 2× Spark: ~1400–1900 pp / 40–53 tg | **they win tg 2–4×** |
 | Qwen3.8 Q4_K_M | **3607 pp / 129.7 tg** | 1× Spark, gpt-oss-120b: 1956 / 60.6 | **we win ~1.8× / ~2.1×** |
-| Qwen3.8 Q8_0 | 2303 pp / **40.6 tg** | 2× Spark FP8: ~1000–1500 / ~36–44 *(est.)* | wash on tg, ours on pp |
+| Qwen3.8 Q8_0 | 2314 pp / **41.4 tg** | 2× Spark FP8: ~1000–1500 / ~36–44 *(est.)* | wash on tg, ours on pp |
 
 What decides it is expert geometry, not the machine: DeepSeek moves 6.49 B
 active parameters per token, Qwen 2.36 B, and decode is bandwidth-bound.
