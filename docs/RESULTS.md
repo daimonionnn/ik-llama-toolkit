@@ -6104,3 +6104,160 @@ Money spent on VRAM or a smaller quant buys multiples; money spent on the CPU
 buys per cent.
 
 Raw data: `results/qwen38-q8-cpu-phase-20260928.log`.
+
+---
+
+## 56. MTP on the 09-27 build: +4–9 % shallow, +10–13 % on code past 96k — the rebase lifts the drafted path as much as plain decode (2026-09-29)
+
+§54 measured MTP on `d5f53d9f`; the clone has since moved to `ed27bf7e` (§55),
+which was measured only without MTP. Re-run here with §54's method and scripts:
+test server on 8091, service down, **500 W**, `performance` power profile, both
+profiles as shipped (`qwen38-flash-next-q8-128k` with `IK_MMPROJ=` so vision does
+not change the placement, and `qwen38-flash-next-q8-128k-mtp`), load log confirms
+`fixed recurrent checkpoint mode = per-step`. §54's `corpus.txt` was not kept;
+`results/qwen38-q8-mtp-corpus-20260929.sh` rebuilds the closest equivalent from
+git (docs as of `af7cf52`, then the five source files) — at 124k tokens it
+reaches only the docs and the first three sources. The 14 upstream commits past
+`ed27bf7e` as of today touch no qwen4exp, speculative or MTP code, so the build
+was not moved for this.
+
+### 56.1 Shallow: MTP +4–9 %, plain decode +1–4 %
+
+t/s at temperature 0 / 0.7; accepted drafts at temperature 0 in parentheses.
+
+| | 09-14 (`d5f53d9f`) | 09-29 (`ed27bf7e`) | Δ |
+|---|---:|---:|---:|
+| no MTP, code | 39.2 / 39.7 | 39.9 / 40.5 | +2 % / +2 % |
+| no MTP, JSON | 39.5 / 39.7 | 39.8 / 41.3 | +1 % / +4 % |
+| no MTP, prose | 39.8 / 40.1 | 39.8 / 40.3 | 0 % / +1 % |
+| **MTP, code** | 63.4 / 64.4 (91 %) | **67.6 / 67.5** (91 %) | **+7 % / +5 %** |
+| **MTP, JSON** | 65.9 / 67.8 (94 %) | **70.1 / 71.4** (97 %) | **+6 % / +5 %** |
+| **MTP, prose** | 45.6 / 44.5 (67 %) | **47.4 / 48.5** (64 %) | **+4 % / +9 %** |
+
+Acceptance did not move — same head, same guesses — so the gain is the price of
+a draft-and-verify step, not how often it lands. MTP over plain decode on this
+build: **+67–69 % code, +73–76 % JSON, +19–20 % prose** (§54: +62 / +67–71 / +11–15).
+
+### 56.2 Depth: prefill cost unchanged, generation up where it had faded
+
+Temperature 0.7, one request per cell — expect ±5 % from sampling alone, and the
+32k code row shows it (acceptance 85 → 81 %, speed 52.9 → 51.2).
+
+| depth | prefill, no MTP → MTP | code tg, no MTP → MTP | prose tg, no MTP → MTP | code / prose acceptance |
+|---|---:|---:|---:|---:|
+| 32k | 1 442 → 1 225 (−15 %) | 37.3 → **51.2** (+37 %) | 37.9 → 42.4 (+12 %) | 81 % / 66 % |
+| 96k | 1 295 → 1 123 (−13 %) | 35.6 → **42.9** (+21 %) | 35.6 → 35.0 (−2 %) | 82 % / 69 % |
+| 124k | 1 208 → 1 054 (−13 %) | 34.6 → **40.7** (+18 %) | 34.4 → 28.9 (−16 %) | 87 % / 60 % |
+
+Against §54.2, MTP generation moved 52.9 → 51.2 / 39.2 → 42.4 at 32k,
+38.1 → **42.9** / 31.0 → **35.0** at 96k and 36.8 → **40.7** / 27.7 → 28.9 at
+124k: **+10–13 % on code past 96k**, prose +4–13 %. Plain decode gained +4–9 %
+over the same depths, matching §55's sweep. Prefill is within 1 % of §54 on
+both profiles, so the MTP prefill tax is still 13–15 %.
+
+The shape is §54's: acceptance holds with depth, the verify batch still misses
+#2404's single-token gather, and **prose crosses below plain decode between 32k
+and 96k**. #2374's indexer saving applies to the 4-token verify graph as well as
+to decode, which is why the two moved together; nothing in the rebase addresses
+the gather-vs-verify gap itself.
+
+**VRAM peak 96 344 MiB** at 124k with MTP (§54: 96 844), 94 258 without. That
+leaves ~1.5 GiB at the bottom of the MTP profile's window — not enough for the
+1.4 GiB the vision projector takes on the served profile.
+
+**Verdict unchanged, numbers better:** MTP is the fastest way to run this Q8_0 for
+short-context code, tool calls and JSON (+67–76 %), and a loss on deep prose.
+Still a separate profile; the default stays `qwen38-flash-next-q8-128k`.
+
+Raw data: `results/qwen38-q8-mtp-series-20260929.log`.
+
+---
+
+## 57. Vision on the MTP profile: the CPU encoder takes 41 s for a Full-HD image, the GPU one 0.33 s — and the GPU's price is one expert layer, −5 % generation (2026-09-29)
+
+The served profile carries the vision projector since today (BF16 mmproj, 0.9 GiB
++ 559 MiB compute buffer on CUDA0). The MTP profile peaks at 96 344 MiB at 124k
+(§56), ~1.5 GiB short of room for it, so two ways in were measured on
+`qwen38-flash-next-q8-128k-mtp`, 500 W, `performance`, `ed27bf7e`:
+
+* **(a)** `-ncmoe 18` as shipped, encoder on the CPU (`--no-mmproj-offload`,
+  default `--threads-mtmd` = 24);
+* **(b)** `-ncmoe 19`, encoder on the GPU.
+
+One photo (`/usr/share/backgrounds/mendhak-Red_Acer.jpg`) at three sizes —
+the encoder's cost depends on pixel count, not content; 3840×2160 is above the
+4 194 304-pixel cap and gets downscaled to it. Three timed requests per size
+with a unique salt before the image (no prefix reuse), median; `encode` and
+`image prefill` from mtmd-helper's log lines, `prompt` from the server timings.
+
+| image | tokens | encode (a) CPU | encode (b) GPU | prompt (a) | prompt (b) |
+|---|---:|---:|---:|---:|---:|
+| 640×400 | 312 | 2 952 ms | **14 ms** | 3.9 s | **0.96 s** |
+| 1920×1080 | 2 094 | 40 985 ms | **334 ms** | 42.9 s | **2.2 s** |
+| 3840×2160 → 4.2 Mpx | 4 134 | 119 829 ms | **1 296 ms** | 123 s | **4.7 s** |
+
+**The CPU encoder is 90–210× slower**, and for anything screenshot-sized it is
+the whole wait: 41 s of a 43 s time-to-first-token at Full HD. Once encoded,
+putting the image tokens through the text model costs the same either way
+(0.55 / 1.35 / 2.7 s — that is prefill, and the extra expert layer in (b) does
+not show at this size). All six descriptions named the same red maple leaf on a
+blurred dark background; the CPU path is correct, just slow. This CPU has no
+AVX-512, so a BF16 ViT has no fast path here; a smaller-type mmproj was not tried.
+
+**What (b) costs text**, same session, temperature 0, identical token streams
+(draft counts match to the token):
+
+| | (a) `-ncmoe 18` | (b) `-ncmoe 19` | Δ |
+|---|---:|---:|---:|
+| code | 65.5 t/s | 62.1 | −5.3 % |
+| JSON extraction | 69.9 | 65.6 | −6.2 % |
+| prose | 45.9 | 43.4 | −5.4 % |
+| prefill at 124k | 1 064.5 | 1 035.0 | −2.8 % |
+
+About twice §54's "~3 % per expert layer", which was measured without MTP;
+with drafting, the host-expert share of each verify step weighs more.
+
+**VRAM:** (a) 95 498 MiB after load, 96 336 peak at 124k — the projector costs
+the card nothing. (b) 94 380 after load, **96 470 peak** at 124k, 1.4 GiB spare —
+the same margin as the MTP profile had without vision, so it fits.
+
+The choice is 5 % of every generated token against ~40 s on every Full-HD image.
+
+Raw data: `results/qwen38-q8-mtp-vision-20260929.log`.
+
+### 57.1 Vision on every Qwen profile: all fit, down to their deepest measured context
+
+After the MTP profile moved to (b), `IK_MMPROJ` went into the other three real
+profiles (the two unsuffixed aliases inherit it). Each was loaded as shipped and
+given the 1920×1080 image (three timed requests + one description), the shallow
+text prompts at temperature 0, and one real-text run as deep as its window and
+the corpus allow — the corpus runs out at **225 571 tokens**, so the 256k
+profiles are verified to 86 % of 262 144, not to the end. VRAM and host
+`MemAvailable` sampled throughout. The served `q8-128k` was measured live on
+8090 before the service went down. Same session, 500 W, `ed27bf7e`.
+
+| profile | VRAM after load | peak (depth) | spare | image, prompt ms | text tg | deep run: pp / tg |
+|---|---:|---:|---:|---:|---:|---|
+| `q4km-128k` | 93 138 | 93 770 (124k) | 4.0 GiB | 991 | 121 | 2 106 / 95.0 |
+| `q4km-256k` | 95 080 | 95 758 (226k) | 2.1 GiB | 1 091 | 118 | 1 334 / 76.7 |
+| `q8-128k` *(default)* | 95 226 | 95 660 (124k) | 2.2 GiB | — | — | 1 217 / 35.0 |
+| `q8-128k-mtp` | 94 380 | 96 470 (124k) | 1.4 GiB | 2 205 | see §57 | see §57 |
+| `q8-256k` | 95 336 | 96 000 (226k) | 1.8 GiB | 2 188 | 36.0 | 904 / 29.2 |
+
+Encoding itself is 335 ms on every profile; the rest of the prompt time is
+prefill of 2 094 image tokens by the text model, ~0.5 s on Q4, ~1.4 s on Q8.
+On `q4km-256k` the image is prefilled in two u-batches (`-ub 1024`). All four
+descriptions named the red maple leaf.
+
+**Vision costs the Q4 profiles and `q8-256k` no weights**: their load logs show
+the same CUDA0 weight buffers and compute buffers as their profile notes
+(79 710 / 9 044 and 8 874; 75 970 / 12 628), so the projector lives in VRAM those
+placements were leaving unused. **Nor does it cost `q8-128k`**: at 124k the live
+service ran 1 217 pp / 35.0 tg against §56's 1 208 / 34.6 without vision. Only
+the MTP profile had to give up an expert layer for it (§57).
+
+Host RAM held on `q8-256k` at 226k — `MemAvailable` bottomed at 119 GiB, far from
+the profile's warning — with the caveat that the last 36k of its window are
+unmeasured here.
+
+Raw data: `results/qwen38-vision-profiles-20260929.log`.

@@ -198,7 +198,7 @@ depth. Measured with `llama-sweep-bench` (RESULTS §51, §52), shallow figures,
 | **`qwen38-flash-next-q4km-128k`** *(fastest)* | **3607 tok/s** | **129.7 t/s** | 2716 / 103.8 | 1633 / **87.8** |
 | `qwen38-flash-next-q4km-256k` | 3342 | 128.6 | — | 1346 / 59.7 |
 | **`qwen38-flash-next-q8-128k`** *(default)* | 2314 | 41.4 | 1912 / 38.0 | 1451 / **36.8** |
-| `qwen38-flash-next-q8-128k-mtp` | −12–15 % | **63–66** code/JSON, 45 prose (<500 tok) | 52.9 code, 39.2 prose | 38.1 code, 31.0 prose (96k) |
+| `qwen38-flash-next-q8-128k-mtp` | −15–18 % | **62–66** code/JSON, 43 prose (<500 tok) | 51.2 code, 42.4 prose | 42.9 code, 35.0 prose (96k) |
 | `qwen38-flash-next-q8-256k` | 2163 | 36.9 | 1757 / 32.4 | — |
 
 The two 128k rows are current: Q8_0 re-measured 2026-09-27 on `ed27bf7e` and Q4
@@ -216,14 +216,27 @@ this profile loses 15–25 % of generation and the Q4 one loses nothing (§55.1)
 
 **The `-mtp` row is the same Q8_0 profile with the model's own
 multi-token-prediction head drafting three tokens ahead** (RESULTS §54, measured
-2026-09-14, a separate 2.4 GiB head file — download line in the profile). Its
-depth columns are real-text runs, not sweep-bench. Generation roughly +60–70 % on
-code and JSON in short contexts, +12 % on prose; the gain fades with depth, and
+2026-09-14 and again on the 09-27 build in §56, a separate 2.4 GiB head file —
+download line in the profile). Its depth columns are real-text runs, not
+sweep-bench, and were taken at `-ncmoe 18` before vision cost it a layer (expect
+~5 % less). Generation +67–76 % on code and JSON in short contexts, +20 % on
+prose, against the same profile without MTP; the gain fades with depth, and
 past ~96k prose is slower than without it, because verifying a draft is a
 multi-token batch and upstream #2404's depth fix only engages for single tokens.
-Prefill is 12–15 % slower everywhere. Needs ik_llama.cpp with #2412 (per-step
-checkpoints), and one expert layer more on the host (`-ncmoe 18`). Not the
-default, not soaked.
+Prefill is 13–15 % slower everywhere (§56), ~3 % more with the vision layer.
+Needs ik_llama.cpp with #2412 (per-step checkpoints), and two expert layers more
+on the host (`-ncmoe 19`: one for the head, one since 2026-09-29 for the vision
+encoder, §57). Not the default, not soaked.
+
+**Vision, on every Qwen profile since 2026-09-29.** `IK_MMPROJ` loads the model's
+own projector (`mmproj-Qwen3.8-Flash-Next-BF16.gguf`, 0.9 GiB, beside the
+weights); images go in as OpenAI `image_url` content parts. A 1920×1080 image
+encodes in 0.33 s and reaches the first token in ~1 s on Q4, ~2.2 s on Q8. It
+costs the other profiles nothing — the projector sits in VRAM their placements
+left free, verified to 124k and 226k depth — and the MTP profile one expert
+layer, −5 % generation; the CPU-encoder alternative took 41 s per image (RESULTS
+§57, §57.1). `/v1/models` always says `input_modalities: ["text"]`, hardcoded
+upstream; `/props` has the real flag. `IK_MMPROJ=` serves text-only.
 
 The first draft of the Q4 profile, with the settings carried over from DeepSeek
 (`-ncmoe 13 -ub 4096`), measured 2753 tok/s and 60.6 t/s; tuning was worth
@@ -486,7 +499,7 @@ ik-llama-toolkit/
 ├── serve-qwen38-flash-next-q4km-128k.sh   3607 pp / 129.7 tg, 4-bit -- the fastest of all
 ├── serve-qwen38-flash-next-q4km-256k.sh   3342 / 128.6
 ├── serve-qwen38-flash-next-q8-128k.sh     2303 / 40.6, the quality reference
-├── serve-qwen38-flash-next-q8-128k-mtp.sh + MTP head: ~64 tg on code/JSON, 45 on prose
+├── serve-qwen38-flash-next-q8-128k-mtp.sh + MTP head: ~62–66 tg on code/JSON, 43 on prose
 ├── serve-qwen38-flash-next-q8-256k.sh     2163 / 36.9
 ├── serve-step-3.7-flash-q8.sh             Step-3.7-Flash Q8_K_XL, ~13 tg
 │

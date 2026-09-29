@@ -1,0 +1,37 @@
+power: 500.00 W  profile: performance  clone: ed27bf7e quantize: process large tensors in slabs (#2537)  corpus sha256: 87dc7ac75e76014b
+== base-n17 profile=qwen38-flash-next-q8-128k env='IK_MMPROJ='
+   ncmoe 17
+-- temp 0
+code     tokens= 387 tg= 39.86 t/s  draft_n=- accepted=-  wall= 10.1s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Tuple\n\n\n'
+prose    tokens= 400 tg= 39.77 t/s  draft_n=- accepted=-  wall= 10.4s | 'Elias had spent forty years listening to the sea. His world was define'
+extract  tokens= 113 tg= 39.81 t/s  draft_n=- accepted=-  wall=  3.4s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+-- temp 0.7
+code     tokens= 400 tg= 40.46 t/s  draft_n=- accepted=-  wall= 10.4s | '```python\nimport csv\nfrom typing import Dict, List, Union\n\n\ndef analyz'
+prose    tokens= 400 tg= 40.31 t/s  draft_n=- accepted=-  wall= 10.3s | 'The storm had been raging for three days, a relentless assault of wind'
+extract  tokens= 118 tg= 41.33 t/s  draft_n=- accepted=-  wall=  3.5s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+{"label": "d-base-n17", "depth": 32000, "task": "code", "prompt_n": 32037, "pp": 1442.1, "gen_n": 400, "tg": 37.27, "draft_n": null, "accepted": null, "wall": 33.1}
+{"label": "d-base-n17", "depth": 32000, "task": "prose", "prompt_n": 1293, "pp": 771.2, "gen_n": 368, "tg": 37.9, "draft_n": null, "accepted": null, "wall": 11.4}
+{"label": "d-base-n17", "depth": 96000, "task": "code", "prompt_n": 94335, "pp": 1294.5, "gen_n": 400, "tg": 35.56, "draft_n": null, "accepted": null, "wall": 85.1}
+{"label": "d-base-n17", "depth": 96000, "task": "prose", "prompt_n": 2151, "pp": 840.6, "gen_n": 385, "tg": 35.58, "draft_n": null, "accepted": null, "wall": 13.5}
+{"label": "d-base-n17", "depth": 124000, "task": "code", "prompt_n": 124653, "pp": 1207.9, "gen_n": 400, "tg": 34.55, "draft_n": null, "accepted": null, "wall": 116.6}
+{"label": "d-base-n17", "depth": 124000, "task": "prose", "prompt_n": 7893, "pp": 938.0, "gen_n": 377, "tg": 34.38, "draft_n": null, "accepted": null, "wall": 19.5}
+   vram peak: 94258 MiB
+== mtp-perstep profile=qwen38-flash-next-q8-128k-mtp env=''
+   fixed recurrent checkpoint mode = per-step
+   ncmoe 18
+-- temp 0
+code     tokens= 400 tg= 67.55 t/s  draft_n=308 accepted=279  wall=  6.5s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Union\n\n\n'
+prose    tokens= 400 tg= 47.36 t/s  draft_n=299 accepted=191  wall=  8.8s | 'Elias had spent forty years listening to the ocean’s breath. His light'
+extract  tokens= 113 tg= 70.11 t/s  draft_n=86 accepted=83  wall=  2.3s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+-- temp 0.7
+code     tokens= 331 tg= 67.52 t/s  draft_n=254 accepted=233  wall=  5.4s | '```python\nimport csv\nfrom typing import Dict, List, Union\n\ndef analyze'
+prose    tokens= 400 tg= 48.46 t/s  draft_n=289 accepted=185  wall=  8.6s | 'Elias had spent forty years listening to the ocean’s breath. His light'
+extract  tokens= 173 tg= 71.43 t/s  draft_n=130 accepted=128  wall=  3.1s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+{"label": "d-mtp-perstep", "depth": 32000, "task": "code", "prompt_n": 32037, "pp": 1225.2, "gen_n": 400, "tg": 51.17, "draft_n": 302, "accepted": 243, "wall": 34.2}
+{"label": "d-mtp-perstep", "depth": 32000, "task": "prose", "prompt_n": 1293, "pp": 691.8, "gen_n": 400, "tg": 42.43, "draft_n": 321, "accepted": 211, "wall": 11.3}
+{"label": "d-mtp-perstep", "depth": 96000, "task": "code", "prompt_n": 94335, "pp": 1123.2, "gen_n": 301, "tg": 42.88, "draft_n": 239, "accepted": 196, "wall": 91.9}
+{"label": "d-mtp-perstep", "depth": 96000, "task": "prose", "prompt_n": 2151, "pp": 759.9, "gen_n": 360, "tg": 34.96, "draft_n": 270, "accepted": 186, "wall": 13.2}
+{"label": "d-mtp-perstep", "depth": 124000, "task": "code", "prompt_n": 124653, "pp": 1054.3, "gen_n": 400, "tg": 40.66, "draft_n": 305, "accepted": 264, "wall": 129.9}
+{"label": "d-mtp-perstep", "depth": 124000, "task": "prose", "prompt_n": 3797, "pp": 798.6, "gen_n": 333, "tg": 28.93, "draft_n": 247, "accepted": 149, "wall": 16.4}
+   vram peak: 96344 MiB
+done

@@ -1,0 +1,53 @@
+power: 500.00 W  profile: performance  clone: ed27bf7e quantize: process large tensors in slabs (#2537)
+== a-cpu-enc-n18  serve.sh qwen38-flash-next-q8-128k-mtp -- --no-mmproj-offload
+   alloc_compute_meta:        CPU compute buffer size =   558.58 MiB
+   clip_ctx: CLIP using CPU backend
+   fixed recurrent checkpoint mode = per-step
+   warmup: warmup with image size = 1472 x 1472
+   vram after load: 95498 MiB
+{"label": "a-cpu-enc-n18", "image": "img-640x400.jpg", "rep": 0, "prompt_n": 312, "prompt_ms": 4083, "wall_s": 4.11, "preprocess_ms": [3599], "encode_ms": [3031], "img_prefill_ms": [552]}
+{"label": "a-cpu-enc-n18", "image": "img-640x400.jpg", "rep": 1, "prompt_n": 312, "prompt_ms": 3933, "wall_s": 4.06, "preprocess_ms": [3571], "encode_ms": [2993], "img_prefill_ms": [568]}
+{"label": "a-cpu-enc-n18", "image": "img-640x400.jpg", "rep": 2, "prompt_n": 312, "prompt_ms": 3783, "wall_s": 3.91, "preprocess_ms": [3441], "encode_ms": [2952], "img_prefill_ms": [484]}
+{"label": "a-cpu-enc-n18", "image": "img-640x400.jpg", "rep": 3, "prompt_n": 314, "prompt_ms": 3910, "wall_s": 5.29, "preprocess_ms": [3466], "encode_ms": [2908], "img_prefill_ms": [553], "tg": 49.57, "text": "This image features a sharply focused, vibrant red Japanese maple leaf at its center, with delicate veins and serrated edges catching the light. The background is softly blurred into deep maroon and shadowy tones, creati"}
+{"label": "a-cpu-enc-n18", "image": "img-1920x1080.jpg", "rep": 0, "prompt_n": 2094, "prompt_ms": 42412, "wall_s": 42.59, "preprocess_ms": [42023], "encode_ms": [40236], "img_prefill_ms": [1676]}
+{"label": "a-cpu-enc-n18", "image": "img-1920x1080.jpg", "rep": 1, "prompt_n": 2094, "prompt_ms": 42769, "wall_s": 42.96, "preprocess_ms": [42023], "encode_ms": [40604], "img_prefill_ms": [1334]}
+{"label": "a-cpu-enc-n18", "image": "img-1920x1080.jpg", "rep": 2, "prompt_n": 2094, "prompt_ms": 43046, "wall_s": 43.23, "preprocess_ms": [42655], "encode_ms": [41229], "img_prefill_ms": [1337]}
+{"label": "a-cpu-enc-n18", "image": "img-1920x1080.jpg", "rep": 3, "prompt_n": 2095, "prompt_ms": 42852, "wall_s": 44.55, "preprocess_ms": [42407], "encode_ms": [40985], "img_prefill_ms": [1338], "tg": 43.67, "text": "This image features a single, sharply focused red maple leaf in the foreground, its delicate veins and serrated edges highlighted against a softly blurred background of similar crimson foliage. The shallow depth of field"}
+{"label": "a-cpu-enc-n18", "image": "img-3840x2160.jpg", "rep": 0, "prompt_n": 4134, "prompt_ms": 124026, "wall_s": 124.34, "preprocess_ms": [123600], "encode_ms": [120338], "img_prefill_ms": [1755, 1317]}
+{"label": "a-cpu-enc-n18", "image": "img-3840x2160.jpg", "rep": 1, "prompt_n": 4133, "prompt_ms": 123062, "wall_s": 123.39, "preprocess_ms": [122702], "encode_ms": [119829], "img_prefill_ms": [1365, 1335]}
+{"label": "a-cpu-enc-n18", "image": "img-3840x2160.jpg", "rep": 2, "prompt_n": 4134, "prompt_ms": 123205, "wall_s": 123.53, "preprocess_ms": [122808], "encode_ms": [119948], "img_prefill_ms": [1362, 1326]}
+{"label": "a-cpu-enc-n18", "image": "img-3840x2160.jpg", "rep": 3, "prompt_n": 4134, "prompt_ms": 122927, "wall_s": 124.72, "preprocess_ms": [122553], "encode_ms": [119701], "img_prefill_ms": [1357, 1318], "tg": 46.61, "text": "This image features a single, sharply focused crimson maple leaf in the foreground, its delicate veins and serrated edges highlighted against a softly blurred background of similar red and dark-toned foliage. The shallow"}
+-- text, temp 0
+code     tokens= 400 tg= 65.53 t/s  draft_n=308 accepted=279  wall=  6.6s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Union\n\n\n'
+prose    tokens= 400 tg= 45.90 t/s  draft_n=301 accepted=192  wall=  9.1s | 'Elias had spent forty years listening to the ocean’s breath. His light'
+extract  tokens= 113 tg= 69.91 t/s  draft_n=86 accepted=83  wall=  2.2s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+{"label": "d-a-cpu-enc-n18", "depth": 124000, "task": "code", "prompt_n": 124656, "pp": 1064.5, "gen_n": 400, "tg": 36.39, "draft_n": 314, "accepted": 248, "wall": 128.4}
+{"label": "d-a-cpu-enc-n18", "depth": 124000, "task": "prose", "prompt_n": 3800, "pp": 801.9, "gen_n": 346, "tg": 30.45, "draft_n": 273, "accepted": 184, "wall": 16.3}
+   vram peak: 96336 MiB
+== b-gpu-enc-n19  serve.sh --ncmoe 19 qwen38-flash-next-q8-128k-mtp
+   alloc_compute_meta:        CPU compute buffer size =    24.93 MiB
+   alloc_compute_meta:      CUDA0 compute buffer size =   558.58 MiB
+   clip_ctx: CLIP using CUDA0 backend
+   fixed recurrent checkpoint mode = per-step
+   warmup: warmup with image size = 1472 x 1472
+   vram after load: 94380 MiB
+{"label": "b-gpu-enc-n19", "image": "img-640x400.jpg", "rep": 0, "prompt_n": 312, "prompt_ms": 1175, "wall_s": 1.2, "preprocess_ms": [687], "encode_ms": [47], "img_prefill_ms": [624]}
+{"label": "b-gpu-enc-n19", "image": "img-640x400.jpg", "rep": 1, "prompt_n": 312, "prompt_ms": 963, "wall_s": 1.09, "preprocess_ms": [585], "encode_ms": [14], "img_prefill_ms": [561]}
+{"label": "b-gpu-enc-n19", "image": "img-640x400.jpg", "rep": 2, "prompt_n": 312, "prompt_ms": 914, "wall_s": 1.04, "preprocess_ms": [559], "encode_ms": [13], "img_prefill_ms": [541]}
+{"label": "b-gpu-enc-n19", "image": "img-640x400.jpg", "rep": 3, "prompt_n": 313, "prompt_ms": 1052, "wall_s": 2.78, "preprocess_ms": [676], "encode_ms": [14], "img_prefill_ms": [657], "tg": 44.28, "text": "This image features a sharply focused, vibrant red Japanese maple leaf at its center, with delicate serrated edges and prominent veins catching the light. Surrounding it, other maple leaves blur into a soft, dark backgro"}
+{"label": "b-gpu-enc-n19", "image": "img-1920x1080.jpg", "rep": 0, "prompt_n": 2094, "prompt_ms": 2613, "wall_s": 2.79, "preprocess_ms": [2160], "encode_ms": [372], "img_prefill_ms": [1678]}
+{"label": "b-gpu-enc-n19", "image": "img-1920x1080.jpg", "rep": 1, "prompt_n": 2094, "prompt_ms": 2181, "wall_s": 2.37, "preprocess_ms": [1801], "encode_ms": [334], "img_prefill_ms": [1385]}
+{"label": "b-gpu-enc-n19", "image": "img-1920x1080.jpg", "rep": 2, "prompt_n": 2094, "prompt_ms": 2213, "wall_s": 2.4, "preprocess_ms": [1805], "encode_ms": [334], "img_prefill_ms": [1387]}
+{"label": "b-gpu-enc-n19", "image": "img-1920x1080.jpg", "rep": 3, "prompt_n": 2095, "prompt_ms": 2205, "wall_s": 4.0, "preprocess_ms": [1802], "encode_ms": [334], "img_prefill_ms": [1385], "tg": 43.48, "text": "This image features a single, sharply focused red maple leaf in the foreground, its delicate veins and serrated edges vividly detailed against a softly blurred background of similar crimson foliage. The shallow depth of "}
+{"label": "b-gpu-enc-n19", "image": "img-3840x2160.jpg", "rep": 0, "prompt_n": 4134, "prompt_ms": 5029, "wall_s": 5.35, "preprocess_ms": [4645], "encode_ms": [1343], "img_prefill_ms": [1741, 1370]}
+{"label": "b-gpu-enc-n19", "image": "img-3840x2160.jpg", "rep": 1, "prompt_n": 4135, "prompt_ms": 4626, "wall_s": 4.96, "preprocess_ms": [4242], "encode_ms": [1293], "img_prefill_ms": [1412, 1370]}
+{"label": "b-gpu-enc-n19", "image": "img-3840x2160.jpg", "rep": 2, "prompt_n": 4134, "prompt_ms": 4702, "wall_s": 5.03, "preprocess_ms": [4251], "encode_ms": [1297], "img_prefill_ms": [1415, 1376]}
+{"label": "b-gpu-enc-n19", "image": "img-3840x2160.jpg", "rep": 3, "prompt_n": 4135, "prompt_ms": 4668, "wall_s": 6.36, "preprocess_ms": [4241], "encode_ms": [1296], "img_prefill_ms": [1410, 1371], "tg": 40.45, "text": "This image features a single, sharply focused crimson maple leaf with delicate, serrated edges, set against a softly blurred background of similar red and burgundy foliage. The shallow depth of field isolates the leaf, e"}
+-- text, temp 0
+code     tokens= 400 tg= 62.05 t/s  draft_n=307 accepted=278  wall=  6.9s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Union\n\n\n'
+prose    tokens= 400 tg= 43.44 t/s  draft_n=294 accepted=192  wall=  9.6s | 'Elias had spent forty years listening to the ocean’s breath. His light'
+extract  tokens= 113 tg= 65.56 t/s  draft_n=85 accepted=83  wall=  2.3s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+{"label": "d-b-gpu-enc-n19", "depth": 124000, "task": "code", "prompt_n": 124656, "pp": 1035.0, "gen_n": 334, "tg": 39.46, "draft_n": 255, "accepted": 225, "wall": 129.2}
+{"label": "d-b-gpu-enc-n19", "depth": 124000, "task": "prose", "prompt_n": 3800, "pp": 784.4, "gen_n": 352, "tg": 28.97, "draft_n": 261, "accepted": 181, "wall": 17.2}
+   vram peak: 96470 MiB
+done

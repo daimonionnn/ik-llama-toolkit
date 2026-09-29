@@ -1,0 +1,65 @@
+power: 500.00 W  profile: performance  clone: ed27bf7e quantize: process large tensors in slabs (#2537)
+== q8-128k (live service on 8090)
+   vram now: 95226 MiB
+{"label": "d-q8-128k", "depth": 124000, "task": "code", "prompt_n": 124656, "pp": 1216.6, "gen_n": 373, "tg": 34.98, "draft_n": null, "accepted": null, "wall": 113.2}
+{"label": "d-q8-128k", "depth": 124000, "task": "prose", "prompt_n": 7896, "pp": 941.9, "gen_n": 399, "tg": 35.13, "draft_n": null, "accepted": null, "wall": 19.9}
+   vram peak: 95660 MiB   host MemAvailable min: 130765 MiB
+== q4km-128k  profile=qwen38-flash-next-q4km-128k
+   llm_load_tensors:        CPU buffer size = 33910.51 MiB
+   llm_load_tensors:      CUDA0 buffer size = 79710.03 MiB
+   llama_init_from_model: KV self size  = 1632.00 MiB, K (q8_0):  816.00 MiB, V (q8_0):  816.00 MiB
+   llama_init_from_model:      CUDA0 compute buffer size =  9044.01 MiB
+   clip_ctx: CLIP using CUDA0 backend
+   alloc_compute_meta:      CUDA0 compute buffer size =   558.58 MiB
+   vram after load: 93138 MiB
+{"label": "q4km-128k", "image": "img-1920x1080.jpg", "rep": 0, "prompt_n": 2094, "prompt_ms": 1166, "wall_s": 1.23, "preprocess_ms": [937], "encode_ms": [403], "img_prefill_ms": [533]}
+{"label": "q4km-128k", "image": "img-1920x1080.jpg", "rep": 1, "prompt_n": 2094, "prompt_ms": 991, "wall_s": 1.18, "preprocess_ms": [854], "encode_ms": [335], "img_prefill_ms": [519]}
+{"label": "q4km-128k", "image": "img-1920x1080.jpg", "rep": 2, "prompt_n": 2094, "prompt_ms": 993, "wall_s": 1.18, "preprocess_ms": [855], "encode_ms": [335], "img_prefill_ms": [520]}
+{"label": "q4km-128k", "image": "img-1920x1080.jpg", "rep": 3, "prompt_n": 2095, "prompt_ms": 992, "wall_s": 1.74, "preprocess_ms": [855], "encode_ms": [335], "img_prefill_ms": [520], "tg": 113.4, "text": "A single, vibrant red Japanese maple leaf is in sharp focus at the center of the image, its delicate, serrated edges and intricate veins clearly visible. The background is a soft, dreamy blur of deep reds and dark tones,"}
+-- text, temp 0
+code     tokens= 350 tg=120.85 t/s  draft_n=- accepted=-  wall=  3.1s | '```python\nimport csv\nfrom typing import Dict, List, Union\n\n\ndef comput'
+prose    tokens= 400 tg=120.92 t/s  draft_n=- accepted=-  wall=  3.5s | 'The fog had been thick for three days, a suffocating gray blanket that'
+extract  tokens= 113 tg=121.89 t/s  draft_n=- accepted=-  wall=  1.2s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+{"label": "d-q4km-128k", "depth": 124000, "task": "code", "prompt_n": 124656, "pp": 2106.4, "gen_n": 400, "tg": 94.98, "draft_n": null, "accepted": null, "wall": 63.6}
+{"label": "d-q4km-128k", "depth": 124000, "task": "prose", "prompt_n": 7896, "pp": 1436.0, "gen_n": 348, "tg": 95.13, "draft_n": null, "accepted": null, "wall": 9.3}
+   vram peak: 93770 MiB   host MemAvailable min: 225341 MiB
+== q4km-256k  profile=qwen38-flash-next-q4km-256k
+   llm_load_tensors:        CPU buffer size = 33910.51 MiB
+   llm_load_tensors:      CUDA0 buffer size = 79710.03 MiB
+   llama_init_from_model: KV self size  = 3264.00 MiB, K (q8_0): 1632.00 MiB, V (q8_0): 1632.00 MiB
+   llama_init_from_model:      CUDA0 compute buffer size =  8874.00 MiB
+   clip_ctx: CLIP using CUDA0 backend
+   alloc_compute_meta:      CUDA0 compute buffer size =   558.58 MiB
+   vram after load: 95080 MiB
+{"label": "q4km-256k", "image": "img-1920x1080.jpg", "rep": 0, "prompt_n": 2094, "prompt_ms": 1254, "wall_s": 1.32, "preprocess_ms": [1030], "encode_ms": [407], "img_prefill_ms": [245, 378]}
+{"label": "q4km-256k", "image": "img-1920x1080.jpg", "rep": 1, "prompt_n": 2094, "prompt_ms": 1091, "wall_s": 1.29, "preprocess_ms": [956], "encode_ms": [337], "img_prefill_ms": [248, 371]}
+{"label": "q4km-256k", "image": "img-1920x1080.jpg", "rep": 2, "prompt_n": 2094, "prompt_ms": 1090, "wall_s": 1.28, "preprocess_ms": [955], "encode_ms": [338], "img_prefill_ms": [246, 371]}
+{"label": "q4km-256k", "image": "img-1920x1080.jpg", "rep": 3, "prompt_n": 2095, "prompt_ms": 1093, "wall_s": 1.72, "preprocess_ms": [952], "encode_ms": [337], "img_prefill_ms": [248, 367], "tg": 110.18, "text": "A vibrant, sharply focused red maple leaf with delicate, serrated edges stands out against a softly blurred background of similar crimson foliage. The shallow depth of field isolates the central leaf, emphasizing its int"}
+-- text, temp 0
+code     tokens= 350 tg=117.20 t/s  draft_n=- accepted=-  wall=  3.2s | '```python\nimport csv\nfrom typing import Dict, List, Union\n\n\ndef comput'
+prose    tokens= 400 tg=117.55 t/s  draft_n=- accepted=-  wall=  3.6s | 'The fog had been thick for three days, a suffocating gray blanket that'
+extract  tokens= 113 tg=118.87 t/s  draft_n=- accepted=-  wall=  1.2s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+{"label": "d-q4km-256k", "depth": 250000, "task": "code", "prompt_n": 225571, "pp": 1333.7, "gen_n": 400, "tg": 76.73, "draft_n": null, "accepted": null, "wall": 174.7}
+{"label": "d-q4km-256k", "depth": 250000, "task": "prose", "prompt_n": 1291, "pp": 715.2, "gen_n": 343, "tg": 78.11, "draft_n": null, "accepted": null, "wall": 6.4}
+   vram peak: 95758 MiB   host MemAvailable min: 225129 MiB
+== q8-256k  profile=qwen38-flash-next-q8-256k
+   llm_load_tensors:  CUDA_Host buffer size = 103524.27 MiB
+   llm_load_tensors:      CUDA0 buffer size = 75970.58 MiB
+   llama_init_from_model: KV self size  = 3264.00 MiB, K (q8_0): 1632.00 MiB, V (q8_0): 1632.00 MiB
+   llama_init_from_model:      CUDA0 compute buffer size = 12628.01 MiB
+   clip_ctx: CLIP using CUDA0 backend
+   alloc_compute_meta:      CUDA0 compute buffer size =   558.58 MiB
+   vram after load: 95336 MiB
+{"label": "q8-256k", "image": "img-1920x1080.jpg", "rep": 0, "prompt_n": 2094, "prompt_ms": 2279, "wall_s": 2.34, "preprocess_ms": [1846], "encode_ms": [401], "img_prefill_ms": [1445]}
+{"label": "q8-256k", "image": "img-1920x1080.jpg", "rep": 1, "prompt_n": 2093, "prompt_ms": 2187, "wall_s": 2.38, "preprocess_ms": [1762], "encode_ms": [334], "img_prefill_ms": [1428]}
+{"label": "q8-256k", "image": "img-1920x1080.jpg", "rep": 2, "prompt_n": 2093, "prompt_ms": 2188, "wall_s": 2.37, "preprocess_ms": [1762], "encode_ms": [334], "img_prefill_ms": [1428]}
+{"label": "q8-256k", "image": "img-1920x1080.jpg", "rep": 3, "prompt_n": 2094, "prompt_ms": 2204, "wall_s": 4.28, "preprocess_ms": [1765], "encode_ms": [334], "img_prefill_ms": [1431], "tg": 34.9, "text": "This image features a single, sharply focused crimson maple leaf in the foreground, its delicate veins and serrated edges highlighted against a softly blurred background of similar red foliage. The shallow depth of field"}
+-- text, temp 0
+code     tokens= 400 tg= 35.48 t/s  draft_n=- accepted=-  wall= 11.7s | '```python\nimport csv\nfrom typing import Dict, List, Optional, Union\n\n\n'
+prose    tokens= 400 tg= 36.36 t/s  draft_n=- accepted=-  wall= 11.4s | 'Elias had spent forty years listening to the sea. It was a rhythmic, i'
+extract  tokens= 113 tg= 36.17 t/s  draft_n=- accepted=-  wall=  3.7s | '```json\n{\n  "persons": [\n    "Anna Novak",\n    "Peter Kral",\n    "Mari'
+{"label": "d-q8-256k", "depth": 250000, "task": "code", "prompt_n": 225570, "pp": 904.4, "gen_n": 400, "tg": 29.18, "draft_n": null, "accepted": null, "wall": 263.5}
+{"label": "d-q8-256k", "depth": 250000, "task": "prose", "prompt_n": 6410, "pp": 596.4, "gen_n": 366, "tg": 29.68, "draft_n": null, "accepted": null, "wall": 23.3}
+   vram peak: 96000 MiB   host MemAvailable min: 119406 MiB
+done
+service restarted
