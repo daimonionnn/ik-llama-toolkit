@@ -185,10 +185,15 @@ were measured correctly and read wrongly, are in
 ### Qwen3.8-Flash-Next — the current default
 
 A hybrid SSM/attention MoE — 176.9 B parameters, 512 experts with 10 used, and
-full attention on only every fourth of its 48 layers. The Q8_0 profile
-(`qwen38-flash-next-q8-128k`) is what `./serve.sh` and the systemd unit serve
-since **2026-09-05**; it also held the slot for one day on 2026-09-03 before
-DeepSeek took it back with the mask patch. What changed in between is upstream
+full attention on only every fourth of its 48 layers. Since **2026-09-29** the
+default — what `./serve.sh` and the systemd unit serve — is the Q8_0 **MTP**
+profile (`qwen38-flash-next-q8-128k-mtp`), on trial against real Hermes traffic:
+the estimate from 963 logged requests is only ~+6 %, because Hermes output is
+mostly reasoning and prose and its contexts run deep (see `config/default.env`
+for how to judge the trial and how to go back). Before it, the plain Q8_0
+profile (`qwen38-flash-next-q8-128k`) served from **2026-09-05**; it also held
+the slot for one day on 2026-09-03 before DeepSeek took it back with the mask
+patch. What changed in between is upstream
 #2404 (§52), which makes generation on this architecture nearly independent of
 depth. Measured with `llama-sweep-bench` (RESULTS §51, §52), shallow figures,
 `-ctk/-ctv q8_0`:
@@ -197,8 +202,8 @@ depth. Measured with `llama-sweep-bench` (RESULTS §51, §52), shallow figures,
 |---|---:|---:|---|---|
 | **`qwen38-flash-next-q4km-128k`** *(fastest)* | **3607 tok/s** | **129.7 t/s** | 2716 / 103.8 | 1633 / **87.8** |
 | `qwen38-flash-next-q4km-256k` | 3342 | 128.6 | — | 1346 / 59.7 |
-| **`qwen38-flash-next-q8-128k`** *(default)* | 2314 | 41.4 | 1912 / 38.0 | 1451 / **36.8** |
-| `qwen38-flash-next-q8-128k-mtp` | −15–18 % | **62–66** code/JSON, 43 prose (<500 tok) | 51.2 code, 42.4 prose | 42.9 code, 35.0 prose (96k) |
+| **`qwen38-flash-next-q8-128k`** | 2314 | 41.4 | 1912 / 38.0 | 1451 / **36.8** |
+| **`qwen38-flash-next-q8-128k-mtp`** *(default, trial)* | −15–18 % | **62–66** code/JSON, 43 prose (<500 tok) | 51.2 code, 42.4 prose | 42.9 code, 35.0 prose (96k) |
 | `qwen38-flash-next-q8-256k` | 2163 | 36.9 | 1757 / 32.4 | — |
 
 The two 128k rows are current: Q8_0 re-measured 2026-09-27 on `ed27bf7e` and Q4
@@ -369,7 +374,7 @@ the CPU and roughly halves your token rate.
 ## Usage
 
 ```bash
-./serve.sh                                      # the default: Qwen3.8-Flash-Next Q8_0 at 131072, ~2303 pp / 40.6 tg
+./serve.sh                                      # the default: Qwen3.8-Flash-Next Q8_0 + MTP + vision, ~62-66 tg on code/JSON
 ./serve.sh deepseek-v4-flash-gpu-experts-128k   # any profile by name; --list shows them all
 ./serve.sh qwen38-flash-next-q4km-128k          # the fastest thing here: 3607 pp / 129.7 tg, 4-bit
 ./serve.sh step-3.7-flash-q4                    # the original default, ~25 tg
